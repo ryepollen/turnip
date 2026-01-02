@@ -42,6 +42,14 @@ type Conf struct {
 			Command  string        `yaml:"command"`
 		} `yaml:"ytdlp_update"`
 	} `yaml:"youtube"`
+
+	TelegramBot struct {
+		Enabled       bool   `yaml:"enabled"`
+		AllowedUserID int64  `yaml:"allowed_user_id"`
+		FeedName      string `yaml:"feed_name"`
+		FeedTitle     string `yaml:"feed_title"`
+		MaxItems      int    `yaml:"max_items"`
+	} `yaml:"telegram_bot"`
 }
 
 // Source defines config section for source
@@ -194,4 +202,14 @@ func (c *Conf) setDefaults() {
 		c.YouTube.RSSLocation = "var/rss"
 	}
 
+	// set telegram bot defaults
+	if c.TelegramBot.FeedName == "" {
+		c.TelegramBot.FeedName = "manual"
+	}
+	if c.TelegramBot.FeedTitle == "" {
+		c.TelegramBot.FeedTitle = "My YouTube Podcast"
+	}
+	if c.TelegramBot.MaxItems == 0 {
+		c.TelegramBot.MaxItems = 100
+	}
 }

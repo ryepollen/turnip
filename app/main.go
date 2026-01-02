@@ -145,6 +145,47 @@ func main() {
 		}()
 	}
 
+	// Initialize Telegram Bot for manual video additions
+	if conf.TelegramBot.Enabled && opts.TelegramToken != "" && conf.TelegramBot.AllowedUserID != 0 {
+		log.Printf("[INFO] starting telegram bot for user %d, feed: %s", conf.TelegramBot.AllowedUserID, conf.TelegramBot.FeedName)
+
+		// Ensure ytStore and downloader are initialized for the bot
+		if ytStore == nil {
+			channels := []string{conf.TelegramBot.FeedName}
+			ytStore = &store.BoltDB{DB: db, Channels: channels}
+		} else {
+			// Add manual feed channel to existing store
+			ytStore.Channels = append(ytStore.Channels, conf.TelegramBot.FeedName)
+		}
+
+		outWr := log.ToWriter(log.Default(), "DEBUG")
+		errWr := log.ToWriter(log.Default(), "INFO")
+		botDownloader := ytfeed.NewDownloader(conf.YouTube.DlTemplate, outWr, errWr, conf.YouTube.FilesLocation)
+
+		tgBot, err := proc.NewTelegramBot(proc.TelegramBotParams{
+			Token:         opts.TelegramToken,
+			APIURL:        opts.TelegramServer,
+			AllowedUserID: conf.TelegramBot.AllowedUserID,
+			FeedName:      conf.TelegramBot.FeedName,
+			FeedTitle:     conf.TelegramBot.FeedTitle,
+			MaxItems:      conf.TelegramBot.MaxItems,
+			Downloader:    botDownloader,
+			Store:         ytStore,
+			DurationSvc:   &duration.Service{},
+			FilesLocation: conf.YouTube.FilesLocation,
+			BaseURL:       conf.System.BaseURL,
+		})
+		if err != nil {
+			log.Printf("[ERROR] failed to create telegram bot: %v", err)
+		} else {
+			go func() {
+				if err := tgBot.Run(context.Background()); err != nil {
+					log.Printf("[ERROR] telegram bot failed: %v", err)
+				}
+			}()
+		}
+	}
+
 	if opts.AdminPasswd == "" {
 		log.Printf("[WARN] admin password is not set, protected endpoints are disabled")
 		opts.AdminPasswd = uuid.New().String() // generate random (uuid) password

@@ -3,6 +3,7 @@ package feed
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,20 @@ import (
 
 	log "github.com/go-pkgz/lgr"
 )
+
+// VideoInfo contains metadata fetched via yt-dlp --dump-json
+type VideoInfo struct {
+	ID          string  `json:"id"`
+	Title       string  `json:"title"`
+	Description string  `json:"description"`
+	Uploader    string  `json:"uploader"`
+	ChannelID   string  `json:"channel_id"`
+	ChannelURL  string  `json:"channel_url"`
+	Duration    float64 `json:"duration"`
+	Thumbnail   string  `json:"thumbnail"`
+	UploadDate  string  `json:"upload_date"` // YYYYMMDD format
+	WebpageURL  string  `json:"webpage_url"`
+}
 
 // ErrSkip is returned when the file is not downloaded
 var ErrSkip = errors.New("skip")
@@ -71,4 +86,23 @@ func (d *Downloader) Get(ctx context.Context, id, fname string) (file string, er
 		return file, ErrSkip
 	}
 	return file, nil
+}
+
+// GetInfo fetches video metadata without downloading using yt-dlp --dump-json
+func (d *Downloader) GetInfo(ctx context.Context, videoURL string) (*VideoInfo, error) {
+	cmd := exec.CommandContext(ctx, "yt-dlp", "--dump-json", "--no-download", videoURL)
+	cmd.Stderr = d.logErrWriter
+
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get video info: %w", err)
+	}
+
+	var info VideoInfo
+	if err := json.Unmarshal(output, &info); err != nil {
+		return nil, fmt.Errorf("failed to parse video info: %w", err)
+	}
+
+	log.Printf("[DEBUG] got video info: id=%s, title=%s, duration=%.0fs", info.ID, info.Title, info.Duration)
+	return &info, nil
 }
