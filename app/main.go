@@ -96,8 +96,11 @@ func main() {
 
 	var ytSvc youtube.Service
 	var ytStore *store.BoltDB
-	if len(conf.YouTube.Channels) > 0 {
-		log.Printf("[INFO] starting youtube processor for %d channels", len(conf.YouTube.Channels))
+
+	// Initialize YouTube service if we have channels OR telegram_bot is enabled
+	needYouTube := len(conf.YouTube.Channels) > 0 || conf.TelegramBot.Enabled
+	if needYouTube {
+		log.Printf("[INFO] initializing youtube service")
 		outWr := log.ToWriter(log.Default(), "DEBUG")
 		errWr := log.ToWriter(log.Default(), "INFO")
 		dwnl := ytfeed.NewDownloader(conf.YouTube.DlTemplate, outWr, errWr, conf.YouTube.FilesLocation)
@@ -107,6 +110,10 @@ func main() {
 		channels := []string{}
 		for _, c := range conf.YouTube.Channels {
 			channels = append(channels, c.ID)
+		}
+		// Add telegram_bot feed to channels
+		if conf.TelegramBot.Enabled {
+			channels = append(channels, conf.TelegramBot.FeedName)
 		}
 		log.Printf("[DEBUG] buckets for youtube store: %s", strings.Join(channels, ", "))
 
@@ -134,29 +141,23 @@ func main() {
 			log.Printf("[INFO] yt-dlp updater is disabled")
 		}
 
-		go func() {
-			if conf.YouTube.DisableUpdates {
-				log.Printf("[INFO] youtube updates are disabled")
-				return
-			}
-			if err := ytSvc.Do(context.TODO()); err != nil {
-				log.Printf("[ERROR] youtube processor failed: %v", err)
-			}
-		}()
+		// Only run youtube processor if we have channels configured
+		if len(conf.YouTube.Channels) > 0 {
+			go func() {
+				if conf.YouTube.DisableUpdates {
+					log.Printf("[INFO] youtube updates are disabled")
+					return
+				}
+				if err := ytSvc.Do(context.TODO()); err != nil {
+					log.Printf("[ERROR] youtube processor failed: %v", err)
+				}
+			}()
+		}
 	}
 
 	// Initialize Telegram Bot for manual video additions
 	if conf.TelegramBot.Enabled && opts.TelegramToken != "" && conf.TelegramBot.AllowedUserID != 0 {
 		log.Printf("[INFO] starting telegram bot for user %d, feed: %s", conf.TelegramBot.AllowedUserID, conf.TelegramBot.FeedName)
-
-		// Ensure ytStore and downloader are initialized for the bot
-		if ytStore == nil {
-			channels := []string{conf.TelegramBot.FeedName}
-			ytStore = &store.BoltDB{DB: db, Channels: channels}
-		} else {
-			// Add manual feed channel to existing store
-			ytStore.Channels = append(ytStore.Channels, conf.TelegramBot.FeedName)
-		}
 
 		outWr := log.ToWriter(log.Default(), "DEBUG")
 		errWr := log.ToWriter(log.Default(), "INFO")
