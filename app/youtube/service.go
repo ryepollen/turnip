@@ -125,10 +125,12 @@ func (s *Service) Do(ctx context.Context) error {
 
 // RSSFeed generates RSS feed for given channel
 func (s *Service) RSSFeed(fi FeedInfo) (string, error) {
+	log.Printf("[DEBUG] RSSFeed called for channel=%s, keep=%d", fi.ID, s.keep(fi))
 	entries, err := s.Store.Load(fi.ID, s.keep(fi))
 	if err != nil {
 		return "", fmt.Errorf("failed to get channel entries: %w", err)
 	}
+	log.Printf("[DEBUG] RSSFeed got %d entries for channel=%s", len(entries), fi.ID)
 
 	if len(entries) == 0 {
 		return "", nil

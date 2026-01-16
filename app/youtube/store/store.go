@@ -102,10 +102,10 @@ func (s *BoltDB) Load(channelID string, maximum int) ([]feed.Entry, error) {
 				log.Printf("[WARN] failed to unmarshal %s, %q: %v", channelID, string(v), err)
 				continue
 			}
-			if len(result) >= maximum {
+			result = append(result, item)
+			if maximum > 0 && len(result) >= maximum {
 				break
 			}
-			result = append(result, item)
 		}
 		return nil
 	})
