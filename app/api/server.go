@@ -150,6 +150,7 @@ func (s *Server) router() http.Handler {
 		l := logger.New(logger.Log(log.Default()), logger.Prefix("[INFO]"), logger.IPfn(logger.AnonymizeIP))
 		r.Use(l.Handler)
 		r.HandleFunc("GET /rss/{channel}", s.getYoutubeFeedCtrl)
+		r.HandleFunc("GET /image/{channel}", s.getYoutubeImageCtrl)
 		r.HandleFunc("GET /channels", s.getYoutubeChannelsPageCtrl)
 		r.With(auth).HandleFunc("POST /rss/generate", s.regenerateRSSCtrl)
 		r.With(auth).HandleFunc("DELETE /entry/{channel}/{video}", s.removeEntryCtrl)
@@ -295,6 +296,19 @@ func (s *Server) getYoutubeFeedCtrl(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// check if this is the telegram bot feed
+	if channel == s.Conf.TelegramBot.FeedName && s.Conf.TelegramBot.Enabled {
+		fi.Name = s.Conf.TelegramBot.FeedTitle
+		fi.Description = s.Conf.TelegramBot.FeedDescription
+		fi.Image = s.Conf.TelegramBot.FeedImage
+	}
+
+	// convert local image path to URL
+	if fi.Image != "" && !strings.HasPrefix(fi.Image, "http") {
+		baseURL := strings.TrimSuffix(s.Conf.System.BaseURL, "/")
+		fi.Image = baseURL + "/yt/image/" + channel
+	}
+
 	res, err := s.YoutubeSvc.RSSFeed(fi)
 	if err != nil {
 		rest.SendErrorJSON(w, r, log.Default(), http.StatusInternalServerError, err, "failed to read yt list")
@@ -331,6 +345,50 @@ func (s *Server) removeEntryCtrl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rest.RenderJSON(w, rest.JSON{"status": "ok", "removed": r.PathValue("video")})
+}
+
+// GET /yt/image/{channel} - returns image for youtube feed
+func (s *Server) getYoutubeImageCtrl(w http.ResponseWriter, r *http.Request) {
+	channel := r.PathValue("channel")
+
+	var imagePath string
+
+	// check youtube channels config
+	for _, f := range s.Conf.YouTube.Channels {
+		if f.ID == channel && f.Image != "" {
+			imagePath = f.Image
+			break
+		}
+	}
+
+	// check telegram bot config
+	if imagePath == "" && channel == s.Conf.TelegramBot.FeedName && s.Conf.TelegramBot.Enabled {
+		imagePath = s.Conf.TelegramBot.FeedImage
+	}
+
+	if imagePath == "" {
+		rest.SendErrorJSON(w, r, log.Default(), http.StatusNotFound,
+			fmt.Errorf("image for %s not found", channel), "no image configured")
+		return
+	}
+
+	b, err := os.ReadFile(imagePath)
+	if err != nil {
+		rest.SendErrorJSON(w, r, log.Default(), http.StatusNotFound,
+			fmt.Errorf("can't read image %s", imagePath), "failed to read image")
+		return
+	}
+
+	// detect content type
+	contentType := "image/png"
+	if strings.HasSuffix(strings.ToLower(imagePath), ".jpg") || strings.HasSuffix(strings.ToLower(imagePath), ".jpeg") {
+		contentType = "image/jpeg"
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	if _, err := w.Write(b); err != nil {
+		log.Printf("[WARN] failed to send image, %s", err)
+	}
 }
 
 func (s *Server) feeds() []string {

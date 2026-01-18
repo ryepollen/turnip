@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"html/template"
+	"os"
 	"regexp"
 	"time"
 
@@ -85,6 +86,8 @@ func (t *TelegramBot) Run(ctx context.Context) error {
 	// Register handlers
 	t.Bot.Handle(tb.OnText, t.handleText)
 	t.Bot.Handle("/list", t.handleList)
+	t.Bot.Handle("/history", t.handleHistory)
+	t.Bot.Handle("/del", t.handleDelete)
 	t.Bot.Handle("/help", t.handleHelp)
 	t.Bot.Handle("/start", t.handleHelp)
 
@@ -115,13 +118,13 @@ func (t *TelegramBot) handleText(m *tb.Message) {
 	}
 
 	// Send processing message
-	statusMsg, _ := t.Bot.Send(m.Chat, "Processing video...")
+	statusMsg, _ := t.Bot.Send(m.Chat, "⏳ Processing...")
 
 	// Process in background
 	go func() {
-		if err := t.processVideo(context.Background(), m.Chat, statusMsg, videoID); err != nil {
+		if err := t.processVideo(context.Background(), m.Chat, statusMsg, m, videoID); err != nil {
 			log.Printf("[ERROR] failed to process video %s: %v", videoID, err)
-			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("Error: %v", err))
+			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
 		}
 	}()
 }
@@ -152,6 +155,87 @@ func (t *TelegramBot) handleList(m *tb.Message) {
 	_, _ = t.Bot.Send(m.Chat, msg)
 }
 
+// handleHistory shows history of all processed videos
+func (t *TelegramBot) handleHistory(m *tb.Message) {
+	if !t.isAuthorized(m.Sender) {
+		return
+	}
+
+	entries, err := t.Store.Load(t.FeedName, t.MaxItems)
+	if err != nil {
+		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Error: %v", err))
+		return
+	}
+
+	if len(entries) == 0 {
+		_, _ = t.Bot.Send(m.Chat, "No videos added yet.")
+		return
+	}
+
+	msg := fmt.Sprintf("📜 History (%d):\n\n", len(entries))
+	for i, e := range entries {
+		msg += fmt.Sprintf("%d. %s\n%s\n\n", i+1, e.Title, e.Link.Href)
+	}
+
+	_, _ = t.Bot.Send(m.Chat, msg, tb.NoPreview)
+}
+
+// handleDelete removes entry from feed and deletes file from disk
+func (t *TelegramBot) handleDelete(m *tb.Message) {
+	if !t.isAuthorized(m.Sender) {
+		return
+	}
+
+	// parse argument: /del 1 or /del (without arg = delete last)
+	args := regexp.MustCompile(`\s+`).Split(m.Text, -1)
+	idx := 1 // default: first (most recent)
+	if len(args) > 1 && args[1] != "" {
+		if _, err := fmt.Sscanf(args[1], "%d", &idx); err != nil || idx < 1 {
+			_, _ = t.Bot.Send(m.Chat, "Usage: /del [number]\nExample: /del 1 (delete most recent)")
+			return
+		}
+	}
+
+	entries, err := t.Store.Load(t.FeedName, t.MaxItems)
+	if err != nil {
+		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Error: %v", err))
+		return
+	}
+
+	if len(entries) == 0 {
+		_, _ = t.Bot.Send(m.Chat, "Feed is empty.")
+		return
+	}
+
+	if idx > len(entries) {
+		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Only %d entries in feed.", len(entries)))
+		return
+	}
+
+	entry := entries[idx-1]
+
+	// delete audio file from disk
+	if entry.File != "" {
+		if err := os.Remove(entry.File); err != nil && !os.IsNotExist(err) {
+			log.Printf("[WARN] failed to delete file %s: %v", entry.File, err)
+		} else {
+			log.Printf("[INFO] deleted file %s", entry.File)
+		}
+	}
+
+	// remove from database
+	if err := t.Store.Remove(entry); err != nil {
+		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Error removing: %v", err))
+		return
+	}
+
+	// reset processed status so it can be re-added if needed
+	_ = t.Store.ResetProcessed(entry)
+
+	_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("🗑 Deleted: %s", entry.Title))
+	log.Printf("[INFO] deleted entry %s: %s", entry.VideoID, entry.Title)
+}
+
 // handleHelp sends help message
 func (t *TelegramBot) handleHelp(m *tb.Message) {
 	if !t.isAuthorized(m.Sender) {
@@ -159,20 +243,18 @@ func (t *TelegramBot) handleHelp(m *tb.Message) {
 		return
 	}
 
-	help := fmt.Sprintf(`Turnip Podcast Bot
+	help := fmt.Sprintf(`🎧 Turnip Podcast Bot
 
-Send a YouTube URL to add video audio to your podcast feed.
-
-Supported formats:
-- https://youtube.com/watch?v=VIDEO_ID
-- https://youtu.be/VIDEO_ID
-- https://www.youtube.com/watch?v=VIDEO_ID
+Send a YouTube URL to add audio to your feed.
 
 Commands:
-/list - show recent additions
-/help - show this help
+/list - recent entries in feed
+/history - all entries with links
+/del - delete most recent
+/del N - delete entry N
+/help - this help
 
-RSS feed: %s/yt/rss/%s`, t.BaseURL, t.FeedName)
+RSS: %s/yt/rss/%s`, t.BaseURL, t.FeedName)
 
 	_, _ = t.Bot.Send(m.Chat, help)
 }
@@ -203,11 +285,11 @@ func (t *TelegramBot) extractYouTubeVideoID(text string) string {
 }
 
 // processVideo downloads and stores a YouTube video
-func (t *TelegramBot) processVideo(ctx context.Context, chat *tb.Chat, statusMsg *tb.Message, videoID string) error {
+func (t *TelegramBot) processVideo(ctx context.Context, chat *tb.Chat, statusMsg, originalMsg *tb.Message, videoID string) error {
 	videoURL := "https://www.youtube.com/watch?v=" + videoID
 
 	// 1. Fetch metadata
-	_, _ = t.Bot.Edit(statusMsg, "Fetching video info...")
+	_, _ = t.Bot.Edit(statusMsg, "⏳ Fetching video info...")
 	info, err := t.Downloader.GetInfo(ctx, videoURL)
 	if err != nil {
 		return fmt.Errorf("failed to get video info: %w", err)
@@ -216,12 +298,13 @@ func (t *TelegramBot) processVideo(ctx context.Context, chat *tb.Chat, statusMsg
 	// 2. Check if already processed
 	tempEntry := ytfeed.Entry{ChannelID: t.FeedName, VideoID: videoID}
 	if found, _, _ := t.Store.CheckProcessed(tempEntry); found {
-		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("Video already in feed: %s", info.Title))
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ Already in feed: %s", info.Title))
+		t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
 		return nil
 	}
 
 	// 3. Download audio
-	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("Downloading: %s...", info.Title))
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⬇️ Downloading: %s...", info.Title))
 	fname := t.makeFileName(videoID)
 	file, err := t.Downloader.Get(ctx, videoID, fname)
 	if err != nil {
@@ -245,7 +328,8 @@ func (t *TelegramBot) processVideo(ctx context.Context, chat *tb.Chat, statusMsg
 		return fmt.Errorf("failed to save: %w", err)
 	}
 	if !created {
-		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("Video already exists: %s", info.Title))
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ Already exists: %s", info.Title))
+		t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
 		return nil
 	}
 
@@ -254,12 +338,59 @@ func (t *TelegramBot) processVideo(ctx context.Context, chat *tb.Chat, statusMsg
 		log.Printf("[WARN] failed to mark as processed: %v", err)
 	}
 
+	// 8. Remove old entries if exceeding MaxItems
+	t.removeOldEntries()
+
 	dur := time.Duration(duration) * time.Second
-	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("Added: %s\nDuration: %s\n\nRSS: %s/yt/rss/%s",
-		info.Title, dur.String(), t.BaseURL, t.FeedName))
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("✅ %s (%s)", info.Title, t.formatDuration(dur)))
 
 	log.Printf("[INFO] added video %s: %s (duration: %s)", videoID, info.Title, dur.String())
+
+	// delete user's message after delay, keep bot's status
+	t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
 	return nil
+}
+
+// deleteMessageAfterDelay deletes a message after specified delay
+func (t *TelegramBot) deleteMessageAfterDelay(msg *tb.Message, delay time.Duration) {
+	if msg == nil {
+		return
+	}
+	go func() {
+		time.Sleep(delay)
+		_ = t.Bot.Delete(msg)
+	}()
+}
+
+// removeOldEntries removes entries exceeding MaxItems and deletes their files
+func (t *TelegramBot) removeOldEntries() {
+	if t.MaxItems <= 0 {
+		return
+	}
+
+	files, err := t.Store.RemoveOld(t.FeedName, t.MaxItems)
+	if err != nil {
+		log.Printf("[WARN] failed to remove old entries: %v", err)
+	}
+
+	for _, f := range files {
+		if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
+			log.Printf("[WARN] failed to delete old file %s: %v", f, err)
+		} else {
+			log.Printf("[INFO] auto-removed old file %s", f)
+		}
+	}
+}
+
+// formatDuration formats duration as human-readable string
+func (t *TelegramBot) formatDuration(d time.Duration) string {
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
+	}
+	return fmt.Sprintf("%d:%02d", m, s)
 }
 
 // createEntry creates ytfeed.Entry from VideoInfo

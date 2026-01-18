@@ -44,11 +44,13 @@ type Conf struct {
 	} `yaml:"youtube"`
 
 	TelegramBot struct {
-		Enabled       bool   `yaml:"enabled"`
-		AllowedUserID int64  `yaml:"allowed_user_id"`
-		FeedName      string `yaml:"feed_name"`
-		FeedTitle     string `yaml:"feed_title"`
-		MaxItems      int    `yaml:"max_items"`
+		Enabled         bool   `yaml:"enabled"`
+		AllowedUserID   int64  `yaml:"allowed_user_id"`
+		FeedName        string `yaml:"feed_name"`
+		FeedTitle       string `yaml:"feed_title"`
+		FeedDescription string `yaml:"feed_description"`
+		FeedImage       string `yaml:"feed_image"`
+		MaxItems        int    `yaml:"max_items"`
 	} `yaml:"telegram_bot"`
 }
 

@@ -21,11 +21,12 @@ type Item struct {
 	Enclosure   Enclosure     `xml:"enclosure"`
 	GUID        string        `xml:"guid"`
 	// optional
-	Content  template.HTML `xml:"encoded,omitempty"`
-	PubDate  string        `xml:"pubDate,omitempty"`
-	Comments string        `xml:"comments,omitempty"`
-	Author   string        `xml:"author,omitempty"`
-	Duration string        `xml:"duration,omitempty"`
+	Content     template.HTML `xml:"encoded,omitempty"`
+	PubDate     string        `xml:"pubDate,omitempty"`
+	Comments    string        `xml:"comments,omitempty"`
+	Author      string        `xml:"author,omitempty"`
+	Duration    string        `xml:"duration,omitempty"`
+	ItunesImage *ItunesImg    `xml:"itunes:image,omitempty"`
 	// internal
 	DT          time.Time `xml:"-"`
 	Junk        bool      `xml:"-"`

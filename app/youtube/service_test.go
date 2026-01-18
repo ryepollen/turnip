@@ -107,13 +107,13 @@ func TestService_Do(t *testing.T) {
 	t.Logf("%s", string(rssData))
 	assert.Contains(t, string(rssData), "<guid>channel1::vid1</guid>")
 	assert.Contains(t, string(rssData), "<guid>channel1::vid2</guid>")
-	assert.Contains(t, string(rssData), "<itunes:duration>1234</itunes:duration>")
+	assert.Contains(t, string(rssData), "<itunes:duration>20:34</itunes:duration>")
 
 	rssData, err = os.ReadFile(tempDir + "/channel2.xml") // nolint
 	require.NoError(t, err)
 	assert.Contains(t, string(rssData), "<guid>channel2::vid1</guid>")
 	assert.Contains(t, string(rssData), "<guid>channel2::vid2</guid>")
-	assert.Contains(t, string(rssData), "<itunes:duration>1234</itunes:duration>")
+	assert.Contains(t, string(rssData), "<itunes:duration>20:34</itunes:duration>")
 
 	t.Logf("%v", duration.FileCalls())
 	// durationService.File called 11 times: 5 in Service.update(), 6 in Service.isShort()
@@ -206,14 +206,14 @@ func TestService_DoIsAllowedFilter(t *testing.T) {
 	require.NoError(t, err)
 	t.Logf("%s", string(rssData))
 	assert.Contains(t, string(rssData), "<guid>channel1::vid2</guid>")
-	assert.Contains(t, string(rssData), "<itunes:duration>1234</itunes:duration>")
+	assert.Contains(t, string(rssData), "<itunes:duration>20:34</itunes:duration>")
 
 	rssData, err = os.ReadFile("/tmp/channel2.xml")
 	require.NoError(t, err)
 	t.Logf("%s", string(rssData))
 	assert.Contains(t, string(rssData), "<guid>channel2::vid2</guid>")
 	assert.Contains(t, string(rssData), "<guid>channel2::vid1</guid>")
-	assert.Contains(t, string(rssData), "<itunes:duration>1234</itunes:duration>")
+	assert.Contains(t, string(rssData), "<itunes:duration>20:34</itunes:duration>")
 
 	require.Equal(t, 3, len(duration.FileCalls()))
 	assert.Equal(t, "/tmp/4308c33c7ddb107c2d0c13a905e4c6962001bab4.mp3", duration.FileCalls()[0].Fname)
