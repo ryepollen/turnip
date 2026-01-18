@@ -197,6 +197,7 @@ func (s *Service) RSSFeed(fi FeedInfo) (string, error) {
 		ItemList:       items,
 		Title:          fi.Name,
 		Description:    description,
+		ItunesSummary:  description,
 		Link:           entries[0].Author.URI,
 		PubDate:        items[0].PubDate,
 		LastBuildDate:  time.Now().Format(time.RFC1123Z),

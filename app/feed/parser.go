@@ -31,6 +31,7 @@ type Rss2 struct {
 	ItunesImage    *ItunesImg      `xml:"channel>itunes:image"`
 	MediaThumbnail *MediaThumbnail `xml:"channel>media:thumbnail"`
 	ItunesAuthor   string          `xml:"channel>itunes:author"`
+	ItunesSummary  string          `xml:"channel>itunes:summary,omitempty"`
 	ItunesExplicit string          `xml:"channel>itunes:explicit"`
 	ItunesOwner    *ItunesOwner    `xml:"channel>itunes:owner"`
 	ItemList       []Item          `xml:"channel>item"`
