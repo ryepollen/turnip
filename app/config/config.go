@@ -51,6 +51,8 @@ type Conf struct {
 		FeedDescription string `yaml:"feed_description"`
 		FeedImage       string `yaml:"feed_image"`
 		MaxItems        int    `yaml:"max_items"`
+		TTSEnabled      bool   `yaml:"tts_enabled"`
+		TTSVoice        string `yaml:"tts_voice"`
 	} `yaml:"telegram_bot"`
 }
 
@@ -213,5 +215,8 @@ func (c *Conf) setDefaults() {
 	}
 	if c.TelegramBot.MaxItems == 0 {
 		c.TelegramBot.MaxItems = 100
+	}
+	if c.TelegramBot.TTSVoice == "" {
+		c.TelegramBot.TTSVoice = "ru-RU-DmitryNeural" // Russian male voice for Edge TTS
 	}
 }

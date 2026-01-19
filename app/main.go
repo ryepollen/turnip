@@ -175,6 +175,8 @@ func main() {
 			DurationSvc:   &duration.Service{},
 			FilesLocation: conf.YouTube.FilesLocation,
 			BaseURL:       conf.System.BaseURL,
+			TTSEnabled:    conf.TelegramBot.TTSEnabled,
+			TTSVoice:      conf.TelegramBot.TTSVoice,
 		})
 		if err != nil {
 			log.Printf("[ERROR] failed to create telegram bot: %v", err)

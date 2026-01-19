@@ -16,18 +16,21 @@ import (
 	ytstore "github.com/umputun/feed-master/app/youtube/store"
 )
 
-// TelegramBot handles incoming messages for YouTube video additions
+// TelegramBot handles incoming messages for YouTube video additions and article TTS
 type TelegramBot struct {
-	Bot           *tb.Bot
-	AllowedUserID int64
-	FeedName      string
-	FeedTitle     string
-	MaxItems      int
-	Downloader    *ytfeed.Downloader
-	Store         *ytstore.BoltDB
-	DurationSvc   DurationService
-	FilesLocation string
-	BaseURL       string
+	Bot              *tb.Bot
+	AllowedUserID    int64
+	FeedName         string
+	FeedTitle        string
+	MaxItems         int
+	Downloader       *ytfeed.Downloader
+	Store            *ytstore.BoltDB
+	DurationSvc      DurationService
+	FilesLocation    string
+	BaseURL          string
+	TTSEnabled       bool
+	TTS              TTSProvider
+	ArticleExtractor *ArticleExtractor
 }
 
 // TelegramBotParams contains all parameters for creating a new TelegramBot
@@ -43,6 +46,8 @@ type TelegramBotParams struct {
 	DurationSvc   DurationService
 	FilesLocation string
 	BaseURL       string
+	TTSEnabled    bool
+	TTSVoice      string
 }
 
 // NewTelegramBot creates a new bot for receiving YouTube URLs
@@ -65,7 +70,7 @@ func NewTelegramBot(params TelegramBotParams) (*TelegramBot, error) {
 		return nil, fmt.Errorf("failed to create bot: %w", err)
 	}
 
-	return &TelegramBot{
+	tb := &TelegramBot{
 		Bot:           bot,
 		AllowedUserID: params.AllowedUserID,
 		FeedName:      params.FeedName,
@@ -76,7 +81,16 @@ func NewTelegramBot(params TelegramBotParams) (*TelegramBot, error) {
 		DurationSvc:   params.DurationSvc,
 		FilesLocation: params.FilesLocation,
 		BaseURL:       params.BaseURL,
-	}, nil
+		TTSEnabled:    params.TTSEnabled,
+	}
+
+	// Initialize TTS if enabled
+	if params.TTSEnabled {
+		tb.TTS = NewEdgeTTS(params.TTSVoice)
+		tb.ArticleExtractor = NewArticleExtractor()
+	}
+
+	return tb, nil
 }
 
 // Run starts the bot and listens for messages
@@ -101,7 +115,7 @@ func (t *TelegramBot) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// handleText processes text messages (YouTube URLs)
+// handleText processes text messages (YouTube URLs or article URLs)
 func (t *TelegramBot) handleText(m *tb.Message) {
 	// Authorization check
 	if !t.isAuthorized(m.Sender) {
@@ -110,23 +124,39 @@ func (t *TelegramBot) handleText(m *tb.Message) {
 		return
 	}
 
-	// Extract YouTube URL
+	// Extract YouTube URL first
 	videoID := t.extractYouTubeVideoID(m.Text)
-	if videoID == "" {
-		_, _ = t.Bot.Send(m.Chat, "No YouTube video URL found. Send a link like:\nhttps://youtube.com/watch?v=VIDEO_ID\nhttps://youtu.be/VIDEO_ID")
+	if videoID != "" {
+		// Process as YouTube video
+		statusMsg, _ := t.Bot.Send(m.Chat, "⏳ Processing...")
+		go func() {
+			if err := t.processVideo(context.Background(), m.Chat, statusMsg, m, videoID); err != nil {
+				log.Printf("[ERROR] failed to process video %s: %v", videoID, err)
+				_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+			}
+		}()
 		return
 	}
 
-	// Send processing message
-	statusMsg, _ := t.Bot.Send(m.Chat, "⏳ Processing...")
+	// Check if it's an article URL (and TTS is enabled)
+	articleURL := t.extractURL(m.Text)
+	if articleURL != "" && t.TTSEnabled && IsArticleURL(articleURL) {
+		statusMsg, _ := t.Bot.Send(m.Chat, "⏳ Озвучиваю статью...")
+		go func() {
+			if err := t.processArticle(context.Background(), m.Chat, statusMsg, m, articleURL); err != nil {
+				log.Printf("[ERROR] failed to process article %s: %v", articleURL, err)
+				_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+			}
+		}()
+		return
+	}
 
-	// Process in background
-	go func() {
-		if err := t.processVideo(context.Background(), m.Chat, statusMsg, m, videoID); err != nil {
-			log.Printf("[ERROR] failed to process video %s: %v", videoID, err)
-			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
-		}
-	}()
+	// No valid URL found
+	helpMsg := "No valid URL found. Send a link:\n• YouTube: https://youtube.com/watch?v=VIDEO_ID"
+	if t.TTSEnabled {
+		helpMsg += "\n• Article: any web page URL"
+	}
+	_, _ = t.Bot.Send(m.Chat, helpMsg)
 }
 
 // handleList shows recent entries
@@ -245,7 +275,9 @@ func (t *TelegramBot) handleHelp(m *tb.Message) {
 
 	help := fmt.Sprintf(`🎧 Turnip Podcast Bot
 
-Send a YouTube URL to add audio to your feed.
+Send a URL to add audio to your feed:
+• YouTube video → downloads audio
+• Article/webpage → TTS озвучка (if enabled)
 
 Commands:
 /list - recent entries in feed
@@ -254,7 +286,8 @@ Commands:
 /del N - delete entry N
 /help - this help
 
-RSS: %s/yt/rss/%s`, t.BaseURL, t.FeedName)
+TTS: %v
+RSS: %s/yt/rss/%s`, t.TTSEnabled, t.BaseURL, t.FeedName)
 
 	_, _ = t.Bot.Send(m.Chat, help)
 }
@@ -437,4 +470,146 @@ func (t *TelegramBot) makeFileName(videoID string) string {
 	h := sha1.New()
 	h.Write([]byte(t.FeedName + "::" + videoID))
 	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// extractURL extracts any URL from text
+func (t *TelegramBot) extractURL(text string) string {
+	re := regexp.MustCompile(`https?://[^\s<>"{}|\\^` + "`" + `\[\]]+`)
+	matches := re.FindString(text)
+	return matches
+}
+
+// processArticle extracts article text, converts to speech, and adds to feed
+func (t *TelegramBot) processArticle(ctx context.Context, chat *tb.Chat, statusMsg, originalMsg *tb.Message, articleURL string) error {
+	// 1. Extract article content
+	_, _ = t.Bot.Edit(statusMsg, "⏳ Извлекаю текст статьи...")
+	article, err := t.ArticleExtractor.Extract(ctx, articleURL)
+	if err != nil {
+		return fmt.Errorf("failed to extract article: %w", err)
+	}
+
+	if article.TextContent == "" {
+		return fmt.Errorf("no text content found in article")
+	}
+
+	// 2. Generate unique ID for this article
+	articleID := t.makeArticleID(articleURL)
+
+	// 3. Check if already processed
+	tempEntry := ytfeed.Entry{ChannelID: t.FeedName, VideoID: articleID}
+	if found, _, _ := t.Store.CheckProcessed(tempEntry); found {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ Already in feed: %s", article.Title))
+		t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
+		return nil
+	}
+
+	// 4. Convert to speech
+	charCount := len([]rune(article.TextContent))
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🔊 Озвучиваю: %s (%d символов)...", article.Title, charCount))
+
+	edgeTTS, ok := t.TTS.(*EdgeTTS)
+	if !ok {
+		return fmt.Errorf("TTS provider is not EdgeTTS")
+	}
+
+	audioData, err := edgeTTS.SynthesizeLongText(ctx, article.TextContent, 3000)
+	if err != nil {
+		return fmt.Errorf("failed to synthesize speech: %w", err)
+	}
+
+	// 5. Save audio file
+	fname := t.makeFileName(articleID)
+	filePath := t.FilesLocation + "/" + fname + ".mp3"
+	if err := os.WriteFile(filePath, audioData, 0644); err != nil {
+		return fmt.Errorf("failed to save audio file: %w", err)
+	}
+
+	// 6. Estimate duration (Edge TTS ~150 words/min, ~6 chars/word = ~900 chars/min)
+	duration := int(float64(charCount) / 900.0 * 60.0)
+	if t.DurationSvc != nil {
+		if fileDur := t.DurationSvc.File(filePath); fileDur > 0 {
+			duration = fileDur
+		}
+	}
+
+	// 7. Create entry
+	entry := t.createArticleEntry(article, articleURL, filePath, duration)
+
+	// 8. Store in BoltDB
+	created, err := t.Store.Save(entry)
+	if err != nil {
+		return fmt.Errorf("failed to save: %w", err)
+	}
+	if !created {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ Already exists: %s", article.Title))
+		t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
+		return nil
+	}
+
+	// 9. Mark as processed
+	if err := t.Store.SetProcessed(entry); err != nil {
+		log.Printf("[WARN] failed to mark as processed: %v", err)
+	}
+
+	// 10. Remove old entries if exceeding MaxItems
+	t.removeOldEntries()
+
+	dur := time.Duration(duration) * time.Second
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("✅ 📖 %s (%s)", article.Title, t.formatDuration(dur)))
+
+	log.Printf("[INFO] added article %s: %s (duration: %s, chars: %d)", articleID, article.Title, dur.String(), charCount)
+
+	// Delete user's message after delay
+	t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
+	return nil
+}
+
+// makeArticleID creates a unique ID for an article URL
+func (t *TelegramBot) makeArticleID(url string) string {
+	h := sha1.New()
+	h.Write([]byte("article::" + url))
+	return fmt.Sprintf("art_%x", h.Sum(nil))[:16]
+}
+
+// createArticleEntry creates ytfeed.Entry from Article
+func (t *TelegramBot) createArticleEntry(article *Article, url, file string, duration int) ytfeed.Entry {
+	title := article.Title
+	if title == "" {
+		title = "Article"
+	}
+
+	thumbnail := article.Image
+	if thumbnail == "" {
+		// Use a default article icon or leave empty
+		thumbnail = ""
+	}
+
+	return ytfeed.Entry{
+		ChannelID: t.FeedName,
+		VideoID:   t.makeArticleID(url),
+		Title:     "📖 " + title,
+		Link: struct {
+			Href string `xml:"href,attr"`
+		}{Href: url},
+		Published: time.Now(),
+		Updated:   time.Now(),
+		Media: struct {
+			Description template.HTML `xml:"description"`
+			Thumbnail   struct {
+				URL string `xml:"url,attr"`
+			} `xml:"thumbnail"`
+		}{
+			Description: template.HTML(fmt.Sprintf("TTS озвучка статьи: %s", url)),
+			Thumbnail:   struct{ URL string `xml:"url,attr"` }{URL: thumbnail},
+		},
+		Author: struct {
+			Name string `xml:"name"`
+			URI  string `xml:"uri"`
+		}{
+			Name: article.SiteName,
+			URI:  url,
+		},
+		File:     file,
+		Duration: duration,
+	}
 }
