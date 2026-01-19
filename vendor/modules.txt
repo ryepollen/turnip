@@ -67,6 +67,9 @@ github.com/go-pkgz/routegroup
 # github.com/go-pkgz/syncs v1.3.2
 ## explicit; go 1.20
 github.com/go-pkgz/syncs
+# github.com/go-resty/resty/v2 v2.12.0
+## explicit; go 1.16
+github.com/go-resty/resty/v2
 # github.com/go-shiori/dom v0.0.0-20230515143342-73569d674e1c
 ## explicit; go 1.20
 github.com/go-shiori/dom
@@ -138,6 +141,9 @@ github.com/stretchr/testify/require
 ## explicit
 github.com/tcolgate/mp3
 github.com/tcolgate/mp3/internal/data
+# github.com/wujunwei928/edge-tts-go v0.0.0-20250315123430-d4675babeb96
+## explicit; go 1.21.9
+github.com/wujunwei928/edge-tts-go/edge_tts
 # go.etcd.io/bbolt v1.4.3
 ## explicit; go 1.23
 go.etcd.io/bbolt
@@ -156,6 +162,7 @@ golang.org/x/net/context
 golang.org/x/net/html
 golang.org/x/net/html/atom
 golang.org/x/net/html/charset
+golang.org/x/net/publicsuffix
 # golang.org/x/sys v0.38.0
 ## explicit; go 1.24.0
 golang.org/x/sys/cpu

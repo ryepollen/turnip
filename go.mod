@@ -15,12 +15,12 @@ require (
 	github.com/go-pkgz/syncs v1.3.2
 	github.com/go-shiori/go-readability v0.0.0-20251205110129-5db1dc9836f0
 	github.com/google/uuid v1.6.0
-	github.com/gorilla/websocket v1.5.3
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/jessevdk/go-flags v1.6.1
 	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/stretchr/testify v1.10.0
 	github.com/tcolgate/mp3 v0.0.0-20170426193717-e79c5a46d300
+	github.com/wujunwei928/edge-tts-go v0.0.0-20250315123430-d4675babeb96
 	go.etcd.io/bbolt v1.4.3
 	golang.org/x/net v0.47.0
 	gopkg.in/tucnak/telebot.v2 v2.5.0
@@ -39,9 +39,11 @@ require (
 	github.com/dustin/go-jsonpointer v0.0.0-20160814072949-ba0abeacc3dc // indirect
 	github.com/dustin/gojson v0.0.0-20160307161227-2e71ec9dd5ad // indirect
 	github.com/garyburd/go-oauth v0.0.0-20250708150529-9df1f1901ec1 // indirect
+	github.com/go-resty/resty/v2 v2.12.0 // indirect
 	github.com/go-shiori/dom v0.0.0-20230515143342-73569d674e1c // indirect
 	github.com/gogs/chardet v0.0.0-20211120154057-b7413eaefb8f // indirect
 	github.com/gorilla/css v1.0.1 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
