@@ -18,7 +18,7 @@ import (
 
 const (
 	trustedClientToken  = "6A5AA1D4EAFF4E9FB37E23D68491D6F4"
-	chromiumFullVersion = "134.0.3124.66"
+	chromiumFullVersion = "130.0.2849.68"
 	secMSGECVersion     = "1-" + chromiumFullVersion
 )
 
@@ -91,8 +91,11 @@ func (e *EdgeTTS) Synthesize(ctx context.Context, text string) ([]byte, error) {
 	header.Set("Pragma", "no-cache")
 	header.Set("Cache-Control", "no-cache")
 
-	conn, _, err := dialer.DialContext(ctx, wsURL, header)
+	conn, resp, err := dialer.DialContext(ctx, wsURL, header)
 	if err != nil {
+		if resp != nil {
+			return nil, fmt.Errorf("failed to connect to Edge TTS (HTTP %d): %w", resp.StatusCode, err)
+		}
 		return nil, fmt.Errorf("failed to connect to Edge TTS: %w", err)
 	}
 	defer conn.Close()
