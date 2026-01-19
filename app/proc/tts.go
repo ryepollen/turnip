@@ -3,7 +3,9 @@ package proc
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +14,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+)
+
+const (
+	trustedClientToken = "6A5AA1D4EAFF4E9FB37E23D68491D6F4"
+	secMSGECVersion    = "1-130.0.2849.68"
 )
 
 // TTSProvider interface for text-to-speech services
@@ -32,10 +39,41 @@ func NewEdgeTTS(voice string) *EdgeTTS {
 	return &EdgeTTS{Voice: voice}
 }
 
+// generateSecMSGEC generates the Sec-MS-GEC security token required by Microsoft
+func generateSecMSGEC() string {
+	// Get current Unix timestamp
+	now := time.Now().Unix()
+
+	// Convert to Windows epoch (add seconds from 1601 to 1970)
+	windowsEpoch := now + 11644473600
+
+	// Round down to nearest 5 minutes (300 seconds)
+	rounded := windowsEpoch - (windowsEpoch % 300)
+
+	// Convert to Windows FILETIME (100-nanosecond intervals)
+	ticks := rounded * 10000000
+
+	// Create hash input: ticks + trusted client token
+	input := fmt.Sprintf("%d%s", ticks, trustedClientToken)
+
+	// Generate SHA256 hash
+	hash := sha256.Sum256([]byte(input))
+
+	// Return uppercase hex
+	return strings.ToUpper(hex.EncodeToString(hash[:]))
+}
+
 // Synthesize converts text to speech using Edge TTS
 func (e *EdgeTTS) Synthesize(ctx context.Context, text string) ([]byte, error) {
-	// Edge TTS WebSocket endpoint
-	wsURL := "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4"
+	// Generate connection ID and security token
+	connectionID := strings.ReplaceAll(uuid.New().String(), "-", "")
+	secGEC := generateSecMSGEC()
+
+	// Edge TTS WebSocket endpoint with security parameters
+	wsURL := fmt.Sprintf(
+		"wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=%s&ConnectionId=%s&Sec-MS-GEC=%s&Sec-MS-GEC-Version=%s",
+		trustedClientToken, connectionID, secGEC, secMSGECVersion,
+	)
 
 	// Create connection
 	dialer := websocket.Dialer{
@@ -44,7 +82,9 @@ func (e *EdgeTTS) Synthesize(ctx context.Context, text string) ([]byte, error) {
 
 	header := http.Header{}
 	header.Set("Origin", "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold")
-	header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0")
+	header.Set("Pragma", "no-cache")
+	header.Set("Cache-Control", "no-cache")
 
 	conn, _, err := dialer.DialContext(ctx, wsURL, header)
 	if err != nil {
@@ -52,7 +92,7 @@ func (e *EdgeTTS) Synthesize(ctx context.Context, text string) ([]byte, error) {
 	}
 	defer conn.Close()
 
-	requestID := strings.ReplaceAll(uuid.New().String(), "-", "")
+	requestID := connectionID // reuse connection ID as request ID
 
 	// Send configuration
 	configMsg := fmt.Sprintf(
