@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/wujunwei928/edge-tts-go/edge_tts"
 )
@@ -69,11 +70,30 @@ func (e *EdgeTTS) SynthesizeLongText(ctx context.Context, text string, maxChunkS
 		default:
 		}
 
-		audio, err := e.Synthesize(ctx, chunk)
+		// Retry logic for transient errors
+		var audio []byte
+		var err error
+		for attempt := 0; attempt < 3; attempt++ {
+			if attempt > 0 {
+				// Exponential backoff: 5s, 10s, 20s
+				backoff := time.Duration(5<<attempt) * time.Second
+				time.Sleep(backoff)
+			}
+
+			audio, err = e.Synthesize(ctx, chunk)
+			if err == nil {
+				break
+			}
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to synthesize chunk %d: %w", i, err)
 		}
 		result.Write(audio)
+
+		// Delay between chunks to avoid rate limiting (2 seconds)
+		if i < len(chunks)-1 {
+			time.Sleep(2 * time.Second)
+		}
 	}
 
 	return result.Bytes(), nil
