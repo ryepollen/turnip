@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	trustedClientToken = "6A5AA1D4EAFF4E9FB37E23D68491D6F4"
-	secMSGECVersion    = "1-130.0.2849.68"
+	trustedClientToken  = "6A5AA1D4EAFF4E9FB37E23D68491D6F4"
+	chromiumFullVersion = "134.0.3124.66"
+	secMSGECVersion     = "1-" + chromiumFullVersion
 )
 
 // TTSProvider interface for text-to-speech services
@@ -40,21 +41,25 @@ func NewEdgeTTS(voice string) *EdgeTTS {
 }
 
 // generateSecMSGEC generates the Sec-MS-GEC security token required by Microsoft
+// Algorithm based on https://github.com/wujunwei928/edge-tts-go
 func generateSecMSGEC() string {
-	// Get current Unix timestamp
-	now := time.Now().Unix()
+	// Get current Unix timestamp as float (for precision)
+	ticks := float64(time.Now().UTC().UnixNano()) / 1e9
 
 	// Convert to Windows epoch (add seconds from 1601 to 1970)
-	windowsEpoch := now + 11644473600
+	ticks += 11644473600
 
 	// Round down to nearest 5 minutes (300 seconds)
-	rounded := windowsEpoch - (windowsEpoch % 300)
+	ticks -= float64(int64(ticks) % 300)
 
-	// Convert to Windows FILETIME (100-nanosecond intervals)
-	ticks := rounded * 10000000
+	// Convert to 100-nanosecond intervals
+	ticks *= 1e9 / 100 // = 1e7
 
-	// Create hash input: ticks + trusted client token
-	input := fmt.Sprintf("%d%s", ticks, trustedClientToken)
+	// Round down to nearest 1e9 (keeps first 9 digits, rest are zeros)
+	ticksRounded := int64(ticks/1e9) * int64(1e9)
+
+	// Create hash input: rounded ticks + trusted client token
+	input := fmt.Sprintf("%d%s", ticksRounded, trustedClientToken)
 
 	// Generate SHA256 hash
 	hash := sha256.Sum256([]byte(input))
@@ -82,7 +87,7 @@ func (e *EdgeTTS) Synthesize(ctx context.Context, text string) ([]byte, error) {
 
 	header := http.Header{}
 	header.Set("Origin", "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold")
-	header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0")
+	header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+chromiumFullVersion+" Safari/537.36 Edg/"+chromiumFullVersion)
 	header.Set("Pragma", "no-cache")
 	header.Set("Cache-Control", "no-cache")
 
