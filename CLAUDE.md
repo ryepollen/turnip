@@ -32,6 +32,9 @@ Feed Master is a Go service that aggregates RSS feeds and YouTube content into u
   - `Processor`: Orchestrates feed fetching, filtering, and notifications
   - `Store`: BoltDB persistence layer for feed items
   - `Telegram`/`Twitter`: Notification handlers
+  - `TelegramBot`: Manual podcast additions via Telegram
+  - `ArticleExtractor`: Text extraction from web pages
+  - `EdgeTTS`: Text-to-speech via Microsoft Edge TTS
 - **app/feed**: RSS feed parsing and generation utilities
 - **app/youtube**: YouTube channel/playlist processing
   - `Service`: Downloads videos as audio, manages channel RSS generation
@@ -87,6 +90,7 @@ Config loaded from YAML (see _example/etc/):
 - **Testing**: stretchr/testify
 - **YouTube**: External yt-dlp binary
 - **Notifications**: tucnak/telebot.v2, ChimeraCoder/anaconda
+- **TTS**: gorilla/websocket (Edge TTS), go-shiori/go-readability (article extraction)
 
 ## Current Usage: Personal Podcast via Telegram Bot
 
@@ -114,10 +118,14 @@ telegram_bot:
   feed_description: "פֿון פּערזענלעכע מחלוקות און פּרינציפּן, קיין דערקלערונגען"
   feed_image: "./var/images/offthplant.png"
   max_items: 100
+  tts_enabled: true                    # озвучка статей
+  tts_voice: "ru-RU-DmitryNeural"      # голос Edge TTS
 ```
-- Отправляешь ссылку на YouTube видео боту
-- Бот скачивает аудио, добавляет в RSS ленту
-- Полный контроль — только выбранные видео
+
+**Что умеет бот:**
+- YouTube видео → скачивает аудио через yt-dlp
+- Статья/веб-страница → извлекает текст, озвучивает через Edge TTS
+- Полный контроль — только то, что отправишь
 - RSS: `{base_url}/yt/rss/{feed_name}`
 - Слушать в Overcast или другом подкаст-приложении
 
@@ -128,10 +136,48 @@ telegram_bot:
 - `/del N` — удалить N-ый из списка
 - `/help` — справка
 
+### Озвучка статей (TTS):
+
+Если `tts_enabled: true`, бот может озвучивать статьи:
+
+1. Отправляешь ссылку на статью (не YouTube)
+2. Бот извлекает текст через go-readability (аналог Mozilla Readability)
+3. Озвучивает через Edge TTS (бесплатный сервис Microsoft)
+4. Сохраняет mp3 и добавляет в RSS ленту
+
+**Поддерживаемые голоса Edge TTS:**
+- `ru-RU-DmitryNeural` — мужской русский (по умолчанию)
+- `ru-RU-SvetlanaNeural` — женский русский
+- `en-US-GuyNeural` — мужской английский
+- `en-US-JennyNeural` — женский английский
+
+**Как работает:**
+```
+Telegram: URL статьи (habr.com, medium.com, любой блог)
+    ↓
+Извлечение текста (заголовок, контент)
+    ↓
+Edge TTS (WebSocket API)
+    ↓
+MP3 файл в /srv/var/yt/
+    ↓
+Запись в BoltDB → появляется в RSS
+```
+
+**Ограничения:**
+- Edge TTS обрабатывает ~3000 символов за раз, длинные статьи разбиваются на части
+- Некоторые сайты могут блокировать парсинг (403/Cloudflare)
+- Для статей не скачивается картинка-обложка
+
+**Реализация:**
+- `app/proc/article.go` — извлечение текста из URL
+- `app/proc/tts.go` — Edge TTS через WebSocket
+
 ### Особенности:
 - Сообщение со ссылкой удаляется через 5 сек после добавления
 - Статус бота остаётся в чате (✅ Title (12:34))
 - Картинки эпизодов берутся из YouTube thumbnails
+- Для статей — без картинки эпизода
 - Длительность в формате MM:SS или H:MM:SS
 - `/del` удаляет и запись из базы, и файл с диска
 
@@ -206,6 +252,8 @@ telegram_bot:
   feed_description: "פֿון פּערזענלעכע מחלוקות און פּרינציפּן, קיין דערקלערונגען"
   feed_image: "/srv/var/images/offthplant.png"
   max_items: 100
+  tts_enabled: true                  # озвучка статей
+  tts_voice: "ru-RU-DmitryNeural"    # голос Edge TTS
 ```
 
 ### Секреты (TELEGRAM_TOKEN)
@@ -330,6 +378,88 @@ docker start turnip
 ```
 
 **Важно:** база и mp3 файлы связаны. Если удалить mp3 без удаления из базы — в RSS будут битые ссылки. Используй `/del` в боте для правильного удаления.
+
+## CI/CD: Автоматический деплой
+
+### Как работает
+
+```
+git push main → GitHub Actions → ghcr.io → Watchtower → контейнер перезапущен
+```
+
+1. **GitHub Actions** (`.github/workflows/deploy.yml`):
+   - При push в main собирает Docker образ
+   - Пушит в GitHub Container Registry (`ghcr.io/ryepollen/turnip:latest`)
+   - Никаких секретов настраивать не нужно (использует `GITHUB_TOKEN`)
+
+2. **Watchtower** на сервере:
+   - Каждые 5 минут проверяет новые версии образов
+   - Автоматически скачивает и перезапускает контейнер
+
+### Первоначальная настройка на сервере
+
+**1. Сделать репозиторий публичным** (или настроить auth для ghcr.io):
+- GitHub → Settings → Change visibility → Public
+- Или: создать Personal Access Token и настроить docker login
+
+**2. Остановить старый контейнер:**
+```bash
+docker stop turnip && docker rm turnip
+```
+
+**3. Запустить turnip с образом из ghcr.io:**
+```bash
+docker run -d \
+  --name turnip \
+  -p 8080:8080 \
+  --env-file /srv/etc/secrets.env \
+  -v /srv/etc:/srv/etc \
+  -v /srv/var:/srv/var \
+  -v /usr/local/bin/yt-dlp:/usr/local/bin/yt-dlp \
+  --label "com.centurylinklabs.watchtower.enable=true" \
+  ghcr.io/ryepollen/turnip:latest /srv/feed-master -f /srv/etc/feed-master.yml
+```
+
+**4. Запустить Watchtower:**
+```bash
+docker run -d \
+  --name watchtower \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  containrrr/watchtower \
+  --interval 300 \
+  --cleanup \
+  --label-enable
+```
+
+**Что делают флаги Watchtower:**
+- `--interval 300` — проверять каждые 5 минут (300 сек)
+- `--cleanup` — удалять старые образы после обновления
+- `--label-enable` — обновлять только контейнеры с label `watchtower.enable=true`
+
+### Проверка работы CI/CD
+
+```bash
+# Посмотреть версию текущего образа
+docker inspect turnip | grep "Image"
+
+# Логи Watchtower (видно когда обновляет)
+docker logs watchtower
+
+# Принудительно проверить обновления
+docker exec watchtower /watchtower --run-once
+```
+
+### Ручное обновление (если нужно срочно)
+
+```bash
+docker pull ghcr.io/ryepollen/turnip:latest
+docker stop turnip && docker rm turnip
+# запустить docker run заново (см. выше)
+```
+
+### Workflow dispatch (ручной запуск сборки)
+
+GitHub → Actions → "Build and Push Docker Image" → Run workflow
 
 ## Important Testing Note
 
