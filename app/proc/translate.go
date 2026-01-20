@@ -11,9 +11,17 @@ import (
 	"unicode"
 )
 
+// Lingva Translate instances (fallback list)
+var lingvaInstances = []string{
+	"https://lingva.lunar.icu/api/v1",
+	"https://translate.plausibility.cloud/api/v1",
+	"https://lingva.garudalinux.org/api/v1",
+	"https://translate.projectsegfau.lt/api/v1",
+}
+
 // Translator handles text translation using Lingva Translate (Google Translate frontend)
 type Translator struct {
-	apiURL     string
+	instances  []string
 	targetLang string
 	client     *http.Client
 }
@@ -24,7 +32,7 @@ func NewTranslator(targetLang string) *Translator {
 		targetLang = "ru"
 	}
 	return &Translator{
-		apiURL:     "https://lingva.ml/api/v1", // Lingva Translate (free Google Translate frontend)
+		instances:  lingvaInstances,
 		targetLang: targetLang,
 		client: &http.Client{
 			Timeout: 60 * time.Second,
@@ -108,38 +116,50 @@ func (t *Translator) Translate(ctx context.Context, text string) (string, error)
 	return result.String(), nil
 }
 
-// translateChunk translates a single chunk of text using Lingva API
+// translateChunk translates a single chunk of text using Lingva API with fallback instances
 func (t *Translator) translateChunk(ctx context.Context, text, sourceLang string) (string, error) {
 	// Lingva API uses URL path: /api/v1/:source/:target/:query
-	// URL encode the text
 	encodedText := url.QueryEscape(text)
-	apiURL := fmt.Sprintf("%s/%s/%s/%s", t.apiURL, sourceLang, t.targetLang, encodedText)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
+	var lastErr error
+	for _, instance := range t.instances {
+		apiURL := fmt.Sprintf("%s/%s/%s/%s", instance, sourceLang, t.targetLang, encodedText)
+
+		req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to create request: %w", err)
+			continue
+		}
+
+		resp, err := t.client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("request to %s failed: %w", instance, err)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("%s returned status %d", instance, resp.StatusCode)
+			continue
+		}
+
+		var result lingvaResponse
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("failed to decode response from %s: %w", instance, err)
+			continue
+		}
+		resp.Body.Close()
+
+		if result.Error != "" {
+			lastErr = fmt.Errorf("translation error from %s: %s", instance, result.Error)
+			continue
+		}
+
+		return result.Translation, nil
 	}
 
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("translation API returned status %d", resp.StatusCode)
-	}
-
-	var result lingvaResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if result.Error != "" {
-		return "", fmt.Errorf("translation error: %s", result.Error)
-	}
-
-	return result.Translation, nil
+	return "", fmt.Errorf("all translation instances failed, last error: %w", lastErr)
 }
 
 // splitTextForTranslation splits text into chunks at paragraph boundaries
