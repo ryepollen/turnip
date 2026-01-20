@@ -493,7 +493,7 @@ func (t *TelegramBot) processArticle(ctx context.Context, chat *tb.Chat, statusM
 	}
 
 	// 1.5. Translate if needed (for non-Russian articles)
-	translator := NewTranslator("ru")
+	translator := NewTranslatorWithKey(os.Getenv("YANDEX_TRANSLATE_KEY"), "ru")
 	if translator.NeedsTranslation(article.TextContent) {
 		detectedLang := DetectLanguage(article.TextContent)
 		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🌐 Перевожу с %s на русский...", detectedLang))

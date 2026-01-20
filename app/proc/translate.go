@@ -1,38 +1,32 @@
 package proc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 	"unicode"
 )
 
-// Lingva Translate instances (fallback list)
-var lingvaInstances = []string{
-	"https://lingva.lunar.icu/api/v1",
-	"https://translate.plausibility.cloud/api/v1",
-	"https://lingva.garudalinux.org/api/v1",
-	"https://translate.projectsegfau.lt/api/v1",
-}
-
-// Translator handles text translation using Lingva Translate (Google Translate frontend)
+// Translator handles text translation using Yandex Translate API
 type Translator struct {
-	instances  []string
+	apiKey     string
 	targetLang string
+	folderID   string
 	client     *http.Client
 }
 
 // NewTranslator creates a new translator instance
+// apiKey should be passed from environment variable YANDEX_TRANSLATE_KEY
 func NewTranslator(targetLang string) *Translator {
 	if targetLang == "" {
 		targetLang = "ru"
 	}
 	return &Translator{
-		instances:  lingvaInstances,
+		apiKey:     "", // will be set via SetAPIKey
 		targetLang: targetLang,
 		client: &http.Client{
 			Timeout: 60 * time.Second,
@@ -40,10 +34,34 @@ func NewTranslator(targetLang string) *Translator {
 	}
 }
 
-// lingvaResponse is the response from Lingva Translate API
-type lingvaResponse struct {
-	Translation string `json:"translation"`
-	Error       string `json:"error,omitempty"`
+// NewTranslatorWithKey creates a translator with API key
+func NewTranslatorWithKey(apiKey, targetLang string) *Translator {
+	if targetLang == "" {
+		targetLang = "ru"
+	}
+	return &Translator{
+		apiKey:     apiKey,
+		targetLang: targetLang,
+		client: &http.Client{
+			Timeout: 60 * time.Second,
+		},
+	}
+}
+
+// yandexRequest is the request body for Yandex Translate API
+type yandexRequest struct {
+	TargetLanguageCode string   `json:"targetLanguageCode"`
+	Texts              []string `json:"texts"`
+}
+
+// yandexResponse is the response from Yandex Translate API
+type yandexResponse struct {
+	Translations []struct {
+		Text string `json:"text"`
+	} `json:"translations"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
 }
 
 // DetectLanguage detects if text is primarily in Russian or another language
@@ -84,8 +102,8 @@ func (t *Translator) Translate(ctx context.Context, text string) (string, error)
 		return text, nil // already in target language
 	}
 
-	// Split into chunks if text is too long (URL length limits, 500 chars is safe)
-	const maxChunkSize = 500
+	// Split into chunks if text is too long (Yandex limit is 10000 chars per request)
+	const maxChunkSize = 5000
 	if len(text) <= maxChunkSize {
 		return t.translateChunk(ctx, text, sourceLang)
 	}
@@ -116,50 +134,58 @@ func (t *Translator) Translate(ctx context.Context, text string) (string, error)
 	return result.String(), nil
 }
 
-// translateChunk translates a single chunk of text using Lingva API with fallback instances
+// translateChunk translates a single chunk of text using Yandex Translate API
 func (t *Translator) translateChunk(ctx context.Context, text, sourceLang string) (string, error) {
-	// Lingva API uses URL path: /api/v1/:source/:target/:query
-	encodedText := url.QueryEscape(text)
-
-	var lastErr error
-	for _, instance := range t.instances {
-		apiURL := fmt.Sprintf("%s/%s/%s/%s", instance, sourceLang, t.targetLang, encodedText)
-
-		req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-		if err != nil {
-			lastErr = fmt.Errorf("failed to create request: %w", err)
-			continue
-		}
-
-		resp, err := t.client.Do(req)
-		if err != nil {
-			lastErr = fmt.Errorf("request to %s failed: %w", instance, err)
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			lastErr = fmt.Errorf("%s returned status %d", instance, resp.StatusCode)
-			continue
-		}
-
-		var result lingvaResponse
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			resp.Body.Close()
-			lastErr = fmt.Errorf("failed to decode response from %s: %w", instance, err)
-			continue
-		}
-		resp.Body.Close()
-
-		if result.Error != "" {
-			lastErr = fmt.Errorf("translation error from %s: %s", instance, result.Error)
-			continue
-		}
-
-		return result.Translation, nil
+	if t.apiKey == "" {
+		return "", fmt.Errorf("Yandex Translate API key not configured")
 	}
 
-	return "", fmt.Errorf("all translation instances failed, last error: %w", lastErr)
+	// Yandex Translate API endpoint
+	apiURL := "https://translate.api.cloud.yandex.net/translate/v2/translate"
+
+	reqBody := yandexRequest{
+		TargetLanguageCode: t.targetLang,
+		Texts:              []string{text},
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Api-Key "+t.apiKey)
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp yandexResponse
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		if errResp.Error != nil {
+			return "", fmt.Errorf("Yandex API error: %s", errResp.Error.Message)
+		}
+		return "", fmt.Errorf("Yandex API returned status %d", resp.StatusCode)
+	}
+
+	var result yandexResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if len(result.Translations) == 0 {
+		return "", fmt.Errorf("no translations returned")
+	}
+
+	return result.Translations[0].Text, nil
 }
 
 // splitTextForTranslation splits text into chunks at paragraph boundaries
