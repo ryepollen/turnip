@@ -84,8 +84,8 @@ func (t *Translator) Translate(ctx context.Context, text string) (string, error)
 		return text, nil // already in target language
 	}
 
-	// Split into chunks if text is too long (URL length limits ~2000 chars)
-	const maxChunkSize = 1500
+	// Split into chunks if text is too long (URL length limits, 500 chars is safe)
+	const maxChunkSize = 500
 	if len(text) <= maxChunkSize {
 		return t.translateChunk(ctx, text, sourceLang)
 	}
