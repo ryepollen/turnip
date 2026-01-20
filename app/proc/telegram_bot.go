@@ -492,6 +492,19 @@ func (t *TelegramBot) processArticle(ctx context.Context, chat *tb.Chat, statusM
 		return fmt.Errorf("no text content found in article")
 	}
 
+	// 1.5. Translate if needed (for non-Russian articles)
+	translator := NewTranslator("ru")
+	if translator.NeedsTranslation(article.TextContent) {
+		detectedLang := DetectLanguage(article.TextContent)
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🌐 Перевожу с %s на русский...", detectedLang))
+
+		translatedText, err := translator.Translate(ctx, article.TextContent)
+		if err != nil {
+			return fmt.Errorf("failed to translate article: %w", err)
+		}
+		article.TextContent = translatedText
+	}
+
 	// 2. Generate unique ID for this article
 	articleID := t.makeArticleID(articleURL)
 
