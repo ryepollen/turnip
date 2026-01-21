@@ -28,8 +28,9 @@ COPY app/webapp /srv/webapp
 RUN \
     chown -R app:app /srv && \
     chmod +x /srv/feed-master
-RUN apk --no-cache add ca-certificates ffmpeg python3 py3-pip deno
+RUN apk --no-cache add ca-certificates ffmpeg python3 py3-pip deno nodejs npm
 RUN pip3 install --break-system-packages --no-cache-dir --no-deps -U yt-dlp bgutil-ytdlp-pot-provider
+RUN npm install -g vot-cli
 WORKDIR /srv
 
 CMD ["/srv/feed-master"]

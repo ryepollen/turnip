@@ -31,6 +31,7 @@ type TelegramBot struct {
 	TTSEnabled       bool
 	TTS              TTSProvider
 	ArticleExtractor *ArticleExtractor
+	VoiceoverSvc     *VoiceoverService
 }
 
 // TelegramBotParams contains all parameters for creating a new TelegramBot
@@ -90,6 +91,9 @@ func NewTelegramBot(params TelegramBotParams) (*TelegramBot, error) {
 		tb.ArticleExtractor = NewArticleExtractor()
 	}
 
+	// Initialize voiceover service (for YouTube voice-over translation)
+	tb.VoiceoverSvc = NewVoiceoverService(params.FilesLocation, "ru")
+
 	return tb, nil
 }
 
@@ -102,6 +106,7 @@ func (t *TelegramBot) Run(ctx context.Context) error {
 	t.Bot.Handle("/list", t.handleList)
 	t.Bot.Handle("/history", t.handleHistory)
 	t.Bot.Handle("/del", t.handleDelete)
+	t.Bot.Handle("/vo", t.handleVoiceover)
 	t.Bot.Handle("/help", t.handleHelp)
 	t.Bot.Handle("/start", t.handleHelp)
 
@@ -280,6 +285,7 @@ Send a URL to add audio to your feed:
 • Article/webpage → TTS озвучка (if enabled)
 
 Commands:
+/vo <url> - озвучка YouTube на русском
 /list - recent entries in feed
 /history - all entries with links
 /del - delete most recent
@@ -625,4 +631,126 @@ func (t *TelegramBot) createArticleEntry(article *Article, url, file string, dur
 		File:     file,
 		Duration: duration,
 	}
+}
+
+// handleVoiceover handles /vo command for YouTube voice-over translation
+func (t *TelegramBot) handleVoiceover(m *tb.Message) {
+	if !t.isAuthorized(m.Sender) {
+		return
+	}
+
+	// Extract YouTube URL from command argument
+	args := regexp.MustCompile(`\s+`).Split(m.Text, 2)
+	if len(args) < 2 || args[1] == "" {
+		_, _ = t.Bot.Send(m.Chat, "Usage: /vo <youtube_url>\nExample: /vo https://youtube.com/watch?v=xxx")
+		return
+	}
+
+	videoURL := args[1]
+	videoID := t.extractYouTubeVideoID(videoURL)
+	if videoID == "" {
+		_, _ = t.Bot.Send(m.Chat, "❌ Invalid YouTube URL")
+		return
+	}
+
+	// Check if vot-cli is available
+	if !IsVotCliAvailable() {
+		_, _ = t.Bot.Send(m.Chat, "❌ vot-cli not installed")
+		return
+	}
+
+	statusMsg, _ := t.Bot.Send(m.Chat, "⏳ Получаю озвучку...")
+	go func() {
+		if err := t.processVoiceover(context.Background(), m.Chat, statusMsg, m, videoURL, videoID); err != nil {
+			log.Printf("[ERROR] failed to process voiceover %s: %v", videoID, err)
+			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+		}
+	}()
+}
+
+// processVoiceover downloads voice-over translated audio for a YouTube video
+func (t *TelegramBot) processVoiceover(ctx context.Context, chat *tb.Chat, statusMsg, originalMsg *tb.Message, videoURL, videoID string) error {
+	// 1. Generate unique ID for this voiceover
+	voiceoverID := fmt.Sprintf("vo_%s", videoID)
+
+	// 2. Check if already processed
+	tempEntry := ytfeed.Entry{ChannelID: t.FeedName, VideoID: voiceoverID}
+	if found, _, _ := t.Store.CheckProcessed(tempEntry); found {
+		_, _ = t.Bot.Edit(statusMsg, "⚠️ Уже есть в ленте")
+		t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
+		return nil
+	}
+
+	// 3. Download voice-over translation
+	_, _ = t.Bot.Edit(statusMsg, "🎙 Скачиваю озвучку (может занять несколько минут)...")
+	result, err := t.VoiceoverSvc.TranslateVideo(ctx, videoURL)
+	if err != nil {
+		return fmt.Errorf("failed to get voiceover: %w", err)
+	}
+
+	// 4. Get duration from file
+	duration := result.Duration
+	if t.DurationSvc != nil {
+		if fileDur := t.DurationSvc.File(result.FilePath); fileDur > 0 {
+			duration = fileDur
+		}
+	}
+
+	// 5. Create entry
+	entry := ytfeed.Entry{
+		ChannelID: t.FeedName,
+		VideoID:   voiceoverID,
+		Title:     "🎙 " + result.Title,
+		Link: struct {
+			Href string `xml:"href,attr"`
+		}{Href: videoURL},
+		Published: time.Now(),
+		Updated:   time.Now(),
+		Media: struct {
+			Description template.HTML `xml:"description"`
+			Thumbnail   struct {
+				URL string `xml:"url,attr"`
+			} `xml:"thumbnail"`
+		}{
+			Description: template.HTML(fmt.Sprintf("Озвучка YouTube видео: %s", videoURL)),
+			Thumbnail:   struct{ URL string `xml:"url,attr"` }{URL: fmt.Sprintf("https://i.ytimg.com/vi/%s/hqdefault.jpg", videoID)},
+		},
+		Author: struct {
+			Name string `xml:"name"`
+			URI  string `xml:"uri"`
+		}{
+			Name: "Voice-over Translation",
+			URI:  videoURL,
+		},
+		File:     result.FilePath,
+		Duration: duration,
+	}
+
+	// 6. Store in BoltDB
+	created, err := t.Store.Save(entry)
+	if err != nil {
+		return fmt.Errorf("failed to save: %w", err)
+	}
+	if !created {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ Already exists: %s", result.Title))
+		t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
+		return nil
+	}
+
+	// 7. Mark as processed
+	if err := t.Store.SetProcessed(entry); err != nil {
+		log.Printf("[WARN] failed to mark as processed: %v", err)
+	}
+
+	// 8. Remove old entries if exceeding MaxItems
+	t.removeOldEntries()
+
+	dur := time.Duration(duration) * time.Second
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("✅ 🎙 %s (%s)", result.Title, t.formatDuration(dur)))
+
+	log.Printf("[INFO] added voiceover %s: %s (duration: %s)", voiceoverID, result.Title, dur.String())
+
+	// Delete user's message after delay
+	t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
+	return nil
 }
