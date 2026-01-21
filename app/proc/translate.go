@@ -34,13 +34,14 @@ func NewTranslator(targetLang string) *Translator {
 	}
 }
 
-// NewTranslatorWithKey creates a translator with API key
-func NewTranslatorWithKey(apiKey, targetLang string) *Translator {
+// NewTranslatorWithKey creates a translator with API key and folder ID
+func NewTranslatorWithKey(apiKey, folderID, targetLang string) *Translator {
 	if targetLang == "" {
 		targetLang = "ru"
 	}
 	return &Translator{
 		apiKey:     apiKey,
+		folderID:   folderID,
 		targetLang: targetLang,
 		client: &http.Client{
 			Timeout: 60 * time.Second,
@@ -50,6 +51,7 @@ func NewTranslatorWithKey(apiKey, targetLang string) *Translator {
 
 // yandexRequest is the request body for Yandex Translate API
 type yandexRequest struct {
+	FolderID           string   `json:"folderId"`
 	TargetLanguageCode string   `json:"targetLanguageCode"`
 	Texts              []string `json:"texts"`
 }
@@ -137,13 +139,17 @@ func (t *Translator) Translate(ctx context.Context, text string) (string, error)
 // translateChunk translates a single chunk of text using Yandex Translate API
 func (t *Translator) translateChunk(ctx context.Context, text, sourceLang string) (string, error) {
 	if t.apiKey == "" {
-		return "", fmt.Errorf("Yandex Translate API key not configured")
+		return "", fmt.Errorf("Yandex Translate API key not configured (set YANDEX_TRANSLATE_KEY)")
+	}
+	if t.folderID == "" {
+		return "", fmt.Errorf("Yandex Folder ID not configured (set YANDEX_FOLDER_ID)")
 	}
 
 	// Yandex Translate API endpoint
 	apiURL := "https://translate.api.cloud.yandex.net/translate/v2/translate"
 
 	reqBody := yandexRequest{
+		FolderID:           t.folderID,
 		TargetLanguageCode: t.targetLang,
 		Texts:              []string{text},
 	}

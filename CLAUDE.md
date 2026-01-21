@@ -164,14 +164,45 @@ MP3 файл в /srv/var/yt/
 Запись в BoltDB → появляется в RSS
 ```
 
-**Ограничения:**
-- Edge TTS обрабатывает ~3000 символов за раз, длинные статьи разбиваются на части
+**Ограничения и rate limiting:**
+- Edge TTS обрабатывает ~3000 символов за раз, длинные статьи разбиваются на чанки
+- Между чанками задержка 2 сек (чтобы не забанили)
+- Retry с exponential backoff при ошибках (5с → 10с → 20с, 3 попытки)
 - Некоторые сайты могут блокировать парсинг (403/Cloudflare)
 - Для статей не скачивается картинка-обложка
+- Большие статьи (40К+ символов) могут занять 5-10 минут
 
 **Реализация:**
 - `app/proc/article.go` — извлечение текста из URL
-- `app/proc/tts.go` — Edge TTS через WebSocket
+- `app/proc/tts.go` — обёртка над библиотекой `edge-tts-go`
+- `app/proc/translate.go` — перевод через Yandex Translate API
+- Используется библиотека [github.com/wujunwei928/edge-tts-go](https://github.com/wujunwei928/edge-tts-go) для работы с Microsoft Edge TTS
+
+### Перевод статей (Yandex Translate)
+
+Если статья на английском — автоматически переводится на русский перед озвучкой.
+
+**Как работает:**
+1. Определяется язык текста (кириллица vs латиница)
+2. Если не русский → перевод через Yandex Translate API
+3. Затем озвучка переведённого текста
+
+**Настройка:**
+- Нужен API ключ Yandex Cloud (бесплатно 10 млн символов/месяц)
+- Добавить в `/srv/etc/secrets.env`:
+  ```
+  YANDEX_TRANSLATE_KEY=ваш_api_ключ
+  YANDEX_FOLDER_ID=ваш_folder_id
+  ```
+
+**Как получить ключ:**
+1. Зарегистрироваться на [Yandex Cloud](https://cloud.yandex.ru/)
+2. Создать платёжный аккаунт (получишь грант ~4000₽)
+3. IAM → Сервисные аккаунты → Создать (роль: `ai.translate.user`)
+4. В сервисном аккаунте → Создать API-ключ
+5. Folder ID — в URL консоли или в шапке
+
+**Статус:** требует доработки — нужно добавить `folder_id` в запрос к API
 
 ### Особенности:
 - Сообщение со ссылкой удаляется через 5 сек после добавления
@@ -256,16 +287,21 @@ telegram_bot:
   tts_voice: "ru-RU-DmitryNeural"    # голос Edge TTS
 ```
 
-### Секреты (TELEGRAM_TOKEN)
+### Секреты (/srv/etc/secrets.env)
 
-Токен бота НЕ в конфиге, а в отдельном файле (не попадает в git):
+Секреты НЕ в конфиге, а в отдельном файле (не попадает в git):
 
 ```bash
-# Получить токен: Telegram → @BotFather → /mybots → выбрать бота → API Token
-# Формат файла: без кавычек вокруг значения!
-echo 'TELEGRAM_TOKEN=123456789:ABCdefGHI-jklMNOpqrSTUvwxYZ' > /srv/etc/secrets.env
-chmod 600 /srv/etc/secrets.env
+# Формат файла: без кавычек вокруг значений!
+TELEGRAM_TOKEN=123456789:ABCdefGHI-jklMNOpqrSTUvwxYZ
+YANDEX_TRANSLATE_KEY=AQVN...ваш_ключ
+YANDEX_FOLDER_ID=b1gxxxxxxxxx
 ```
+
+**Как получить:**
+- `TELEGRAM_TOKEN`: @BotFather → /mybots → выбрать бота → API Token
+- `YANDEX_TRANSLATE_KEY`: Yandex Cloud → IAM → Сервисные аккаунты → API-ключ
+- `YANDEX_FOLDER_ID`: Yandex Cloud → ID каталога (в URL или в шапке консоли)
 
 ### Запуск контейнера
 
@@ -416,45 +452,63 @@ docker run -d \
   -v /srv/etc:/srv/etc \
   -v /srv/var:/srv/var \
   -v /usr/local/bin/yt-dlp:/usr/local/bin/yt-dlp \
-  --label "com.centurylinklabs.watchtower.enable=true" \
   ghcr.io/ryepollen/turnip:latest /srv/feed-master -f /srv/etc/feed-master.yml
+```
+
+**Однострочная версия** (для SSH-in-browser, где многострочные команды не работают):
+```bash
+docker run -d --name turnip -p 8080:8080 --env-file /srv/etc/secrets.env -v /srv/etc:/srv/etc -v /srv/var:/srv/var -v /usr/local/bin/yt-dlp:/usr/local/bin/yt-dlp ghcr.io/ryepollen/turnip:latest /srv/feed-master -f /srv/etc/feed-master.yml
 ```
 
 **4. Запустить Watchtower:**
 ```bash
 docker run -d \
   --name watchtower \
+  -e DOCKER_API_VERSION=1.44 \
   -v /var/run/docker.sock:/var/run/docker.sock \
   containrrr/watchtower \
   --interval 300 \
-  --cleanup \
-  --label-enable
+  --cleanup
 ```
 
 **Что делают флаги Watchtower:**
+- `-e DOCKER_API_VERSION=1.44` — версия Docker API (важно для совместимости!)
 - `--interval 300` — проверять каждые 5 минут (300 сек)
 - `--cleanup` — удалять старые образы после обновления
-- `--label-enable` — обновлять только контейнеры с label `watchtower.enable=true`
 
 ### Проверка работы CI/CD
 
 ```bash
-# Посмотреть версию текущего образа
-docker inspect turnip | grep "Image"
+# Посмотреть версию текущего образа (коммит в имени)
+docker logs turnip | head -5
 
 # Логи Watchtower (видно когда обновляет)
 docker logs watchtower
 
-# Принудительно проверить обновления
-docker exec watchtower /watchtower --run-once
+# Проверить что Watchtower работает без ошибок
+docker logs watchtower | grep -i error
 ```
+
+### Проблемы с Watchtower
+
+**"client version X is too old. Minimum supported API version is Y":**
+```bash
+docker stop watchtower && docker rm watchtower
+docker run -d --name watchtower -e DOCKER_API_VERSION=1.44 -v /var/run/docker.sock:/var/run/docker.sock containrrr/watchtower --interval 300 --cleanup
+```
+
+**Watchtower не обновляет контейнер:**
+1. Проверь логи: `docker logs watchtower`
+2. Проверь что образ в ghcr.io обновился: GitHub → Actions → должен быть зелёный
+3. Подожди 5 минут (интервал проверки)
+4. Если срочно — обнови вручную (см. ниже)
 
 ### Ручное обновление (если нужно срочно)
 
 ```bash
 docker pull ghcr.io/ryepollen/turnip:latest
 docker stop turnip && docker rm turnip
-# запустить docker run заново (см. выше)
+docker run -d --name turnip -p 8080:8080 --env-file /srv/etc/secrets.env -v /srv/etc:/srv/etc -v /srv/var:/srv/var -v /usr/local/bin/yt-dlp:/usr/local/bin/yt-dlp ghcr.io/ryepollen/turnip:latest /srv/feed-master -f /srv/etc/feed-master.yml
 ```
 
 ### Workflow dispatch (ручной запуск сборки)
