@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -174,12 +175,9 @@ func (t *Translator) translateChunk(ctx context.Context, text, sourceLang string
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp yandexResponse
-		json.NewDecoder(resp.Body).Decode(&errResp)
-		if errResp.Error != nil {
-			return "", fmt.Errorf("Yandex API error: %s", errResp.Error.Message)
-		}
-		return "", fmt.Errorf("Yandex API returned status %d", resp.StatusCode)
+		// Read raw body for debugging
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("Yandex API error (status %d): %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var result yandexResponse
