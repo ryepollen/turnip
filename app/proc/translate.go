@@ -192,29 +192,32 @@ func (t *Translator) translateChunk(ctx context.Context, text, sourceLang string
 	return result.Translations[0].Text, nil
 }
 
-// splitTextForTranslation splits text into chunks at paragraph boundaries
+// splitTextForTranslation splits text into chunks, respecting maxSize limit
 func splitTextForTranslation(text string, maxSize int) []string {
 	if len(text) <= maxSize {
 		return []string{text}
 	}
 
 	var chunks []string
-	paragraphs := strings.Split(text, "\n\n")
 	var current strings.Builder
 
-	for _, para := range paragraphs {
-		if current.Len()+len(para)+2 > maxSize && current.Len() > 0 {
-			chunks = append(chunks, current.String())
+	// Split by sentences (. ! ? followed by space or newline)
+	words := strings.Fields(text)
+
+	for _, word := range words {
+		// If adding this word would exceed limit, start new chunk
+		if current.Len()+len(word)+1 > maxSize && current.Len() > 0 {
+			chunks = append(chunks, strings.TrimSpace(current.String()))
 			current.Reset()
 		}
 		if current.Len() > 0 {
-			current.WriteString("\n\n")
+			current.WriteString(" ")
 		}
-		current.WriteString(para)
+		current.WriteString(word)
 	}
 
 	if current.Len() > 0 {
-		chunks = append(chunks, current.String())
+		chunks = append(chunks, strings.TrimSpace(current.String()))
 	}
 
 	return chunks
