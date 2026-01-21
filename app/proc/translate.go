@@ -105,8 +105,8 @@ func (t *Translator) Translate(ctx context.Context, text string) (string, error)
 		return text, nil // already in target language
 	}
 
-	// Split into chunks if text is too long (Yandex limit is 10000 chars per request)
-	const maxChunkSize = 5000
+	// Split into chunks if text is too long (Yandex limit is 10000 bytes)
+	const maxChunkSize = 3000
 	if len(text) <= maxChunkSize {
 		return t.translateChunk(ctx, text, sourceLang)
 	}
