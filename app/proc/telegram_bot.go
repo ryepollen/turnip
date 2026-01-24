@@ -681,26 +681,40 @@ func (t *TelegramBot) processVoiceover(ctx context.Context, chat *tb.Chat, statu
 		return nil
 	}
 
-	// 3. Download voice-over translation
-	_, _ = t.Bot.Edit(statusMsg, "🎙 Скачиваю озвучку (может занять несколько минут)...")
+	// 3. Fetch video info first (for title and thumbnail)
+	_, _ = t.Bot.Edit(statusMsg, "⏳ Получаю информацию о видео...")
+	info, err := t.Downloader.GetInfo(ctx, videoURL)
+	if err != nil {
+		return fmt.Errorf("failed to get video info: %w", err)
+	}
+
+	// 4. Download voice-over translation
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🎙 Скачиваю озвучку: %s...", info.Title))
 	result, err := t.VoiceoverSvc.TranslateVideo(ctx, videoURL)
 	if err != nil {
 		return fmt.Errorf("failed to get voiceover: %w", err)
 	}
 
-	// 4. Get duration from file
-	duration := result.Duration
+	log.Printf("[INFO] voiceover downloaded: %s (size: %d bytes)", result.FilePath, result.FileSize)
+
+	// 5. Get duration from file
+	duration := 0
 	if t.DurationSvc != nil {
 		if fileDur := t.DurationSvc.File(result.FilePath); fileDur > 0 {
 			duration = fileDur
 		}
 	}
 
-	// 5. Create entry
+	// 6. Create entry using video info
+	thumbnail := info.Thumbnail
+	if thumbnail == "" {
+		thumbnail = fmt.Sprintf("https://i.ytimg.com/vi/%s/hqdefault.jpg", videoID)
+	}
+
 	entry := ytfeed.Entry{
 		ChannelID: t.FeedName,
 		VideoID:   voiceoverID,
-		Title:     "🎙 " + result.Title,
+		Title:     "🎙 " + info.Title,
 		Link: struct {
 			Href string `xml:"href,attr"`
 		}{Href: videoURL},
@@ -712,15 +726,15 @@ func (t *TelegramBot) processVoiceover(ctx context.Context, chat *tb.Chat, statu
 				URL string `xml:"url,attr"`
 			} `xml:"thumbnail"`
 		}{
-			Description: template.HTML(fmt.Sprintf("Озвучка YouTube видео: %s", videoURL)),
-			Thumbnail:   struct{ URL string `xml:"url,attr"` }{URL: fmt.Sprintf("https://i.ytimg.com/vi/%s/hqdefault.jpg", videoID)},
+			Description: template.HTML(fmt.Sprintf("Озвучка YouTube видео: %s\n%s", info.Title, info.Description)),
+			Thumbnail:   struct{ URL string `xml:"url,attr"` }{URL: thumbnail},
 		},
 		Author: struct {
 			Name string `xml:"name"`
 			URI  string `xml:"uri"`
 		}{
-			Name: "Voice-over Translation",
-			URI:  videoURL,
+			Name: info.Uploader,
+			URI:  info.ChannelURL,
 		},
 		File:     result.FilePath,
 		Duration: duration,

@@ -1,6 +1,7 @@
 package proc
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -8,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	log "github.com/go-pkgz/lgr"
 )
 
 // VoiceoverService handles YouTube video voice-over translation using vot-cli
@@ -32,6 +35,7 @@ type VoiceoverResult struct {
 	FilePath string
 	Title    string
 	Duration int
+	FileSize int64
 }
 
 // TranslateVideo downloads voice-over translated audio for a YouTube video
@@ -45,36 +49,50 @@ func (v *VoiceoverService) TranslateVideo(ctx context.Context, videoURL string) 
 	outputFile := filepath.Join(v.OutputDir, fmt.Sprintf("vo_%s_%d.mp3", videoID, time.Now().Unix()))
 
 	// Build vot-cli command
-	// vot-cli --reslang ru --output /path/to/file.mp3 "https://youtube.com/watch?v=xxx"
+	// vot-cli --output /path/to --output-file name.mp3 --reslang ru "URL"
 	args := []string{
+		"--output", v.OutputDir,
+		"--output-file", filepath.Base(outputFile),
 		"--reslang", v.TargetLang,
-		"--output", outputFile,
 		videoURL,
 	}
 
+	log.Printf("[INFO] running vot-cli with args: %v", args)
+
 	cmd := exec.CommandContext(ctx, "vot-cli", args...)
-	cmd.Stderr = os.Stderr // Log errors
 
-	output, err := cmd.Output()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+
+	log.Printf("[DEBUG] vot-cli stdout: %s", stdout.String())
+	log.Printf("[DEBUG] vot-cli stderr: %s", stderr.String())
+
 	if err != nil {
-		return nil, fmt.Errorf("vot-cli failed: %w (output: %s)", err, string(output))
+		return nil, fmt.Errorf("vot-cli failed: %w\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
 	}
 
-	// Check if file was created
-	if _, err := os.Stat(outputFile); os.IsNotExist(err) {
-		return nil, fmt.Errorf("vot-cli did not create output file")
+	// Check if file was created and has content
+	fileInfo, statErr := os.Stat(outputFile)
+	if os.IsNotExist(statErr) {
+		return nil, fmt.Errorf("vot-cli did not create output file at %s", outputFile)
+	}
+	if statErr != nil {
+		return nil, fmt.Errorf("failed to stat output file: %w", statErr)
+	}
+	if fileInfo.Size() == 0 {
+		return nil, fmt.Errorf("vot-cli created empty file")
 	}
 
-	// Try to extract title from output or use video ID
-	title := extractTitleFromOutput(string(output))
-	if title == "" {
-		title = "Voice-over: " + videoID
-	}
+	log.Printf("[INFO] vot-cli created file %s (size: %d bytes)", outputFile, fileInfo.Size())
 
 	return &VoiceoverResult{
 		FilePath: outputFile,
-		Title:    title,
-		Duration: 0, // Will be determined from file later
+		Title:    "", // Title will be set by caller using video info
+		Duration: 0,  // Will be determined from file later
+		FileSize: fileInfo.Size(),
 	}, nil
 }
 

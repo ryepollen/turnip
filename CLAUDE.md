@@ -2,6 +2,29 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Local Development Setup
+
+Go модули хранятся локально в `../go` (не в стандартном `~/go`).
+
+**Настройка окружения:**
+```bash
+# При первом клоне или после перезагрузки терминала:
+cd /Users/gustafv/Xraw/kit/syn/deer_claud/turnip
+direnv allow   # разрешить .envrc (один раз)
+
+# direnv автоматически установит GOPATH при входе в папку
+# Если direnv не установлен: source .envrc
+```
+
+**Структура:**
+```
+deer_claud/
+├── go/       ← Go модули (GOPATH)
+├── turnip/   ← этот репозиторий
+│   └── .envrc  ← export GOPATH="...deer_claud/go"
+└── feed-master/
+```
+
 ## Build, Test, Lint Commands
 ```bash
 # Run tests
