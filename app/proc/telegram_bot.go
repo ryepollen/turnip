@@ -746,7 +746,7 @@ func (t *TelegramBot) processVoiceover(ctx context.Context, chat *tb.Chat, statu
 		return fmt.Errorf("failed to save: %w", err)
 	}
 	if !created {
-		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ Already exists: %s", result.Title))
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ Already exists: %s", info.Title))
 		t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
 		return nil
 	}
@@ -760,9 +760,9 @@ func (t *TelegramBot) processVoiceover(ctx context.Context, chat *tb.Chat, statu
 	t.removeOldEntries()
 
 	dur := time.Duration(duration) * time.Second
-	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("✅ 🎙 %s (%s)", result.Title, t.formatDuration(dur)))
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("✅ 🎙 %s (%s)", info.Title, t.formatDuration(dur)))
 
-	log.Printf("[INFO] added voiceover %s: %s (duration: %s)", voiceoverID, result.Title, dur.String())
+	log.Printf("[INFO] added voiceover %s: %s (duration: %s)", voiceoverID, info.Title, dur.String())
 
 	// Delete user's message after delay
 	t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
