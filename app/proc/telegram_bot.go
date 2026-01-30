@@ -267,8 +267,26 @@ func (t *TelegramBot) handleDelete(m *tb.Message) {
 	// reset processed status so it can be re-added if needed
 	_ = t.Store.ResetProcessed(entry)
 
-	_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("🗑 Deleted: %s", entry.Title))
 	log.Printf("[INFO] deleted entry %s: %s", entry.VideoID, entry.Title)
+
+	// Show updated list after deletion
+	updatedEntries, err := t.Store.Load(t.FeedName, 10)
+	if err != nil {
+		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("🗑 Deleted: %s\n\n(Error loading updated list: %v)", entry.Title, err))
+		return
+	}
+
+	msg := fmt.Sprintf("🗑 Deleted: %s\n\n", entry.Title)
+	if len(updatedEntries) == 0 {
+		msg += "Feed is now empty."
+	} else {
+		msg += fmt.Sprintf("Remaining (%d):\n", len(updatedEntries))
+		for i, e := range updatedEntries {
+			dur := time.Duration(e.Duration) * time.Second
+			msg += fmt.Sprintf("%d. %s (%s)\n", i+1, e.Title, t.formatDuration(dur))
+		}
+	}
+	_, _ = t.Bot.Send(m.Chat, msg)
 }
 
 // handleHelp sends help message

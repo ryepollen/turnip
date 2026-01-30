@@ -74,10 +74,15 @@ func (d *Downloader) Get(ctx context.Context, id, fname string) (file string, er
 	cmd := exec.CommandContext(ctx, "sh", "-c", b1.String()) // nolint
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = d.logOutWriter
-	cmd.Stderr = d.logErrWriter
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = io.MultiWriter(d.logErrWriter, &stderrBuf)
 	cmd.Dir = d.destination
 	log.Printf("[DEBUG] executing command: %s", b1.String())
 	if err := cmd.Run(); err != nil {
+		stderrStr := stderrBuf.String()
+		if stderrStr != "" {
+			return "", fmt.Errorf("failed to execute command: %v\n%s", err, stderrStr)
+		}
 		return "", fmt.Errorf("failed to execute command: %v", err)
 	}
 
