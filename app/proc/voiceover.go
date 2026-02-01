@@ -40,6 +40,9 @@ type VoiceoverResult struct {
 
 // TranslateVideo downloads voice-over translated audio for a YouTube video
 func (v *VoiceoverService) TranslateVideo(ctx context.Context, videoURL string) (*VoiceoverResult, error) {
+	// Normalize URL: replace m.youtube.com with www.youtube.com
+	videoURL = normalizeYouTubeURL(videoURL)
+
 	// Create unique filename based on video ID and timestamp
 	videoID := extractVideoID(videoURL)
 	if videoID == "" {
@@ -59,7 +62,11 @@ func (v *VoiceoverService) TranslateVideo(ctx context.Context, videoURL string) 
 
 	log.Printf("[INFO] running vot-cli with args: %v", args)
 
-	cmd := exec.CommandContext(ctx, "vot-cli", args...)
+	// Use timeout context for vot-cli (30 minutes max for long videos)
+	cmdCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(cmdCtx, "vot-cli", args...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -94,6 +101,14 @@ func (v *VoiceoverService) TranslateVideo(ctx context.Context, videoURL string) 
 		Duration: 0,  // Will be determined from file later
 		FileSize: fileInfo.Size(),
 	}, nil
+}
+
+// normalizeYouTubeURL converts mobile and other YouTube URL variants to standard format
+func normalizeYouTubeURL(url string) string {
+	// Replace mobile URL with standard
+	url = strings.Replace(url, "m.youtube.com", "www.youtube.com", 1)
+	url = strings.Replace(url, "music.youtube.com", "www.youtube.com", 1)
+	return url
 }
 
 // extractVideoID extracts YouTube video ID from URL

@@ -32,6 +32,8 @@ type TelegramBot struct {
 	TTS              TTSProvider
 	ArticleExtractor *ArticleExtractor
 	VoiceoverSvc     *VoiceoverService
+	SubtitleSvc      *SubtitleService
+	Translator       *Translator
 }
 
 // TelegramBotParams contains all parameters for creating a new TelegramBot
@@ -93,6 +95,10 @@ func NewTelegramBot(params TelegramBotParams) (*TelegramBot, error) {
 
 	// Initialize voiceover service (for YouTube voice-over translation)
 	tb.VoiceoverSvc = NewVoiceoverService(params.FilesLocation, "ru")
+
+	// Initialize subtitle service and translator (for long video fallback)
+	tb.SubtitleSvc = NewSubtitleService(params.FilesLocation)
+	tb.Translator = NewTranslatorWithKey(os.Getenv("YANDEX_TRANSLATE_KEY"), os.Getenv("YANDEX_FOLDER_ID"), "ru")
 
 	return tb, nil
 }
@@ -706,24 +712,42 @@ func (t *TelegramBot) processVoiceover(ctx context.Context, chat *tb.Chat, statu
 		return fmt.Errorf("failed to get video info: %w", err)
 	}
 
-	// 4. Download voice-over translation
-	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🎙 Скачиваю озвучку: %s...", info.Title))
-	result, err := t.VoiceoverSvc.TranslateVideo(ctx, videoURL)
-	if err != nil {
-		return fmt.Errorf("failed to get voiceover: %w", err)
-	}
+	// 4. Choose method based on video duration
+	maxDuration := 4 * 60 * 60 // 4 hours in seconds
+	var filePath string
+	var duration int
 
-	log.Printf("[INFO] voiceover downloaded: %s (size: %d bytes)", result.FilePath, result.FileSize)
+	if int(info.Duration) > maxDuration {
+		// Fallback: use subtitles + translation + TTS for long videos
+		log.Printf("[INFO] video > 4 hours, using subtitle fallback for %s", videoID)
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("📝 Видео > 4ч, скачиваю субтитры: %s...", info.Title))
 
-	// 5. Get duration from file
-	duration := 0
-	if t.DurationSvc != nil {
-		if fileDur := t.DurationSvc.File(result.FilePath); fileDur > 0 {
-			duration = fileDur
+		fp, dur, err := t.processVoiceoverViaSubtitles(ctx, statusMsg, videoURL, videoID, info)
+		if err != nil {
+			return err
+		}
+		filePath = fp
+		duration = dur
+	} else {
+		// Normal path: use vot-cli for videos under 4 hours
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🎙 Скачиваю озвучку: %s...", info.Title))
+		result, err := t.VoiceoverSvc.TranslateVideo(ctx, videoURL)
+		if err != nil {
+			return fmt.Errorf("failed to get voiceover: %w", err)
+		}
+
+		log.Printf("[INFO] voiceover downloaded: %s (size: %d bytes)", result.FilePath, result.FileSize)
+		filePath = result.FilePath
+
+		// Get duration from file
+		if t.DurationSvc != nil {
+			if fileDur := t.DurationSvc.File(filePath); fileDur > 0 {
+				duration = fileDur
+			}
 		}
 	}
 
-	// 6. Create entry using video info
+	// 7. Create entry using video info
 	thumbnail := info.Thumbnail
 	if thumbnail == "" {
 		thumbnail = fmt.Sprintf("https://i.ytimg.com/vi/%s/hqdefault.jpg", videoID)
@@ -754,11 +778,11 @@ func (t *TelegramBot) processVoiceover(ctx context.Context, chat *tb.Chat, statu
 			Name: info.Uploader,
 			URI:  info.ChannelURL,
 		},
-		File:     result.FilePath,
+		File:     filePath,
 		Duration: duration,
 	}
 
-	// 6. Store in BoltDB
+	// 8. Store in BoltDB
 	created, err := t.Store.Save(entry)
 	if err != nil {
 		return fmt.Errorf("failed to save: %w", err)
@@ -769,12 +793,12 @@ func (t *TelegramBot) processVoiceover(ctx context.Context, chat *tb.Chat, statu
 		return nil
 	}
 
-	// 7. Mark as processed
+	// 9. Mark as processed
 	if err := t.Store.SetProcessed(entry); err != nil {
 		log.Printf("[WARN] failed to mark as processed: %v", err)
 	}
 
-	// 8. Remove old entries if exceeding MaxItems
+	// 10. Remove old entries if exceeding MaxItems
 	t.removeOldEntries()
 
 	dur := time.Duration(duration) * time.Second
@@ -785,4 +809,81 @@ func (t *TelegramBot) processVoiceover(ctx context.Context, chat *tb.Chat, statu
 	// Delete user's message after delay
 	t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
 	return nil
+}
+
+// processVoiceoverViaSubtitles handles long videos (>4h) by downloading subtitles,
+// translating them, and converting to speech via Edge TTS
+func (t *TelegramBot) processVoiceoverViaSubtitles(ctx context.Context, statusMsg *tb.Message, videoURL, videoID string, info *ytfeed.VideoInfo) (string, int, error) {
+	// 1. Download subtitles
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("📝 Скачиваю субтитры: %s...", info.Title))
+	subFile, lang, err := t.SubtitleSvc.DownloadSubtitles(ctx, videoURL)
+	if err != nil {
+		return "", 0, fmt.Errorf("не удалось скачать субтитры: %w", err)
+	}
+	defer t.SubtitleSvc.Cleanup(subFile)
+
+	// 2. Parse subtitles to text
+	_, _ = t.Bot.Edit(statusMsg, "📄 Извлекаю текст из субтитров...")
+	text, err := t.SubtitleSvc.ParseSubtitles(subFile)
+	if err != nil {
+		return "", 0, fmt.Errorf("не удалось распарсить субтитры: %w", err)
+	}
+
+	if text == "" {
+		return "", 0, fmt.Errorf("субтитры пустые")
+	}
+
+	charCount := len([]rune(text))
+	log.Printf("[INFO] extracted %d characters from subtitles (lang: %s)", charCount, lang)
+
+	// 3. Translate if not Russian
+	if lang != "ru" && t.Translator != nil && t.Translator.NeedsTranslation(text) {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🌐 Перевожу с %s на русский (%d символов)...", lang, charCount))
+		translated, err := t.Translator.Translate(ctx, text)
+		if err != nil {
+			return "", 0, fmt.Errorf("не удалось перевести: %w", err)
+		}
+		text = translated
+		charCount = len([]rune(text))
+	}
+
+	// 4. Convert to speech via Edge TTS
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🔊 Озвучиваю (%d символов, это займёт время)...", charCount))
+
+	// Need TTS provider
+	if t.TTS == nil {
+		// Initialize TTS if not available
+		t.TTS = NewEdgeTTS("ru-RU-DmitryNeural")
+	}
+
+	edgeTTS, ok := t.TTS.(*EdgeTTS)
+	if !ok {
+		return "", 0, fmt.Errorf("TTS провайдер недоступен")
+	}
+
+	audioData, err := edgeTTS.SynthesizeLongText(ctx, text, 3000)
+	if err != nil {
+		return "", 0, fmt.Errorf("не удалось озвучить: %w", err)
+	}
+
+	// 5. Save audio file
+	filePath := fmt.Sprintf("%s/vo_%s_%d.mp3", t.FilesLocation, videoID, time.Now().Unix())
+	if err := os.WriteFile(filePath, audioData, 0644); err != nil {
+		return "", 0, fmt.Errorf("не удалось сохранить файл: %w", err)
+	}
+
+	// 6. Get duration
+	duration := 0
+	if t.DurationSvc != nil {
+		if fileDur := t.DurationSvc.File(filePath); fileDur > 0 {
+			duration = fileDur
+		}
+	}
+	if duration == 0 {
+		// Estimate: ~900 chars/min for Russian TTS
+		duration = int(float64(charCount) / 900.0 * 60.0)
+	}
+
+	log.Printf("[INFO] subtitle voiceover created: %s (chars: %d, duration: %ds)", filePath, charCount, duration)
+	return filePath, duration, nil
 }
