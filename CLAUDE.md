@@ -233,30 +233,47 @@ MP3 файл в /srv/var/yt/
 
 Команда `/vo` позволяет получить озвучку YouTube видео на русском языке.
 
-**Как работает:**
+**Как работает (умный выбор метода):**
+```
+Видео < 4 часов  → vot-cli (Yandex Voice-Over, быстро, качественно)
+Видео ≥ 4 часов  → субтитры + Yandex Translate + Edge TTS (fallback)
+```
+
 1. Отправляешь `/vo https://youtube.com/watch?v=xxx`
-2. vot-cli скачивает озвучку через Yandex Voice-Over Translation API
-3. Сохраняет mp3 и добавляет в RSS ленту
+2. Бот определяет длительность видео
+3. Короткие видео: vot-cli скачивает готовую озвучку через Yandex API
+4. Длинные видео (Lex Fridman и т.п.): скачиваются субтитры → переводятся → озвучиваются через Edge TTS
+5. Сохраняет mp3 и добавляет в RSS ленту
 
 **Что это такое:**
 - Yandex использует этот сервис для автоматической озвучки видео на YouTube и других платформах
 - Озвучка делается синтетическим голосом (TTS) на основе машинного перевода
 - Работает для большинства английских видео на YouTube
+- Для длинных видео (>4ч) Yandex API не работает, поэтому используется fallback через субтитры
 
 **Технические детали:**
 - Использует [vot-cli](https://github.com/ilyhalight/voice-over-translation) — CLI версия браузерного расширения
 - Установлен в Docker-образ через `npm install -g vot-cli`
 - Файлы сохраняются как `vo_{video_id}_{timestamp}.mp3`
 - Thumbnail берётся из YouTube (`i.ytimg.com`)
+- URL автоматически нормализуется (m.youtube.com → www.youtube.com)
+- Таймаут vot-cli: 30 минут
+
+**Fallback для длинных видео (>4 часов):**
+- Субтитры скачиваются через yt-dlp (--write-auto-sub)
+- Парсинг VTT/SRT → чистый текст
+- Перевод через Yandex Translate (если не на русском)
+- Озвучка через Edge TTS
+- Размер файла: ~60 MB/час (128kbps)
 
 **Реализация:**
-- `app/proc/voiceover.go` — VoiceoverService
-- `app/proc/telegram_bot.go` — handleVoiceover, processVoiceover
+- `app/proc/voiceover.go` — VoiceoverService (vot-cli)
+- `app/proc/subtitle.go` — SubtitleService (скачивание и парсинг субтитров)
+- `app/proc/telegram_bot.go` — handleVoiceover, processVoiceover, processVoiceoverViaSubtitles
 
 **Ограничения:**
-- Зависит от доступности Yandex API
-- Не все видео имеют озвучку (зависит от языка и контента)
-- Качество перевода варьируется
+- vot-cli: зависит от доступности Yandex API, не все видео имеют озвучку
+- Fallback: требует наличия субтитров (авто или ручных), длинные видео занимают много времени на озвучку
 
 ### Особенности:
 - Сообщение со ссылкой удаляется через 5 сек после добавления
