@@ -712,40 +712,69 @@ func (t *TelegramBot) processVoiceover(ctx context.Context, chat *tb.Chat, statu
 		return fmt.Errorf("failed to get video info: %w", err)
 	}
 
-	// 4. Choose method based on video duration
-	maxDuration := 4 * 60 * 60 // 4 hours in seconds
+	// 4. Choose voiceover method (priority: YouTube Dubbed → vot-cli → subtitles)
 	var filePath string
 	var duration int
+	var method string
 
-	if int(info.Duration) > maxDuration {
-		// Fallback: use subtitles + translation + TTS for long videos
-		log.Printf("[INFO] video > 4 hours, using subtitle fallback for %s", videoID)
-		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("📝 Видео > 4ч, скачиваю субтитры: %s...", info.Title))
+	// 4a. Try YouTube Dubbed track first
+	_, _ = t.Bot.Edit(statusMsg, "🔍 Ищу русскую дорожку на YouTube...")
+	tracks, trackErr := t.VoiceoverSvc.GetDubbedAudioTracks(ctx, videoURL)
+	dubbedTrack := t.VoiceoverSvc.FindDubbedTrack(tracks)
 
-		fp, dur, err := t.processVoiceoverViaSubtitles(ctx, statusMsg, videoURL, videoID, info)
+	if trackErr == nil && dubbedTrack != nil {
+		// Found dubbed track - download it
+		log.Printf("[INFO] found YouTube dubbed track (lang=%s) for %s", dubbedTrack.Language, videoID)
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🎬 Скачиваю дубляж YouTube: %s...", info.Title))
+
+		result, err := t.VoiceoverSvc.DownloadDubbedTrack(ctx, videoURL, dubbedTrack)
 		if err != nil {
-			return err
-		}
-		filePath = fp
-		duration = dur
-	} else {
-		// Normal path: use vot-cli for videos under 4 hours
-		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🎙 Скачиваю озвучку: %s...", info.Title))
-		result, err := t.VoiceoverSvc.TranslateVideo(ctx, videoURL)
-		if err != nil {
-			return fmt.Errorf("failed to get voiceover: %w", err)
-		}
-
-		log.Printf("[INFO] voiceover downloaded: %s (size: %d bytes)", result.FilePath, result.FileSize)
-		filePath = result.FilePath
-
-		// Get duration from file
-		if t.DurationSvc != nil {
-			if fileDur := t.DurationSvc.File(filePath); fileDur > 0 {
-				duration = fileDur
-			}
+			log.Printf("[WARN] failed to download dubbed track, falling back: %v", err)
+		} else {
+			filePath = result.FilePath
+			method = "youtube-dubbed"
+			log.Printf("[INFO] downloaded YouTube dubbed track: %s", filePath)
 		}
 	}
+
+	// 4b. Fallback to vot-cli or subtitles if no dubbed track
+	if filePath == "" {
+		maxDuration := 4 * 60 * 60 // 4 hours in seconds
+
+		if int(info.Duration) > maxDuration {
+			// Subtitles fallback for long videos
+			log.Printf("[INFO] video > 4 hours, using subtitle fallback for %s", videoID)
+			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("📝 Видео > 4ч, скачиваю субтитры: %s...", info.Title))
+
+			fp, dur, err := t.processVoiceoverViaSubtitles(ctx, statusMsg, videoURL, videoID, info)
+			if err != nil {
+				return err
+			}
+			filePath = fp
+			duration = dur
+			method = "subtitles-tts"
+		} else {
+			// vot-cli for videos under 4 hours
+			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🎙 Скачиваю озвучку (vot-cli): %s...", info.Title))
+			result, err := t.VoiceoverSvc.TranslateVideo(ctx, videoURL)
+			if err != nil {
+				return fmt.Errorf("failed to get voiceover: %w", err)
+			}
+
+			log.Printf("[INFO] voiceover downloaded via vot-cli: %s (size: %d bytes)", result.FilePath, result.FileSize)
+			filePath = result.FilePath
+			method = "vot-cli"
+		}
+	}
+
+	// Get duration from file if not already set
+	if duration == 0 && t.DurationSvc != nil {
+		if fileDur := t.DurationSvc.File(filePath); fileDur > 0 {
+			duration = fileDur
+		}
+	}
+
+	log.Printf("[INFO] voiceover complete via %s: %s", method, filePath)
 
 	// 7. Create entry using video info
 	thumbnail := info.Thumbnail
@@ -753,10 +782,19 @@ func (t *TelegramBot) processVoiceover(ctx context.Context, chat *tb.Chat, statu
 		thumbnail = fmt.Sprintf("https://i.ytimg.com/vi/%s/hqdefault.jpg", videoID)
 	}
 
+	// Choose emoji based on method
+	titleEmoji := "🎙" // default for vot-cli
+	switch method {
+	case "youtube-dubbed":
+		titleEmoji = "🎬" // official dub
+	case "subtitles-tts":
+		titleEmoji = "📝" // subtitles
+	}
+
 	entry := ytfeed.Entry{
 		ChannelID: t.FeedName,
 		VideoID:   voiceoverID,
-		Title:     "🎙 " + info.Title,
+		Title:     titleEmoji + " " + info.Title,
 		Link: struct {
 			Href string `xml:"href,attr"`
 		}{Href: videoURL},
@@ -768,7 +806,7 @@ func (t *TelegramBot) processVoiceover(ctx context.Context, chat *tb.Chat, statu
 				URL string `xml:"url,attr"`
 			} `xml:"thumbnail"`
 		}{
-			Description: template.HTML(fmt.Sprintf("Озвучка YouTube видео: %s\n%s", info.Title, info.Description)),
+			Description: template.HTML(fmt.Sprintf("Озвучка YouTube видео (%s): %s\n%s", method, info.Title, info.Description)),
 			Thumbnail:   struct{ URL string `xml:"url,attr"` }{URL: thumbnail},
 		},
 		Author: struct {
@@ -802,9 +840,9 @@ func (t *TelegramBot) processVoiceover(ctx context.Context, chat *tb.Chat, statu
 	t.removeOldEntries()
 
 	dur := time.Duration(duration) * time.Second
-	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("✅ 🎙 %s (%s)", info.Title, t.formatDuration(dur)))
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("✅ %s %s (%s)", titleEmoji, info.Title, t.formatDuration(dur)))
 
-	log.Printf("[INFO] added voiceover %s: %s (duration: %s)", voiceoverID, info.Title, dur.String())
+	log.Printf("[INFO] added voiceover %s via %s: %s (duration: %s)", voiceoverID, method, info.Title, dur.String())
 
 	// Delete user's message after delay
 	t.deleteMessageAfterDelay(originalMsg, 5*time.Second)

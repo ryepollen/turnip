@@ -3,6 +3,7 @@ package proc
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,14 @@ import (
 
 	log "github.com/go-pkgz/lgr"
 )
+
+// AudioTrack represents a YouTube audio track (original or dubbed)
+type AudioTrack struct {
+	FormatID string
+	Language string
+	Quality  string
+	Bitrate  int
+}
 
 // VoiceoverService handles YouTube video voice-over translation using vot-cli
 type VoiceoverService struct {
@@ -161,4 +170,151 @@ func extractTitleFromOutput(output string) string {
 func IsVotCliAvailable() bool {
 	_, err := exec.LookPath("vot-cli")
 	return err == nil
+}
+
+// ytdlpFormat represents a format from yt-dlp --dump-json output
+type ytdlpFormat struct {
+	FormatID   string  `json:"format_id"`
+	Language   string  `json:"language"`
+	Resolution string  `json:"resolution"`
+	Ext        string  `json:"ext"`
+	Abr        float64 `json:"abr"`
+	Vcodec     string  `json:"vcodec"`
+	Acodec     string  `json:"acodec"`
+}
+
+// ytdlpInfo represents video info from yt-dlp --dump-json
+type ytdlpInfo struct {
+	Formats []ytdlpFormat `json:"formats"`
+}
+
+// GetDubbedAudioTracks returns available dubbed audio tracks for a YouTube video
+func (v *VoiceoverService) GetDubbedAudioTracks(ctx context.Context, videoURL string) ([]AudioTrack, error) {
+	videoURL = normalizeYouTubeURL(videoURL)
+
+	cmdCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(cmdCtx, "yt-dlp", "--dump-json", "--no-download", videoURL)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("yt-dlp dump-json failed: %w\nstderr: %s", err, stderr.String())
+	}
+
+	var info ytdlpInfo
+	if err := json.Unmarshal(stdout.Bytes(), &info); err != nil {
+		return nil, fmt.Errorf("failed to parse yt-dlp output: %w", err)
+	}
+
+	var tracks []AudioTrack
+	seen := make(map[string]bool)
+
+	for _, f := range info.Formats {
+		// Audio-only formats have vcodec=none and acodec != none
+		if f.Vcodec != "none" || f.Acodec == "none" || f.Acodec == "" {
+			continue
+		}
+
+		// Skip if no language info
+		if f.Language == "" {
+			continue
+		}
+
+		// Avoid duplicates (same language, keep best quality)
+		key := f.Language
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		tracks = append(tracks, AudioTrack{
+			FormatID: f.FormatID,
+			Language: f.Language,
+			Quality:  f.Ext,
+			Bitrate:  int(f.Abr),
+		})
+	}
+
+	log.Printf("[INFO] found %d audio tracks for %s", len(tracks), videoURL)
+	for _, t := range tracks {
+		log.Printf("[DEBUG] audio track: lang=%s format=%s bitrate=%d", t.Language, t.FormatID, t.Bitrate)
+	}
+
+	return tracks, nil
+}
+
+// FindDubbedTrack finds a dubbed track for the target language
+func (v *VoiceoverService) FindDubbedTrack(tracks []AudioTrack) *AudioTrack {
+	for _, t := range tracks {
+		// Check for exact match or prefix match (e.g., "ru" matches "ru-RU")
+		if t.Language == v.TargetLang || strings.HasPrefix(t.Language, v.TargetLang+"-") ||
+			strings.HasPrefix(v.TargetLang, t.Language+"-") {
+			return &t
+		}
+	}
+	return nil
+}
+
+// DownloadDubbedTrack downloads a specific audio track using yt-dlp
+func (v *VoiceoverService) DownloadDubbedTrack(ctx context.Context, videoURL string, track *AudioTrack) (*VoiceoverResult, error) {
+	videoURL = normalizeYouTubeURL(videoURL)
+
+	videoID := extractVideoID(videoURL)
+	if videoID == "" {
+		return nil, fmt.Errorf("could not extract video ID")
+	}
+
+	outputFile := filepath.Join(v.OutputDir, fmt.Sprintf("vo_%s_%d.mp3", videoID, time.Now().Unix()))
+
+	// Download specific audio track and convert to mp3
+	args := []string{
+		"-f", track.FormatID,
+		"--extract-audio",
+		"--audio-format", "mp3",
+		"--audio-quality", "128K",
+		"-o", outputFile,
+		videoURL,
+	}
+
+	log.Printf("[INFO] downloading dubbed track (lang=%s, format=%s) for %s", track.Language, track.FormatID, videoURL)
+
+	cmdCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(cmdCtx, "yt-dlp", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("yt-dlp download failed: %w\nstderr: %s", err, stderr.String())
+	}
+
+	// yt-dlp might add extension, find the actual file
+	actualFile := outputFile
+	if _, err := os.Stat(outputFile); os.IsNotExist(err) {
+		// Try with .mp3 extension if not already
+		if !strings.HasSuffix(outputFile, ".mp3") {
+			actualFile = outputFile + ".mp3"
+		}
+	}
+
+	fileInfo, err := os.Stat(actualFile)
+	if err != nil {
+		return nil, fmt.Errorf("downloaded file not found: %w", err)
+	}
+
+	if fileInfo.Size() == 0 {
+		return nil, fmt.Errorf("downloaded file is empty")
+	}
+
+	log.Printf("[INFO] downloaded dubbed track: %s (size: %d bytes)", actualFile, fileInfo.Size())
+
+	return &VoiceoverResult{
+		FilePath: actualFile,
+		FileSize: fileInfo.Size(),
+	}, nil
 }
