@@ -195,7 +195,9 @@ func (v *VoiceoverService) GetDubbedAudioTracks(ctx context.Context, videoURL st
 	cmdCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, "yt-dlp", "--dump-json", "--no-download", videoURL)
+	cmd := exec.CommandContext(cmdCtx, "yt-dlp", "--dump-json", "--no-download",
+		"--extractor-args", "youtube:player_client=web_creator,mweb",
+		videoURL)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -275,6 +277,7 @@ func (v *VoiceoverService) DownloadDubbedTrack(ctx context.Context, videoURL str
 		"--extract-audio",
 		"--audio-format", "mp3",
 		"--audio-quality", "128K",
+		"--extractor-args", "youtube:player_client=web_creator,mweb",
 		"-o", outputFile,
 		videoURL,
 	}

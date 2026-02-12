@@ -99,7 +99,9 @@ func (d *Downloader) GetInfo(ctx context.Context, videoURL string) (*VideoInfo, 
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "yt-dlp", "--dump-json", "--no-download", videoURL)
+	cmd := exec.CommandContext(ctx, "yt-dlp", "--dump-json", "--no-download",
+		"--extractor-args", "youtube:player_client=web_creator,mweb",
+		videoURL)
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = io.MultiWriter(d.logErrWriter, &stderrBuf)
 
