@@ -326,7 +326,8 @@ MP3 файл в /srv/var/yt/
 /srv/
 ├── etc/
 │   ├── feed-master.yml    # конфиг приложения
-│   └── secrets.env        # TELEGRAM_TOKEN (не в git!)
+│   ├── secrets.env        # TELEGRAM_TOKEN (не в git!)
+│   └── cookies.txt        # YouTube cookies для аутентификации (не в git!)
 └── var/
     ├── yt/                # скачанные mp3 файлы (хэш от feed_name+video_id)
     ├── images/
@@ -351,6 +352,7 @@ system:
 youtube:
   files_location: /srv/var/yt
   rss_location: /srv/var/rss
+  cookies_file: /srv/etc/cookies.txt  # YouTube cookies для аутентификации
 
 telegram_bot:
   enabled: true
@@ -463,11 +465,41 @@ docker exec turnip env | grep TELEGRAM
 - Часто: неверный токен → "telegram: Not Found (404)"
 
 **"container name already in use":**
-- `docker stop turnip && docker rm turnip` перед новым запуском
+- `docker rm -f turnip` перед новым запуском
 
-**Файлы не скачиваются:**
+**Файлы не скачиваются / "Please sign in":**
+- YouTube требует аутентификацию с IP дата-центров. Нужен файл cookies.txt
+- Проверь что cookies на месте: `ls -la /srv/etc/cookies.txt`
 - Проверь что yt-dlp работает: `docker exec turnip yt-dlp --version`
-- Предупреждения про SABR/pot:bgutil — не критичны, скачивание работает
+- Обнови yt-dlp: `sudo yt-dlp -U`
+- Предупреждения про pot:bgutil — не критичны, если cookies настроены
+
+**yt-dlp зависает / таймаут:**
+- GetInfo имеет таймаут 2 минуты — если yt-dlp завис, будет убит
+- Часто помогает: `sudo yt-dlp -U` (обновить до последней версии)
+- Все вызовы yt-dlp используют `--no-playlist` и `--extractor-args "youtube:player_client=web_creator"`
+
+### YouTube Cookies (аутентификация yt-dlp)
+
+YouTube блокирует неаутентифицированные запросы с серверных IP (дата-центры).
+Cookies из браузера содержат YouTube-сессию и позволяют yt-dlp работать.
+
+**Как обновить cookies:**
+1. Установи расширение [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) для Chrome
+2. Открой youtube.com (убедись что залогинен)
+3. Нажми на расширение → Export → сохрани как `cookies.txt`
+4. Загрузи на сервер (SSH → Upload file)
+5. `sudo mv ~/cookies.txt /srv/etc/cookies.txt`
+6. `docker restart turnip`
+
+**Когда обновлять:** cookies истекают через несколько месяцев. Если появилась ошибка "Please sign in" — пора обновить.
+
+**Конфиг:** `cookies_file: /srv/etc/cookies.txt` в секции `youtube:` файла `feed-master.yml`
+
+**Реализация:** `cookies_file` передаётся как `--cookies` флаг во все вызовы yt-dlp:
+- `app/youtube/feed/downloader.go` — `ytdlpArgs()` хелпер в Downloader
+- `app/proc/voiceover.go` — `ytdlpArgs()` хелпер в VoiceoverService
+- `app/proc/subtitle.go` — SubtitleService.CookiesFile
 
 ### SSH доступ
 
@@ -583,9 +615,7 @@ docker run -d --name watchtower -e DOCKER_API_VERSION=1.44 -v /var/run/docker.so
 ### Ручное обновление (если нужно срочно)
 
 ```bash
-docker pull ghcr.io/ryepollen/turnip:latest
-docker stop turnip && docker rm turnip
-docker run -d --name turnip -p 8080:8080 --env-file /srv/etc/secrets.env -v /srv/etc:/srv/etc -v /srv/var:/srv/var -v /usr/local/bin/yt-dlp:/usr/local/bin/yt-dlp ghcr.io/ryepollen/turnip:latest /srv/feed-master -f /srv/etc/feed-master.yml
+docker pull ghcr.io/ryepollen/turnip:latest && docker rm -f turnip && docker run -d --name turnip -p 8080:8080 --env-file /srv/etc/secrets.env -v /srv/etc:/srv/etc -v /srv/var:/srv/var -v /usr/local/bin/yt-dlp:/usr/local/bin/yt-dlp ghcr.io/ryepollen/turnip:latest /srv/feed-master -f /srv/etc/feed-master.yml
 ```
 
 ### Workflow dispatch (ручной запуск сборки)
