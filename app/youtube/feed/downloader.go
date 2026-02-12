@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"text/template"
+	"time"
 
 	log "github.com/go-pkgz/lgr"
 )
@@ -95,6 +96,9 @@ func (d *Downloader) Get(ctx context.Context, id, fname string) (file string, er
 
 // GetInfo fetches video metadata without downloading using yt-dlp --dump-json
 func (d *Downloader) GetInfo(ctx context.Context, videoURL string) (*VideoInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
 	cmd := exec.CommandContext(ctx, "yt-dlp", "--dump-json", "--no-download", videoURL)
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = io.MultiWriter(d.logErrWriter, &stderrBuf)
