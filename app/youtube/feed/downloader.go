@@ -96,10 +96,15 @@ func (d *Downloader) Get(ctx context.Context, id, fname string) (file string, er
 // GetInfo fetches video metadata without downloading using yt-dlp --dump-json
 func (d *Downloader) GetInfo(ctx context.Context, videoURL string) (*VideoInfo, error) {
 	cmd := exec.CommandContext(ctx, "yt-dlp", "--dump-json", "--no-download", videoURL)
-	cmd.Stderr = d.logErrWriter
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = io.MultiWriter(d.logErrWriter, &stderrBuf)
 
 	output, err := cmd.Output()
 	if err != nil {
+		stderrStr := stderrBuf.String()
+		if stderrStr != "" {
+			return nil, fmt.Errorf("failed to get video info: %w\n%s", err, stderrStr)
+		}
 		return nil, fmt.Errorf("failed to get video info: %w", err)
 	}
 
