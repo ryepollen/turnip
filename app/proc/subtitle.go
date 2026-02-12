@@ -44,7 +44,8 @@ func (s *SubtitleService) DownloadSubtitles(ctx context.Context, videoURL string
 		"--sub-lang", "en,ru",
 		"--sub-format", "vtt/srt/best",
 		"--skip-download",
-		"--extractor-args", "youtube:player_client=web_creator,mweb",
+		"--no-playlist",
+		"--extractor-args", "youtube:player_client=web_creator",
 		"--output", outputTemplate,
 		videoURL,
 	}

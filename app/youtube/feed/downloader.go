@@ -100,7 +100,8 @@ func (d *Downloader) GetInfo(ctx context.Context, videoURL string) (*VideoInfo, 
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "yt-dlp", "--dump-json", "--no-download",
-		"--extractor-args", "youtube:player_client=web_creator,mweb",
+		"--no-playlist",
+		"--extractor-args", "youtube:player_client=web_creator",
 		videoURL)
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = io.MultiWriter(d.logErrWriter, &stderrBuf)
