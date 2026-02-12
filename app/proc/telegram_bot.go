@@ -51,6 +51,7 @@ type TelegramBotParams struct {
 	BaseURL       string
 	TTSEnabled    bool
 	TTSVoice      string
+	CookiesFile   string
 }
 
 // NewTelegramBot creates a new bot for receiving YouTube URLs
@@ -94,10 +95,10 @@ func NewTelegramBot(params TelegramBotParams) (*TelegramBot, error) {
 	}
 
 	// Initialize voiceover service (for YouTube voice-over translation)
-	tb.VoiceoverSvc = NewVoiceoverService(params.FilesLocation, "ru")
+	tb.VoiceoverSvc = NewVoiceoverService(params.FilesLocation, "ru", params.CookiesFile)
 
 	// Initialize subtitle service and translator (for long video fallback)
-	tb.SubtitleSvc = NewSubtitleService(params.FilesLocation)
+	tb.SubtitleSvc = NewSubtitleService(params.FilesLocation, params.CookiesFile)
 	tb.Translator = NewTranslatorWithKey(os.Getenv("YANDEX_TRANSLATE_KEY"), os.Getenv("YANDEX_FOLDER_ID"), "ru")
 
 	return tb, nil

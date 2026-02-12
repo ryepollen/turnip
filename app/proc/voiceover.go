@@ -24,19 +24,33 @@ type AudioTrack struct {
 
 // VoiceoverService handles YouTube video voice-over translation using vot-cli
 type VoiceoverService struct {
-	OutputDir  string
-	TargetLang string
+	OutputDir   string
+	TargetLang  string
+	CookiesFile string
 }
 
 // NewVoiceoverService creates a new voiceover service
-func NewVoiceoverService(outputDir, targetLang string) *VoiceoverService {
+func NewVoiceoverService(outputDir, targetLang, cookiesFile string) *VoiceoverService {
 	if targetLang == "" {
 		targetLang = "ru"
 	}
 	return &VoiceoverService{
-		OutputDir:  outputDir,
-		TargetLang: targetLang,
+		OutputDir:   outputDir,
+		TargetLang:  targetLang,
+		CookiesFile: cookiesFile,
 	}
+}
+
+// ytdlpArgs returns common yt-dlp arguments including cookies if configured
+func (v *VoiceoverService) ytdlpArgs(args ...string) []string {
+	var result []string
+	if v.CookiesFile != "" {
+		result = append(result, "--cookies", v.CookiesFile)
+	}
+	result = append(result, "--no-playlist")
+	result = append(result, "--extractor-args", "youtube:player_client=web_creator")
+	result = append(result, args...)
+	return result
 }
 
 // VoiceoverResult contains the result of voice-over translation
@@ -195,10 +209,7 @@ func (v *VoiceoverService) GetDubbedAudioTracks(ctx context.Context, videoURL st
 	cmdCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, "yt-dlp", "--dump-json", "--no-download",
-		"--no-playlist",
-		"--extractor-args", "youtube:player_client=web_creator",
-		videoURL)
+	cmd := exec.CommandContext(cmdCtx, "yt-dlp", v.ytdlpArgs("--dump-json", "--no-download", videoURL)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -273,16 +284,14 @@ func (v *VoiceoverService) DownloadDubbedTrack(ctx context.Context, videoURL str
 	outputFile := filepath.Join(v.OutputDir, fmt.Sprintf("vo_%s_%d.mp3", videoID, time.Now().Unix()))
 
 	// Download specific audio track and convert to mp3
-	args := []string{
+	args := v.ytdlpArgs(
 		"-f", track.FormatID,
 		"--extract-audio",
 		"--audio-format", "mp3",
 		"--audio-quality", "128K",
-		"--no-playlist",
-		"--extractor-args", "youtube:player_client=web_creator",
 		"-o", outputFile,
 		videoURL,
-	}
+	)
 
 	log.Printf("[INFO] downloading dubbed track (lang=%s, format=%s) for %s", track.Language, track.FormatID, videoURL)
 

@@ -103,7 +103,7 @@ func main() {
 		log.Printf("[INFO] initializing youtube service")
 		outWr := log.ToWriter(log.Default(), "DEBUG")
 		errWr := log.ToWriter(log.Default(), "INFO")
-		dwnl := ytfeed.NewDownloader(conf.YouTube.DlTemplate, outWr, errWr, conf.YouTube.FilesLocation)
+		dwnl := ytfeed.NewDownloader(conf.YouTube.DlTemplate, outWr, errWr, conf.YouTube.FilesLocation, conf.YouTube.CookiesFile)
 		fd := ytfeed.Feed{Client: &http.Client{Timeout: 10 * time.Second},
 			ChannelBaseURL: conf.YouTube.BaseChanURL, PlaylistBaseURL: conf.YouTube.BasePlaylistURL}
 
@@ -161,7 +161,7 @@ func main() {
 
 		outWr := log.ToWriter(log.Default(), "DEBUG")
 		errWr := log.ToWriter(log.Default(), "INFO")
-		botDownloader := ytfeed.NewDownloader(conf.YouTube.DlTemplate, outWr, errWr, conf.YouTube.FilesLocation)
+		botDownloader := ytfeed.NewDownloader(conf.YouTube.DlTemplate, outWr, errWr, conf.YouTube.FilesLocation, conf.YouTube.CookiesFile)
 
 		tgBot, err := proc.NewTelegramBot(proc.TelegramBotParams{
 			Token:         opts.TelegramToken,
@@ -177,6 +177,7 @@ func main() {
 			BaseURL:       conf.System.BaseURL,
 			TTSEnabled:    conf.TelegramBot.TTSEnabled,
 			TTSVoice:      conf.TelegramBot.TTSVoice,
+			CookiesFile:   conf.YouTube.CookiesFile,
 		})
 		if err != nil {
 			log.Printf("[ERROR] failed to create telegram bot: %v", err)

@@ -17,12 +17,13 @@ import (
 
 // SubtitleService handles downloading and parsing YouTube subtitles
 type SubtitleService struct {
-	OutputDir string
+	OutputDir   string
+	CookiesFile string
 }
 
 // NewSubtitleService creates a new subtitle service
-func NewSubtitleService(outputDir string) *SubtitleService {
-	return &SubtitleService{OutputDir: outputDir}
+func NewSubtitleService(outputDir, cookiesFile string) *SubtitleService {
+	return &SubtitleService{OutputDir: outputDir, CookiesFile: cookiesFile}
 }
 
 // DownloadSubtitles downloads subtitles for a YouTube video using yt-dlp
@@ -45,10 +46,12 @@ func (s *SubtitleService) DownloadSubtitles(ctx context.Context, videoURL string
 		"--sub-format", "vtt/srt/best",
 		"--skip-download",
 		"--no-playlist",
-		"--extractor-args", "youtube:player_client=web_creator",
 		"--output", outputTemplate,
-		videoURL,
 	}
+	if s.CookiesFile != "" {
+		args = append([]string{"--cookies", s.CookiesFile}, args...)
+	}
+	args = append(args, "--extractor-args", "youtube:player_client=web_creator", videoURL)
 
 	log.Printf("[INFO] downloading subtitles with args: %v", args)
 

@@ -39,17 +39,31 @@ type Downloader struct {
 	logOutWriter io.Writer
 	logErrWriter io.Writer
 	destination  string
+	cookiesFile  string
 }
 
 // NewDownloader creates a new Downloader with the given template (full command with placeholders for {{.ID}} and {{.Filename}}.
 // Destination is the directory where the audio files will be stored.
-func NewDownloader(tmpl string, logOutWriter, logErrWriter io.Writer, destination string) *Downloader {
+func NewDownloader(tmpl string, logOutWriter, logErrWriter io.Writer, destination, cookiesFile string) *Downloader {
 	return &Downloader{
 		ytTemplate:   tmpl,
 		logOutWriter: logOutWriter,
 		logErrWriter: logErrWriter,
 		destination:  destination,
+		cookiesFile:  cookiesFile,
 	}
+}
+
+// ytdlpArgs returns common yt-dlp arguments including cookies if configured
+func (d *Downloader) ytdlpArgs(args ...string) []string {
+	var result []string
+	if d.cookiesFile != "" {
+		result = append(result, "--cookies", d.cookiesFile)
+	}
+	result = append(result, "--no-playlist")
+	result = append(result, "--extractor-args", "youtube:player_client=web_creator")
+	result = append(result, args...)
+	return result
 }
 
 // Get downloads a video from youtube and extracts audio.
@@ -99,10 +113,7 @@ func (d *Downloader) GetInfo(ctx context.Context, videoURL string) (*VideoInfo, 
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "yt-dlp", "--dump-json", "--no-download",
-		"--no-playlist",
-		"--extractor-args", "youtube:player_client=web_creator",
-		videoURL)
+	cmd := exec.CommandContext(ctx, "yt-dlp", d.ytdlpArgs("--dump-json", "--no-download", videoURL)...)
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = io.MultiWriter(d.logErrWriter, &stderrBuf)
 
