@@ -190,8 +190,8 @@ func (s *BoltDB) Remove(entry feed.Entry) error {
 					return fmt.Errorf("failed to delete %s (%s): %w", string(k), item.VideoID, err)
 				}
 				log.Printf("[INFO] delete %s - %s", string(k), item.String())
+				return nil
 			}
-			return nil
 		}
 		return nil
 	})
