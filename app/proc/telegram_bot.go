@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	log "github.com/go-pkgz/lgr"
@@ -194,7 +195,9 @@ func (t *TelegramBot) handleList(m *tb.Message) {
 		msg += fmt.Sprintf("%d. %s (%s)\n", i+1, e.Title, dur.String())
 	}
 
-	_, _ = t.Bot.Send(m.Chat, msg)
+	for _, chunk := range splitTelegramMessage(msg, 4096) {
+		_, _ = t.Bot.Send(m.Chat, chunk)
+	}
 }
 
 // handleHistory shows history of all processed videos
@@ -219,7 +222,9 @@ func (t *TelegramBot) handleHistory(m *tb.Message) {
 		msg += fmt.Sprintf("%d. %s\n%s\n\n", i+1, e.Title, e.Link.Href)
 	}
 
-	_, _ = t.Bot.Send(m.Chat, msg, tb.NoPreview)
+	for _, chunk := range splitTelegramMessage(msg, 4096) {
+		_, _ = t.Bot.Send(m.Chat, chunk, tb.NoPreview)
+	}
 }
 
 // handleDelete removes entry from feed and deletes file from disk
@@ -548,6 +553,12 @@ func (t *TelegramBot) processArticle(ctx context.Context, chat *tb.Chat, statusM
 	}
 
 	// 4. Convert to speech
+	const maxTextLen = 150000 // ~2.5 hours of audio
+	runes := []rune(article.TextContent)
+	if len(runes) > maxTextLen {
+		article.TextContent = string(runes[:maxTextLen])
+		log.Printf("[WARN] article text truncated from %d to %d characters", len(runes), maxTextLen)
+	}
 	charCount := len([]rune(article.TextContent))
 	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🔊 Озвучиваю: %s (%d символов)...", article.Title, charCount))
 
@@ -872,6 +883,13 @@ func (t *TelegramBot) processVoiceoverViaSubtitles(ctx context.Context, statusMs
 		return "", 0, fmt.Errorf("субтитры пустые")
 	}
 
+	const maxSubtitleLen = 150000 // ~2.5 hours of audio
+	subRunes := []rune(text)
+	if len(subRunes) > maxSubtitleLen {
+		text = string(subRunes[:maxSubtitleLen])
+		log.Printf("[WARN] subtitle text truncated from %d to %d characters", len(subRunes), maxSubtitleLen)
+	}
+
 	charCount := len([]rune(text))
 	log.Printf("[INFO] extracted %d characters from subtitles (lang: %s)", charCount, lang)
 
@@ -925,4 +943,33 @@ func (t *TelegramBot) processVoiceoverViaSubtitles(ctx context.Context, statusMs
 
 	log.Printf("[INFO] subtitle voiceover created: %s (chars: %d, duration: %ds)", filePath, charCount, duration)
 	return filePath, duration, nil
+}
+
+// splitTelegramMessage splits a message into chunks that fit within Telegram's message size limit.
+// Splits at line boundaries to avoid breaking entries mid-line.
+func splitTelegramMessage(msg string, maxSize int) []string {
+	if len(msg) <= maxSize {
+		return []string{msg}
+	}
+
+	var chunks []string
+	lines := strings.Split(msg, "\n")
+	var current strings.Builder
+
+	for _, line := range lines {
+		if current.Len()+len(line)+1 > maxSize && current.Len() > 0 {
+			chunks = append(chunks, current.String())
+			current.Reset()
+		}
+		if current.Len() > 0 {
+			current.WriteString("\n")
+		}
+		current.WriteString(line)
+	}
+
+	if current.Len() > 0 {
+		chunks = append(chunks, current.String())
+	}
+
+	return chunks
 }

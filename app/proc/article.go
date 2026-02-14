@@ -3,6 +3,7 @@ package proc
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -63,8 +64,9 @@ func (e *ArticleExtractor) Extract(ctx context.Context, rawURL string) (*Article
 		return nil, fmt.Errorf("HTTP error: %d", resp.StatusCode)
 	}
 
-	// Parse with readability
-	article, err := readability.FromReader(resp.Body, parsedURL)
+	// Parse with readability, limit response body to 5 MB to prevent OOM on huge pages
+	limitedBody := io.LimitReader(resp.Body, 5*1024*1024)
+	article, err := readability.FromReader(limitedBody, parsedURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse article: %w", err)
 	}
