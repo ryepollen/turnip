@@ -93,6 +93,7 @@ func TestProcessor_DoRemoveOldItems(t *testing.T) {
 				FilesLocation   string             `yaml:"files_location"`
 				RSSLocation     string             `yaml:"rss_location"`
 				SkipShorts      time.Duration      `yaml:"skip_shorts"`
+				CookiesFile     string             `yaml:"cookies_file"`
 				DisableUpdates  bool               `yaml:"disable_updates"`
 				YtDlpUpdate     struct {
 					Interval time.Duration `yaml:"interval"`
@@ -232,6 +233,7 @@ func TestProcessor_DoLoadMaxItems(t *testing.T) {
 				FilesLocation   string             `yaml:"files_location"`
 				RSSLocation     string             `yaml:"rss_location"`
 				SkipShorts      time.Duration      `yaml:"skip_shorts"`
+				CookiesFile     string             `yaml:"cookies_file"`
 				DisableUpdates  bool               `yaml:"disable_updates"`
 				YtDlpUpdate     struct {
 					Interval time.Duration `yaml:"interval"`
@@ -336,6 +338,7 @@ func TestProcessor_DoSkipItems(t *testing.T) {
 				FilesLocation   string             `yaml:"files_location"`
 				RSSLocation     string             `yaml:"rss_location"`
 				SkipShorts      time.Duration      `yaml:"skip_shorts"`
+				CookiesFile     string             `yaml:"cookies_file"`
 				DisableUpdates  bool               `yaml:"disable_updates"`
 				YtDlpUpdate     struct {
 					Interval time.Duration `yaml:"interval"`
