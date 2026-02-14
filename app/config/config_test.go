@@ -100,7 +100,7 @@ func TestSetDefault(t *testing.T) {
 			BaseURL             string        `yaml:"base_url"`
 		}{
 			UpdateInterval:      time.Minute * 5,
-			HTTPResponseTimeout: time.Second * 30,
+			HTTPResponseTimeout: 10 * time.Minute,
 			MaxItems:            5,
 			MaxTotal:            100,
 			MaxKeepInDB:         5000,

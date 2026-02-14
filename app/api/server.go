@@ -117,11 +117,12 @@ func (s *Server) loadTemplates() {
 func (s *Server) router() http.Handler {
 	router := routegroup.New(http.NewServeMux())
 	router.Use(rest.RealIP, rest.Recoverer(log.Default()))
-	router.Use(rest.Throttle(1000), timeout(60*time.Second))
+	router.Use(rest.Throttle(1000))
 	router.Use(rest.AppInfo("feed-master", "umputun", s.Version), rest.Ping)
 	router.Use(rest.Throttle(5)) // rate limiter, replaces tollbooth
 
 	router.Group().Route(func(rimg *routegroup.Bundle) {
+		rimg.Use(timeout(60 * time.Second))
 		l := logger.New(logger.Log(log.Default()), logger.Prefix("[DEBUG]"), logger.IPfn(logger.AnonymizeIP))
 		rimg.Use(l.Handler)
 		rimg.HandleFunc("GET /images/{name}", s.getImageCtrl)
@@ -129,6 +130,7 @@ func (s *Server) router() http.Handler {
 	})
 
 	router.Group().Route(func(rrss *routegroup.Bundle) {
+		rrss.Use(timeout(60 * time.Second))
 		l := logger.New(logger.Log(log.Default()), logger.Prefix("[INFO]"), logger.IPfn(logger.AnonymizeIP))
 		rrss.Use(l.Handler)
 		rrss.HandleFunc("GET /rss/{name}", s.getFeedCtrl)
@@ -139,9 +141,13 @@ func (s *Server) router() http.Handler {
 		rrss.HandleFunc("GET /feeds", s.getFeedsPageCtrl)
 	})
 
-	router.HandleFunc("GET /config", func(w http.ResponseWriter, _ *http.Request) { rest.RenderJSON(w, s.Conf) })
+	router.Group().Route(func(rcfg *routegroup.Bundle) {
+		rcfg.Use(timeout(60 * time.Second))
+		rcfg.HandleFunc("GET /config", func(w http.ResponseWriter, _ *http.Request) { rest.RenderJSON(w, s.Conf) })
+	})
 
 	router.Mount("/yt").Route(func(r *routegroup.Bundle) {
+		r.Use(timeout(60 * time.Second))
 		auth := rest.BasicAuth(func(user, passwd string) bool {
 			return (subtle.ConstantTimeCompare([]byte(s.AdminPasswd), []byte(passwd)) +
 				subtle.ConstantTimeCompare([]byte("admin"), []byte(user))) == 2
@@ -168,7 +174,7 @@ func (s *Server) router() http.Handler {
 
 		ytfs, fsErr := rest.NewFileServer(baseYtURL.Path, s.Conf.YouTube.FilesLocation)
 		if fsErr == nil {
-			router.Handle(baseYtURL.Path+"/{file...}", ytfs)
+			router.Handle(baseYtURL.Path+"/{file...}", cacheControl(ytfs, "public, max-age=604800"))
 		} else {
 			log.Printf("[WARN] can't start static file server for yt, %v", fsErr)
 		}
@@ -404,4 +410,12 @@ func timeout(dt time.Duration) func(http.Handler) http.Handler {
 	return func(h http.Handler) http.Handler {
 		return http.TimeoutHandler(h, dt, "timeout")
 	}
+}
+
+// cacheControl wraps handler adding Cache-Control header
+func cacheControl(h http.Handler, value string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", value)
+		h.ServeHTTP(w, r)
+	})
 }

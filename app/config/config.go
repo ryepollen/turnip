@@ -157,7 +157,7 @@ func (c *Conf) setDefaults() {
 		c.System.UpdateInterval = time.Minute * 5
 	}
 	if c.System.HTTPResponseTimeout == 0 {
-		c.System.HTTPResponseTimeout = time.Second * 30
+		c.System.HTTPResponseTimeout = 10 * time.Minute
 	}
 
 	// set default values for feeds
