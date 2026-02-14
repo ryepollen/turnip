@@ -37,6 +37,12 @@ type TelegramBot struct {
 	Translator       *Translator
 }
 
+const (
+	defaultListPageSize    = 10
+	defaultHistoryPageSize = 10
+	maxPageSize            = 50
+)
+
 // TelegramBotParams contains all parameters for creating a new TelegramBot
 type TelegramBotParams struct {
 	Token         string
@@ -118,6 +124,12 @@ func (t *TelegramBot) Run(ctx context.Context) error {
 	t.Bot.Handle("/help", t.handleHelp)
 	t.Bot.Handle("/start", t.handleHelp)
 
+	// Callback handlers for pagination and delete actions
+	listPageBtn := (&tb.ReplyMarkup{}).Data("list_page", "list_page")
+	listDelBtn := (&tb.ReplyMarkup{}).Data("list_del", "list_del")
+	t.Bot.Handle(listPageBtn, t.handleListPageCallback)
+	t.Bot.Handle(listDelBtn, t.handleListDeleteCallback)
+
 	// Start polling in goroutine
 	go t.Bot.Start()
 
@@ -178,7 +190,8 @@ func (t *TelegramBot) handleList(m *tb.Message) {
 		return
 	}
 
-	entries, err := t.Store.Load(t.FeedName, 10)
+	pageSize := t.parsePageSize(m.Text, defaultListPageSize)
+	entries, err := t.Store.Load(t.FeedName, t.MaxItems)
 	if err != nil {
 		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Error loading entries: %v", err))
 		return
@@ -189,15 +202,8 @@ func (t *TelegramBot) handleList(m *tb.Message) {
 		return
 	}
 
-	msg := fmt.Sprintf("Recent videos (%d):\n\n", len(entries))
-	for i, e := range entries {
-		dur := time.Duration(e.Duration) * time.Second
-		msg += fmt.Sprintf("%d. %s (%s)\n", i+1, e.Title, dur.String())
-	}
-
-	for _, chunk := range splitTelegramMessage(msg, 4096) {
-		_, _ = t.Bot.Send(m.Chat, chunk)
-	}
+	msg, markup := t.buildListMessage("list", entries, 0, pageSize)
+	_, _ = t.Bot.Send(m.Chat, msg, markup)
 }
 
 // handleHistory shows history of all processed videos
@@ -206,6 +212,7 @@ func (t *TelegramBot) handleHistory(m *tb.Message) {
 		return
 	}
 
+	pageSize := t.parsePageSize(m.Text, defaultHistoryPageSize)
 	entries, err := t.Store.Load(t.FeedName, t.MaxItems)
 	if err != nil {
 		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Error: %v", err))
@@ -217,14 +224,8 @@ func (t *TelegramBot) handleHistory(m *tb.Message) {
 		return
 	}
 
-	msg := fmt.Sprintf("📜 History (%d):\n\n", len(entries))
-	for i, e := range entries {
-		msg += fmt.Sprintf("%d. %s\n%s\n\n", i+1, e.Title, e.Link.Href)
-	}
-
-	for _, chunk := range splitTelegramMessage(msg, 4096) {
-		_, _ = t.Bot.Send(m.Chat, chunk, tb.NoPreview)
-	}
+	msg, markup := t.buildListMessage("history", entries, 0, pageSize)
+	_, _ = t.Bot.Send(m.Chat, msg, markup, tb.NoPreview)
 }
 
 // handleDelete removes entry from feed and deletes file from disk
@@ -261,25 +262,10 @@ func (t *TelegramBot) handleDelete(m *tb.Message) {
 
 	entry := entries[idx-1]
 
-	// delete audio file from disk
-	if entry.File != "" {
-		if err := os.Remove(entry.File); err != nil && !os.IsNotExist(err) {
-			log.Printf("[WARN] failed to delete file %s: %v", entry.File, err)
-		} else {
-			log.Printf("[INFO] deleted file %s", entry.File)
-		}
-	}
-
-	// remove from database
-	if err := t.Store.Remove(entry); err != nil {
+	if err := t.deleteEntry(entry); err != nil {
 		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Error removing: %v", err))
 		return
 	}
-
-	// reset processed status so it can be re-added if needed
-	_ = t.Store.ResetProcessed(entry)
-
-	log.Printf("[INFO] deleted entry %s: %s", entry.VideoID, entry.Title)
 
 	// Show updated list after deletion
 	updatedEntries, err := t.Store.Load(t.FeedName, 10)
@@ -513,6 +499,221 @@ func (t *TelegramBot) extractURL(text string) string {
 	re := regexp.MustCompile(`https?://[^\s<>"{}|\\^` + "`" + `\[\]]+`)
 	matches := re.FindString(text)
 	return matches
+}
+
+// parsePageSize extracts optional page size from command text
+func (t *TelegramBot) parsePageSize(text string, def int) int {
+	parts := regexp.MustCompile(`\s+`).Split(text, -1)
+	if len(parts) < 2 || parts[1] == "" {
+		return def
+	}
+	var n int
+	if _, err := fmt.Sscanf(parts[1], "%d", &n); err != nil || n < 1 {
+		return def
+	}
+	if n > maxPageSize {
+		return maxPageSize
+	}
+	return n
+}
+
+// buildListMessage builds paginated list/history output and inline keyboard
+func (t *TelegramBot) buildListMessage(kind string, entries []ytfeed.Entry, page, pageSize int) (string, *tb.ReplyMarkup) {
+	if pageSize <= 0 {
+		pageSize = defaultListPageSize
+	}
+	if page < 0 {
+		page = 0
+	}
+	total := len(entries)
+	pages := (total + pageSize - 1) / pageSize
+	if pages == 0 {
+		pages = 1
+	}
+	if page >= pages {
+		page = pages - 1
+	}
+
+	start := page * pageSize
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+
+	var msg string
+	if kind == "history" {
+		msg = fmt.Sprintf("📜 History (%d) — page %d/%d:\n\n", total, page+1, pages)
+	} else {
+		msg = fmt.Sprintf("Recent videos (%d) — page %d/%d:\n\n", total, page+1, pages)
+	}
+
+	for i := start; i < end; i++ {
+		num := i + 1
+		e := entries[i]
+		if kind == "history" {
+			msg += fmt.Sprintf("%d. %s\n%s\n\n", num, e.Title, e.Link.Href)
+		} else {
+			dur := time.Duration(e.Duration) * time.Second
+			msg += fmt.Sprintf("%d. %s (%s)\n", num, e.Title, t.formatDuration(dur))
+		}
+	}
+
+	markup := &tb.ReplyMarkup{}
+
+	// Pagination buttons
+	if pages > 1 {
+		prevPage := page - 1
+		if prevPage < 0 {
+			prevPage = pages - 1
+		}
+		nextPage := page + 1
+		if nextPage >= pages {
+			nextPage = 0
+		}
+
+		btnPrev := markup.Data("◀︎", "list_page", t.packCallbackData(kind, prevPage, pageSize, ""))
+		btnNext := markup.Data("▶︎", "list_page", t.packCallbackData(kind, nextPage, pageSize, ""))
+		markup.InlineKeyboard = append(markup.InlineKeyboard, []tb.InlineButton{*btnPrev.Inline(), *btnNext.Inline()})
+	}
+
+	// Quick delete buttons for list view only
+	if kind == "list" {
+		row := []tb.InlineButton{}
+		for i := start; i < end; i++ {
+			num := i + 1
+			entry := entries[i]
+			btn := markup.Data(fmt.Sprintf("🗑 %d", num), "list_del", t.packCallbackData(kind, page, pageSize, entry.VideoID))
+			row = append(row, *btn.Inline())
+			if len(row) == 5 {
+				markup.InlineKeyboard = append(markup.InlineKeyboard, row)
+				row = []tb.InlineButton{}
+			}
+		}
+		if len(row) > 0 {
+			markup.InlineKeyboard = append(markup.InlineKeyboard, row)
+		}
+	}
+
+	return msg, markup
+}
+
+func (t *TelegramBot) packCallbackData(kind string, page, pageSize int, videoID string) string {
+	if videoID == "" {
+		return fmt.Sprintf("k=%s|p=%d|s=%d", kind, page, pageSize)
+	}
+	return fmt.Sprintf("k=%s|p=%d|s=%d|v=%s", kind, page, pageSize, videoID)
+}
+
+func (t *TelegramBot) unpackCallbackData(data string) (kind string, page int, pageSize int, videoID string) {
+	page = 0
+	pageSize = defaultListPageSize
+	parts := strings.Split(data, "|")
+	for _, p := range parts {
+		kv := strings.SplitN(p, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		switch kv[0] {
+		case "k":
+			kind = kv[1]
+		case "p":
+			_, _ = fmt.Sscanf(kv[1], "%d", &page)
+		case "s":
+			_, _ = fmt.Sscanf(kv[1], "%d", &pageSize)
+		case "v":
+			videoID = kv[1]
+		}
+	}
+	if pageSize < 1 {
+		pageSize = defaultListPageSize
+	}
+	if pageSize > maxPageSize {
+		pageSize = maxPageSize
+	}
+	return kind, page, pageSize, videoID
+}
+
+func (t *TelegramBot) handleListPageCallback(c *tb.Callback) {
+	if c == nil || c.Message == nil || !t.isAuthorized(c.Sender) {
+		return
+	}
+
+	kind, page, pageSize, _ := t.unpackCallbackData(c.Data)
+	if kind != "list" && kind != "history" {
+		kind = "list"
+	}
+
+	entries, err := t.Store.Load(t.FeedName, t.MaxItems)
+	if err != nil {
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Error loading entries"})
+		return
+	}
+
+	msg, markup := t.buildListMessage(kind, entries, page, pageSize)
+	_, _ = t.Bot.Edit(c.Message, msg, markup, tb.NoPreview)
+	_ = t.Bot.Respond(c)
+}
+
+func (t *TelegramBot) handleListDeleteCallback(c *tb.Callback) {
+	if c == nil || c.Message == nil || !t.isAuthorized(c.Sender) {
+		return
+	}
+
+	kind, page, pageSize, videoID := t.unpackCallbackData(c.Data)
+	if videoID == "" {
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Missing video id"})
+		return
+	}
+
+	entries, err := t.Store.Load(t.FeedName, t.MaxItems)
+	if err != nil {
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Error loading entries"})
+		return
+	}
+
+	var entry *ytfeed.Entry
+	for i := range entries {
+		if entries[i].VideoID == videoID {
+			entry = &entries[i]
+			break
+		}
+	}
+	if entry == nil {
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Not found"})
+		return
+	}
+
+	if err := t.deleteEntry(*entry); err != nil {
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Delete failed"})
+		return
+	}
+
+	entries, _ = t.Store.Load(t.FeedName, t.MaxItems)
+	msg, markup := t.buildListMessage(kind, entries, page, pageSize)
+	_, _ = t.Bot.Edit(c.Message, msg, markup, tb.NoPreview)
+	_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Deleted"})
+}
+
+func (t *TelegramBot) deleteEntry(entry ytfeed.Entry) error {
+	// delete audio file from disk
+	if entry.File != "" {
+		if err := os.Remove(entry.File); err != nil && !os.IsNotExist(err) {
+			log.Printf("[WARN] failed to delete file %s: %v", entry.File, err)
+		} else {
+			log.Printf("[INFO] deleted file %s", entry.File)
+		}
+	}
+
+	// remove from database
+	if err := t.Store.Remove(entry); err != nil {
+		return err
+	}
+
+	// reset processed status so it can be re-added if needed
+	_ = t.Store.ResetProcessed(entry)
+
+	log.Printf("[INFO] deleted entry %s: %s", entry.VideoID, entry.Title)
+	return nil
 }
 
 // processArticle extracts article text, converts to speech, and adds to feed
