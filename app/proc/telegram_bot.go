@@ -157,7 +157,12 @@ func (t *TelegramBot) handleText(m *tb.Message) {
 		go func() {
 			if err := t.processVideo(context.Background(), m.Chat, statusMsg, m, videoID); err != nil {
 				log.Printf("[ERROR] failed to process video %s: %v", videoID, err)
-				_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+				if ytfeed.IsCookieError(err.Error()) {
+					_, _ = t.Bot.Edit(statusMsg,
+						"❌ YouTube cookies expired. This video requires authentication.\nRun update-cookies.sh to fix.")
+				} else {
+					_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+				}
 			}
 		}()
 		return
@@ -900,7 +905,12 @@ func (t *TelegramBot) handleVoiceover(m *tb.Message) {
 	go func() {
 		if err := t.processVoiceover(context.Background(), m.Chat, statusMsg, m, videoURL, videoID); err != nil {
 			log.Printf("[ERROR] failed to process voiceover %s: %v", videoID, err)
-			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+			if ytfeed.IsCookieError(err.Error()) {
+				_, _ = t.Bot.Edit(statusMsg,
+					"❌ YouTube cookies expired. This video requires authentication.\nRun update-cookies.sh to fix.")
+			} else {
+				_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+			}
 		}
 	}()
 }

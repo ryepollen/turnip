@@ -12,6 +12,8 @@ import (
 	"time"
 
 	log "github.com/go-pkgz/lgr"
+
+	ytfeed "github.com/umputun/feed-master/app/youtube/feed"
 )
 
 // AudioTrack represents a YouTube audio track (original or dubbed)
@@ -41,10 +43,11 @@ func NewVoiceoverService(outputDir, targetLang, cookiesFile string) *VoiceoverSe
 	}
 }
 
-// ytdlpArgs returns common yt-dlp arguments including cookies if configured
-func (v *VoiceoverService) ytdlpArgs(args ...string) []string {
+// ytdlpArgs returns common yt-dlp arguments including cookies if configured.
+// If useCookies is false, cookies are omitted even if CookiesFile is set.
+func (v *VoiceoverService) ytdlpArgs(useCookies bool, args ...string) []string {
 	var result []string
-	if v.CookiesFile != "" {
+	if useCookies && v.CookiesFile != "" {
 		result = append(result, "--cookies", v.CookiesFile)
 	}
 	result = append(result, "--no-playlist")
@@ -202,14 +205,24 @@ type ytdlpInfo struct {
 	Formats []ytdlpFormat `json:"formats"`
 }
 
-// GetDubbedAudioTracks returns available dubbed audio tracks for a YouTube video
+// GetDubbedAudioTracks returns available dubbed audio tracks for a YouTube video.
+// On cookie errors, retries without cookies as a fallback.
 func (v *VoiceoverService) GetDubbedAudioTracks(ctx context.Context, videoURL string) ([]AudioTrack, error) {
+	tracks, err := v.getDubbedAudioTracks(ctx, videoURL, true)
+	if err != nil && v.CookiesFile != "" && ytfeed.IsCookieError(err.Error()) {
+		log.Printf("[WARN] cookies expired, retrying GetDubbedAudioTracks without cookies")
+		return v.getDubbedAudioTracks(ctx, videoURL, false)
+	}
+	return tracks, err
+}
+
+func (v *VoiceoverService) getDubbedAudioTracks(ctx context.Context, videoURL string, useCookies bool) ([]AudioTrack, error) {
 	videoURL = normalizeYouTubeURL(videoURL)
 
 	cmdCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, "yt-dlp", v.ytdlpArgs("--dump-json", "--no-download", videoURL)...)
+	cmd := exec.CommandContext(cmdCtx, "yt-dlp", v.ytdlpArgs(useCookies, "--dump-json", "--no-download", videoURL)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -272,8 +285,18 @@ func (v *VoiceoverService) FindDubbedTrack(tracks []AudioTrack) *AudioTrack {
 	return nil
 }
 
-// DownloadDubbedTrack downloads a specific audio track using yt-dlp
+// DownloadDubbedTrack downloads a specific audio track using yt-dlp.
+// On cookie errors, retries without cookies as a fallback.
 func (v *VoiceoverService) DownloadDubbedTrack(ctx context.Context, videoURL string, track *AudioTrack) (*VoiceoverResult, error) {
+	result, err := v.downloadDubbedTrack(ctx, videoURL, track, true)
+	if err != nil && v.CookiesFile != "" && ytfeed.IsCookieError(err.Error()) {
+		log.Printf("[WARN] cookies expired, retrying DownloadDubbedTrack without cookies")
+		return v.downloadDubbedTrack(ctx, videoURL, track, false)
+	}
+	return result, err
+}
+
+func (v *VoiceoverService) downloadDubbedTrack(ctx context.Context, videoURL string, track *AudioTrack, useCookies bool) (*VoiceoverResult, error) {
 	videoURL = normalizeYouTubeURL(videoURL)
 
 	videoID := extractVideoID(videoURL)
@@ -284,7 +307,7 @@ func (v *VoiceoverService) DownloadDubbedTrack(ctx context.Context, videoURL str
 	outputFile := filepath.Join(v.OutputDir, fmt.Sprintf("vo_%s_%d.mp3", videoID, time.Now().Unix()))
 
 	// Download specific audio track and convert to mp3
-	args := v.ytdlpArgs(
+	args := v.ytdlpArgs(useCookies,
 		"-f", track.FormatID,
 		"--extract-audio",
 		"--audio-format", "mp3",

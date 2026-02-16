@@ -13,6 +13,8 @@ import (
 	"time"
 
 	log "github.com/go-pkgz/lgr"
+
+	ytfeed "github.com/umputun/feed-master/app/youtube/feed"
 )
 
 // SubtitleService handles downloading and parsing YouTube subtitles
@@ -26,9 +28,19 @@ func NewSubtitleService(outputDir, cookiesFile string) *SubtitleService {
 	return &SubtitleService{OutputDir: outputDir, CookiesFile: cookiesFile}
 }
 
-// DownloadSubtitles downloads subtitles for a YouTube video using yt-dlp
-// Returns path to the subtitle file and detected language
+// DownloadSubtitles downloads subtitles for a YouTube video using yt-dlp.
+// On cookie errors, retries without cookies as a fallback.
+// Returns path to the subtitle file and detected language.
 func (s *SubtitleService) DownloadSubtitles(ctx context.Context, videoURL string) (string, string, error) {
+	file, lang, err := s.downloadSubtitles(ctx, videoURL, true)
+	if err != nil && s.CookiesFile != "" && ytfeed.IsCookieError(err.Error()) {
+		log.Printf("[WARN] cookies expired, retrying DownloadSubtitles without cookies")
+		return s.downloadSubtitles(ctx, videoURL, false)
+	}
+	return file, lang, err
+}
+
+func (s *SubtitleService) downloadSubtitles(ctx context.Context, videoURL string, useCookies bool) (string, string, error) {
 	// Create temp filename based on video URL hash
 	videoID := extractVideoID(normalizeYouTubeURL(videoURL))
 	if videoID == "" {
@@ -48,7 +60,7 @@ func (s *SubtitleService) DownloadSubtitles(ctx context.Context, videoURL string
 		"--no-playlist",
 		"--output", outputTemplate,
 	}
-	if s.CookiesFile != "" {
+	if useCookies && s.CookiesFile != "" {
 		args = append([]string{"--cookies", s.CookiesFile}, args...)
 	}
 	args = append(args, "--extractor-args", "youtube:player_client=web_creator", videoURL)
