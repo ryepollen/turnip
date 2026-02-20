@@ -124,11 +124,8 @@ func (t *TelegramBot) Run(ctx context.Context) error {
 	t.Bot.Handle("/help", t.handleHelp)
 	t.Bot.Handle("/start", t.handleHelp)
 
-	// Callback handlers for pagination and delete actions
-	listPageBtn := (&tb.ReplyMarkup{}).Data("list_page", "list_page")
-	listDelBtn := (&tb.ReplyMarkup{}).Data("list_del", "list_del")
-	t.Bot.Handle(listPageBtn, t.handleListPageCallback)
-	t.Bot.Handle(listDelBtn, t.handleListDeleteCallback)
+	// Callback handler for pagination and delete actions
+	t.Bot.Handle(tb.OnCallback, t.handleCallback)
 
 	// Start polling in goroutine
 	go t.Bot.Start()
@@ -636,6 +633,25 @@ func (t *TelegramBot) unpackCallbackData(data string) (kind string, page int, pa
 		pageSize = maxPageSize
 	}
 	return kind, page, pageSize, videoID
+}
+
+func (t *TelegramBot) handleCallback(c *tb.Callback) {
+	if c == nil || c.Message == nil || !t.isAuthorized(c.Sender) {
+		return
+	}
+
+	// Route by callback data prefix: "\flist_page|..." or "\flist_del|..."
+	switch {
+	case strings.HasPrefix(c.Data, "\flist_page|"):
+		c.Data = strings.TrimPrefix(c.Data, "\flist_page|")
+		t.handleListPageCallback(c)
+	case strings.HasPrefix(c.Data, "\flist_del|"):
+		c.Data = strings.TrimPrefix(c.Data, "\flist_del|")
+		t.handleListDeleteCallback(c)
+	default:
+		log.Printf("[WARN] unknown callback: %q", c.Data)
+		_ = t.Bot.Respond(c)
+	}
 }
 
 func (t *TelegramBot) handleListPageCallback(c *tb.Callback) {
