@@ -51,7 +51,6 @@ func (v *VoiceoverService) ytdlpArgs(useCookies bool, args ...string) []string {
 		result = append(result, "--cookies", v.CookiesFile)
 	}
 	result = append(result, "--no-playlist")
-	result = append(result, "--extractor-args", "youtube:player_client=web_creator")
 	result = append(result, args...)
 	return result
 }

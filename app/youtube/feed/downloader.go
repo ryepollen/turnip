@@ -79,7 +79,6 @@ func (d *Downloader) ytdlpArgs(args ...string) []string {
 		result = append(result, "--cookies", d.cookiesFile)
 	}
 	result = append(result, "--no-playlist")
-	result = append(result, "--extractor-args", "youtube:player_client=web_creator")
 	result = append(result, args...)
 	return result
 }

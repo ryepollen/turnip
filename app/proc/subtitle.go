@@ -63,7 +63,7 @@ func (s *SubtitleService) downloadSubtitles(ctx context.Context, videoURL string
 	if useCookies && s.CookiesFile != "" {
 		args = append([]string{"--cookies", s.CookiesFile}, args...)
 	}
-	args = append(args, "--extractor-args", "youtube:player_client=web_creator", videoURL)
+	args = append(args, videoURL)
 
 	log.Printf("[INFO] downloading subtitles with args: %v", args)
 
