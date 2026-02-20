@@ -146,14 +146,14 @@ func (t *TelegramBot) handleText(m *tb.Message) {
 		return
 	}
 
-	// Extract YouTube URL first
-	videoID := t.extractYouTubeVideoID(m.Text)
-	if videoID != "" {
-		// Process as YouTube video
+	// Extract YouTube URLs
+	videoIDs := t.extractAllYouTubeVideoIDs(m.Text)
+	if len(videoIDs) == 1 {
+		// Single video — same UX as before
 		statusMsg, _ := t.Bot.Send(m.Chat, "⏳ Processing...")
 		go func() {
-			if err := t.processVideo(context.Background(), m.Chat, statusMsg, m, videoID); err != nil {
-				log.Printf("[ERROR] failed to process video %s: %v", videoID, err)
+			if err := t.processVideo(context.Background(), m.Chat, statusMsg, m, videoIDs[0]); err != nil {
+				log.Printf("[ERROR] failed to process video %s: %v", videoIDs[0], err)
 				if ytfeed.IsCookieError(err.Error()) {
 					_, _ = t.Bot.Edit(statusMsg,
 						"❌ YouTube cookies expired. This video requires authentication.\nRun update-cookies.sh to fix.")
@@ -161,6 +161,13 @@ func (t *TelegramBot) handleText(m *tb.Message) {
 					_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
 				}
 			}
+		}()
+		return
+	} else if len(videoIDs) > 1 {
+		// Multiple videos — batch processing with progress
+		statusMsg, _ := t.Bot.Send(m.Chat, fmt.Sprintf("⏳ Processing %d videos...", len(videoIDs)))
+		go func() {
+			t.processVideoBatch(context.Background(), m.Chat, statusMsg, m, videoIDs)
 		}()
 		return
 	}
@@ -324,6 +331,14 @@ func (t *TelegramBot) isAuthorized(user *tb.User) bool {
 	return int64(user.ID) == t.AllowedUserID
 }
 
+// videoResult holds the outcome of processing a single video (without Telegram UI).
+type videoResult struct {
+	VideoID  string
+	Title    string
+	Duration time.Duration
+	Skipped  bool // true when video was already in feed
+}
+
 // extractYouTubeVideoID extracts video ID from YouTube URL
 func (t *TelegramBot) extractYouTubeVideoID(text string) string {
 	patterns := []*regexp.Regexp{
@@ -341,31 +356,51 @@ func (t *TelegramBot) extractYouTubeVideoID(text string) string {
 	return ""
 }
 
-// processVideo downloads and stores a YouTube video
-func (t *TelegramBot) processVideo(ctx context.Context, chat *tb.Chat, statusMsg, originalMsg *tb.Message, videoID string) error {
+// extractAllYouTubeVideoIDs extracts all unique YouTube video IDs from text, preserving order.
+func (t *TelegramBot) extractAllYouTubeVideoIDs(text string) []string {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})`),
+		regexp.MustCompile(`youtu\.be/([a-zA-Z0-9_-]{11})`),
+		regexp.MustCompile(`youtube\.com/embed/([a-zA-Z0-9_-]{11})`),
+		regexp.MustCompile(`youtube\.com/v/([a-zA-Z0-9_-]{11})`),
+	}
+
+	seen := map[string]bool{}
+	var ids []string
+	for _, re := range patterns {
+		for _, m := range re.FindAllStringSubmatch(text, -1) {
+			id := m[1]
+			if !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
+}
+
+// processVideoItem contains the core video processing logic without any Telegram UI calls.
+// It downloads the video, saves it to the store, and returns the result.
+func (t *TelegramBot) processVideoItem(ctx context.Context, videoID string) (*videoResult, error) {
 	videoURL := "https://www.youtube.com/watch?v=" + videoID
 
 	// 1. Fetch metadata
-	_, _ = t.Bot.Edit(statusMsg, "⏳ Fetching video info...")
 	info, err := t.Downloader.GetInfo(ctx, videoURL)
 	if err != nil {
-		return fmt.Errorf("failed to get video info: %w", err)
+		return nil, fmt.Errorf("failed to get video info: %w", err)
 	}
 
 	// 2. Check if already processed
 	tempEntry := ytfeed.Entry{ChannelID: t.FeedName, VideoID: videoID}
 	if found, _, _ := t.Store.CheckProcessed(tempEntry); found {
-		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ Already in feed: %s", info.Title))
-		t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
-		return nil
+		return &videoResult{VideoID: videoID, Title: info.Title, Skipped: true}, nil
 	}
 
 	// 3. Download audio
-	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⬇️ Downloading: %s...", info.Title))
 	fname := t.makeFileName(videoID)
 	file, err := t.Downloader.Get(ctx, videoID, fname)
 	if err != nil {
-		return fmt.Errorf("failed to download: %w", err)
+		return nil, fmt.Errorf("failed to download: %w", err)
 	}
 
 	// 4. Get duration from file
@@ -382,12 +417,10 @@ func (t *TelegramBot) processVideo(ctx context.Context, chat *tb.Chat, statusMsg
 	// 6. Store in BoltDB
 	created, err := t.Store.Save(entry)
 	if err != nil {
-		return fmt.Errorf("failed to save: %w", err)
+		return nil, fmt.Errorf("failed to save: %w", err)
 	}
 	if !created {
-		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ Already exists: %s", info.Title))
-		t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
-		return nil
+		return &videoResult{VideoID: videoID, Title: info.Title, Skipped: true}, nil
 	}
 
 	// 7. Mark as processed
@@ -399,13 +432,76 @@ func (t *TelegramBot) processVideo(ctx context.Context, chat *tb.Chat, statusMsg
 	t.removeOldEntries()
 
 	dur := time.Duration(duration) * time.Second
-	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("✅ %s (%s)", info.Title, t.formatDuration(dur)))
-
 	log.Printf("[INFO] added video %s: %s (duration: %s)", videoID, info.Title, dur.String())
 
-	// delete user's message after delay, keep bot's status
+	return &videoResult{VideoID: videoID, Title: info.Title, Duration: dur}, nil
+}
+
+// processVideo downloads and stores a YouTube video (single-video path with Telegram status messages).
+func (t *TelegramBot) processVideo(ctx context.Context, chat *tb.Chat, statusMsg, originalMsg *tb.Message, videoID string) error {
+	res, err := t.processVideoItem(ctx, videoID)
+	if err != nil {
+		return err
+	}
+
+	if res.Skipped {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ Already in feed: %s", res.Title))
+	} else {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("✅ %s (%s)", res.Title, t.formatDuration(res.Duration)))
+	}
+
 	t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
 	return nil
+}
+
+// processVideoBatch processes multiple YouTube videos sequentially, updating a single status message.
+func (t *TelegramBot) processVideoBatch(ctx context.Context, chat *tb.Chat, statusMsg, originalMsg *tb.Message, videoIDs []string) {
+	total := len(videoIDs)
+	var added, skipped, failed int
+	cookieErrShown := false
+
+	for i, id := range videoIDs {
+		pos := fmt.Sprintf("%d/%d", i+1, total)
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⬇️ %s: Processing...", pos))
+
+		res, err := t.processVideoItem(ctx, id)
+		if err != nil {
+			failed++
+			log.Printf("[ERROR] batch %s: failed to process video %s: %v", pos, id, err)
+			if ytfeed.IsCookieError(err.Error()) && !cookieErrShown {
+				cookieErrShown = true
+				_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ %s: cookies expired, continuing...", pos))
+			}
+			continue
+		}
+
+		if res.Skipped {
+			skipped++
+			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ %s: %s (already in feed)", pos, res.Title))
+		} else {
+			added++
+			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("✅ %s: %s (%s)", pos, res.Title, t.formatDuration(res.Duration)))
+		}
+	}
+
+	// Build final summary
+	summary := fmt.Sprintf("✅ Added %d/%d", added, total)
+	var details []string
+	if skipped > 0 {
+		details = append(details, fmt.Sprintf("%d already in feed", skipped))
+	}
+	if failed > 0 {
+		details = append(details, fmt.Sprintf("%d failed", failed))
+	}
+	if len(details) > 0 {
+		summary += " (" + strings.Join(details, ", ") + ")"
+	}
+	if cookieErrShown {
+		summary += "\n⚠️ YouTube cookies expired. Run update-cookies.sh to fix."
+	}
+
+	_, _ = t.Bot.Edit(statusMsg, summary)
+	t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
 }
 
 // deleteMessageAfterDelay deletes a message after specified delay
