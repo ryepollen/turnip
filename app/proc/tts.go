@@ -11,6 +11,14 @@ import (
 	"github.com/wujunwei928/edge-tts-go/edge_tts"
 )
 
+// escapeXML escapes characters that are invalid in XML/SSML content.
+func escapeXML(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	return s
+}
+
 // TTSProvider interface for text-to-speech services
 type TTSProvider interface {
 	Synthesize(ctx context.Context, text string) ([]byte, error)
@@ -31,6 +39,7 @@ func NewEdgeTTS(voice string) *EdgeTTS {
 
 // Synthesize converts text to speech using Edge TTS
 func (e *EdgeTTS) Synthesize(ctx context.Context, text string) ([]byte, error) {
+	text = escapeXML(text)
 	comm, err := edge_tts.NewCommunicate(text, edge_tts.SetVoice(e.Voice))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TTS communicator: %w", err)
