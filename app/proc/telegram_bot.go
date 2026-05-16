@@ -2,12 +2,15 @@ package proc
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"html/template"
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	log "github.com/go-pkgz/lgr"
@@ -35,12 +38,27 @@ type TelegramBot struct {
 	VoiceoverSvc     *VoiceoverService
 	SubtitleSvc      *SubtitleService
 	Translator       *Translator
+
+	pendingMu      sync.Mutex
+	pendingActions map[string]*pendingAction
+}
+
+// pendingAction stores the URL(s) extracted from a user message while the user
+// picks an action from the inline menu. Callback data is limited to 64 bytes,
+// so the menu carries only a short token referencing this entry.
+type pendingAction struct {
+	kind        string // "yt" or "article"
+	videoIDs    []string
+	url         string
+	originalMsg *tb.Message
+	created     time.Time
 }
 
 const (
 	defaultListPageSize    = 10
 	defaultHistoryPageSize = 10
 	maxPageSize            = 50
+	pendingActionTTL       = 10 * time.Minute
 )
 
 // TelegramBotParams contains all parameters for creating a new TelegramBot
@@ -82,17 +100,18 @@ func NewTelegramBot(params TelegramBotParams) (*TelegramBot, error) {
 	}
 
 	tb := &TelegramBot{
-		Bot:           bot,
-		AllowedUserID: params.AllowedUserID,
-		FeedName:      params.FeedName,
-		FeedTitle:     params.FeedTitle,
-		MaxItems:      params.MaxItems,
-		Downloader:    params.Downloader,
-		Store:         params.Store,
-		DurationSvc:   params.DurationSvc,
-		FilesLocation: params.FilesLocation,
-		BaseURL:       params.BaseURL,
-		TTSEnabled:    params.TTSEnabled,
+		Bot:            bot,
+		AllowedUserID:  params.AllowedUserID,
+		FeedName:       params.FeedName,
+		FeedTitle:      params.FeedTitle,
+		MaxItems:       params.MaxItems,
+		Downloader:     params.Downloader,
+		Store:          params.Store,
+		DurationSvc:    params.DurationSvc,
+		FilesLocation:  params.FilesLocation,
+		BaseURL:        params.BaseURL,
+		TTSEnabled:     params.TTSEnabled,
+		pendingActions: make(map[string]*pendingAction),
 	}
 
 	// Initialize TTS if enabled
@@ -130,6 +149,9 @@ func (t *TelegramBot) Run(ctx context.Context) error {
 	// Start polling in goroutine
 	go t.Bot.Start()
 
+	// Periodically drop stale pending menu entries
+	go t.gcPendingActions(ctx)
+
 	// Wait for context cancellation
 	<-ctx.Done()
 	t.Bot.Stop()
@@ -137,60 +159,101 @@ func (t *TelegramBot) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// handleText processes text messages (YouTube URLs or article URLs)
+func (t *TelegramBot) gcPendingActions(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			t.pendingMu.Lock()
+			for k, pa := range t.pendingActions {
+				if now.Sub(pa.created) > pendingActionTTL {
+					delete(t.pendingActions, k)
+				}
+			}
+			t.pendingMu.Unlock()
+		}
+	}
+}
+
+func (t *TelegramBot) storePendingAction(pa *pendingAction) string {
+	pa.created = time.Now()
+	var buf [6]byte
+	_, _ = rand.Read(buf[:])
+	token := hex.EncodeToString(buf[:])
+	t.pendingMu.Lock()
+	t.pendingActions[token] = pa
+	t.pendingMu.Unlock()
+	return token
+}
+
+func (t *TelegramBot) takePendingAction(token string) *pendingAction {
+	t.pendingMu.Lock()
+	defer t.pendingMu.Unlock()
+	pa, ok := t.pendingActions[token]
+	if !ok {
+		return nil
+	}
+	delete(t.pendingActions, token)
+	return pa
+}
+
+// handleText processes text messages (YouTube URLs or article URLs).
+// Instead of acting on the link directly, it offers an inline menu so the user
+// picks what to do (download audio, voice-over, TTS for articles, cancel).
 func (t *TelegramBot) handleText(m *tb.Message) {
-	// Authorization check
 	if !t.isAuthorized(m.Sender) {
 		log.Printf("[WARN] unauthorized user %d tried to send message", m.Sender.ID)
 		_, _ = t.Bot.Send(m.Chat, "Unauthorized. This bot is private.")
 		return
 	}
 
-	// Extract YouTube URLs
 	videoIDs := t.extractAllYouTubeVideoIDs(m.Text)
-	if len(videoIDs) == 1 {
-		// Single video — same UX as before
-		statusMsg, _ := t.Bot.Send(m.Chat, "⏳ Processing...")
-		go func() {
-			if err := t.processVideo(context.Background(), m.Chat, statusMsg, m, videoIDs[0]); err != nil {
-				log.Printf("[ERROR] failed to process video %s: %v", videoIDs[0], err)
-				if ytfeed.IsCookieError(err.Error()) {
-					_, _ = t.Bot.Edit(statusMsg,
-						"❌ YouTube cookies expired. This video requires authentication.\nRun update-cookies.sh to fix.")
-				} else {
-					_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
-				}
-			}
-		}()
-		return
-	} else if len(videoIDs) > 1 {
-		// Multiple videos — batch processing with progress
-		statusMsg, _ := t.Bot.Send(m.Chat, fmt.Sprintf("⏳ Processing %d videos...", len(videoIDs)))
-		go func() {
-			t.processVideoBatch(context.Background(), m.Chat, statusMsg, m, videoIDs)
-		}()
+	if len(videoIDs) > 0 {
+		token := t.storePendingAction(&pendingAction{kind: "yt", videoIDs: videoIDs, originalMsg: m})
+		var prompt string
+		if len(videoIDs) == 1 {
+			prompt = "🤔 Что сделать со ссылкой?"
+		} else {
+			prompt = fmt.Sprintf("🤔 Что сделать с %d ссылками?", len(videoIDs))
+		}
+		_, _ = t.Bot.Send(m.Chat, prompt, t.buildActionMenu(token, "yt"))
 		return
 	}
 
-	// Check if it's an article URL (and TTS is enabled)
 	articleURL := t.extractURL(m.Text)
 	if articleURL != "" && t.TTSEnabled && IsArticleURL(articleURL) {
-		statusMsg, _ := t.Bot.Send(m.Chat, "⏳ Озвучиваю статью...")
-		go func() {
-			if err := t.processArticle(context.Background(), m.Chat, statusMsg, m, articleURL); err != nil {
-				log.Printf("[ERROR] failed to process article %s: %v", articleURL, err)
-				_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
-			}
-		}()
+		token := t.storePendingAction(&pendingAction{kind: "article", url: articleURL, originalMsg: m})
+		_, _ = t.Bot.Send(m.Chat, "🤔 Что сделать со ссылкой?", t.buildActionMenu(token, "article"))
 		return
 	}
 
-	// No valid URL found
 	helpMsg := "No valid URL found. Send a link:\n• YouTube: https://youtube.com/watch?v=VIDEO_ID"
 	if t.TTSEnabled {
 		helpMsg += "\n• Article: any web page URL"
 	}
 	_, _ = t.Bot.Send(m.Chat, helpMsg)
+}
+
+// buildActionMenu builds the inline keyboard shown for an incoming link.
+func (t *TelegramBot) buildActionMenu(token, kind string) *tb.ReplyMarkup {
+	markup := &tb.ReplyMarkup{}
+	var rows [][]tb.InlineButton
+	switch kind {
+	case "yt":
+		btnAudio := markup.Data("🎵 Аудио", "act", token+"|audio")
+		btnVO := markup.Data("🎙 Озвучка (RU)", "act", token+"|vo")
+		rows = append(rows, []tb.InlineButton{*btnAudio.Inline(), *btnVO.Inline()})
+	case "article":
+		btnTTS := markup.Data("📝 Озвучить", "act", token+"|tts")
+		rows = append(rows, []tb.InlineButton{*btnTTS.Inline()})
+	}
+	btnCancel := markup.Data("🚫 Отмена", "act", token+"|cancel")
+	rows = append(rows, []tb.InlineButton{*btnCancel.Inline()})
+	markup.InlineKeyboard = rows
+	return markup
 }
 
 // handleList shows recent entries
@@ -744,10 +807,138 @@ func (t *TelegramBot) handleCallback(c *tb.Callback) {
 	case strings.HasPrefix(c.Data, "\flist_del|"):
 		c.Data = strings.TrimPrefix(c.Data, "\flist_del|")
 		t.handleListDeleteCallback(c)
+	case strings.HasPrefix(c.Data, "\fact|"):
+		c.Data = strings.TrimPrefix(c.Data, "\fact|")
+		t.handleActionCallback(c)
 	default:
 		log.Printf("[WARN] unknown callback: %q", c.Data)
 		_ = t.Bot.Respond(c)
 	}
+}
+
+// handleActionCallback handles inline-menu buttons shown for incoming links.
+// Callback data format: "<token>|<action>" where action ∈ {audio, vo, tts, cancel}.
+func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
+	if c == nil || c.Message == nil || !t.isAuthorized(c.Sender) {
+		return
+	}
+
+	parts := strings.SplitN(c.Data, "|", 2)
+	if len(parts) != 2 {
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Bad data"})
+		return
+	}
+	token, action := parts[0], parts[1]
+
+	pa := t.takePendingAction(token)
+	if pa == nil {
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Просрочено"})
+		_, _ = t.Bot.Edit(c.Message, "⏱ Меню просрочено или уже использовано")
+		return
+	}
+
+	_ = t.Bot.Respond(c)
+
+	if action == "cancel" {
+		_, _ = t.Bot.Edit(c.Message, "🚫 Отменено")
+		return
+	}
+
+	statusMsg := c.Message
+	chat := c.Message.Chat
+
+	switch pa.kind {
+	case "yt":
+		switch action {
+		case "audio":
+			if len(pa.videoIDs) == 1 {
+				_, _ = t.Bot.Edit(statusMsg, "⏳ Processing...")
+				go func() {
+					if err := t.processVideo(context.Background(), chat, statusMsg, pa.originalMsg, pa.videoIDs[0]); err != nil {
+						log.Printf("[ERROR] failed to process video %s: %v", pa.videoIDs[0], err)
+						if ytfeed.IsCookieError(err.Error()) {
+							_, _ = t.Bot.Edit(statusMsg,
+								"❌ YouTube cookies expired. This video requires authentication.\nRun update-cookies.sh to fix.")
+						} else {
+							_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+						}
+					}
+				}()
+			} else {
+				_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⏳ Processing %d videos...", len(pa.videoIDs)))
+				go t.processVideoBatch(context.Background(), chat, statusMsg, pa.originalMsg, pa.videoIDs)
+			}
+		case "vo":
+			if !IsVotCliAvailable() {
+				_, _ = t.Bot.Edit(statusMsg, "❌ vot-cli not installed")
+				return
+			}
+			if len(pa.videoIDs) == 1 {
+				_, _ = t.Bot.Edit(statusMsg, "⏳ Получаю озвучку...")
+				videoID := pa.videoIDs[0]
+				videoURL := "https://www.youtube.com/watch?v=" + videoID
+				go func() {
+					if err := t.processVoiceover(context.Background(), chat, statusMsg, pa.originalMsg, videoURL, videoID); err != nil {
+						log.Printf("[ERROR] failed to process voiceover %s: %v", videoID, err)
+						if ytfeed.IsCookieError(err.Error()) {
+							_, _ = t.Bot.Edit(statusMsg,
+								"❌ YouTube cookies expired. This video requires authentication.\nRun update-cookies.sh to fix.")
+						} else {
+							_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+						}
+					}
+				}()
+			} else {
+				_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⏳ Озвучиваю %d видео...", len(pa.videoIDs)))
+				go t.processVoiceoverBatch(context.Background(), chat, statusMsg, pa.originalMsg, pa.videoIDs)
+			}
+		default:
+			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
+		}
+	case "article":
+		if action == "tts" {
+			_, _ = t.Bot.Edit(statusMsg, "⏳ Озвучиваю статью...")
+			go func() {
+				if err := t.processArticle(context.Background(), chat, statusMsg, pa.originalMsg, pa.url); err != nil {
+					log.Printf("[ERROR] failed to process article %s: %v", pa.url, err)
+					_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+				}
+			}()
+		} else {
+			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
+		}
+	}
+}
+
+// processVoiceoverBatch sequentially voices over multiple videos. Each call to
+// processVoiceover rewrites statusMsg with its own progress; a final summary
+// replaces it when the loop is done.
+func (t *TelegramBot) processVoiceoverBatch(ctx context.Context, chat *tb.Chat, statusMsg, originalMsg *tb.Message, videoIDs []string) {
+	total := len(videoIDs)
+	var added, failed int
+	cookieErrShown := false
+
+	for i, id := range videoIDs {
+		pos := fmt.Sprintf("%d/%d", i+1, total)
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🎙 %s: запускаю озвучку...", pos))
+		videoURL := "https://www.youtube.com/watch?v=" + id
+		if err := t.processVoiceover(ctx, chat, statusMsg, originalMsg, videoURL, id); err != nil {
+			failed++
+			log.Printf("[ERROR] batch voiceover %s: %v", pos, err)
+			if ytfeed.IsCookieError(err.Error()) && !cookieErrShown {
+				cookieErrShown = true
+				_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ %s: cookies expired, continuing...", pos))
+			}
+			continue
+		}
+		added++
+	}
+
+	summary := fmt.Sprintf("✅ Озвучено %d/%d", added, total)
+	if failed > 0 {
+		summary += fmt.Sprintf(" (%d failed)", failed)
+	}
+	_, _ = t.Bot.Edit(statusMsg, summary)
 }
 
 func (t *TelegramBot) handleListPageCallback(c *tb.Callback) {
