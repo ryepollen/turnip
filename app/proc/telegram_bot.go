@@ -278,25 +278,27 @@ func (t *TelegramBot) handleList(m *tb.Message) {
 	_, _ = t.Bot.Send(m.Chat, msg, markup)
 }
 
-// handleHistory shows history of all processed videos
+// handleHistory shows the permanent activity log — every submission ever
+// made through the bot, including entries that were /del'd or auto-cleaned
+// from the feed. Reads from the dedicated `history_log` bucket, not the
+// feed bucket (which /list still uses).
 func (t *TelegramBot) handleHistory(m *tb.Message) {
 	if !t.isAuthorized(m.Sender) {
 		return
 	}
 
 	pageSize := t.parsePageSize(m.Text, defaultHistoryPageSize)
-	entries, err := t.Store.Load(t.FeedName, t.MaxItems)
+	entries, total, err := t.Store.LoadHistory(t.FeedName, 0, pageSize)
 	if err != nil {
 		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Error: %v", err))
 		return
 	}
-
-	if len(entries) == 0 {
-		_, _ = t.Bot.Send(m.Chat, "No videos added yet.")
+	if total == 0 {
+		_, _ = t.Bot.Send(m.Chat, "No history yet.")
 		return
 	}
 
-	msg, markup := t.buildListMessage("history", entries, 0, pageSize)
+	msg, markup := t.buildHistoryMessage(entries, total, 0, pageSize)
 	_, _ = t.Bot.Send(m.Chat, msg, markup, tb.NoPreview)
 }
 
@@ -374,10 +376,10 @@ Send a URL to add audio to your feed:
 
 Commands:
 /vo <url> - озвучка YouTube на русском
-/list - recent entries in feed
-/history - all entries with links
-/del - delete most recent
-/del N - delete entry N
+/list - what's currently in feed (files on disk)
+/history - permanent activity log (survives /del and auto-cleanup)
+/del - delete most recent from feed
+/del N - delete entry N from feed
 /help - this help
 
 TTS: %v
@@ -491,10 +493,19 @@ func (t *TelegramBot) processVideoItem(ctx context.Context, videoID string) (*vi
 		log.Printf("[WARN] failed to mark as processed: %v", err)
 	}
 
-	// 8. Remove old entries if exceeding MaxItems
+	// 8. Append to permanent history log (survives /del and auto-cleanup)
+	dur := time.Duration(duration) * time.Second
+	t.logHistory(ytstore.HistoryEntry{
+		URL:      videoURL,
+		Title:    info.Title,
+		Action:   "audio",
+		VideoID:  videoID,
+		Duration: t.formatDuration(dur),
+	})
+
+	// 9. Remove old entries if exceeding MaxItems
 	t.removeOldEntries()
 
-	dur := time.Duration(duration) * time.Second
 	log.Printf("[INFO] added video %s: %s (duration: %s)", videoID, info.Title, dur.String())
 
 	return &videoResult{VideoID: videoID, Title: info.Title, Duration: dur}, nil
@@ -578,10 +589,27 @@ func (t *TelegramBot) deleteMessageAfterDelay(msg *tb.Message, delay time.Durati
 	}()
 }
 
-// removeOldEntries removes entries exceeding MaxItems and deletes their files
+// removeOldEntries removes entries exceeding MaxItems and deletes their files.
+// Capture overflow video IDs *before* RemoveOld so we can mark the matching
+// history entries as deleted afterwards (history records survive cleanup,
+// they're just flagged).
 func (t *TelegramBot) removeOldEntries() {
 	if t.MaxItems <= 0 {
 		return
+	}
+
+	type overflowID struct {
+		videoID string
+		url     string
+	}
+	var overflow []overflowID
+	if all, err := t.Store.Load(t.FeedName, 0); err == nil {
+		// Load returns newest-first; anything past MaxItems will be removed.
+		if len(all) > t.MaxItems {
+			for _, e := range all[t.MaxItems:] {
+				overflow = append(overflow, overflowID{videoID: e.VideoID, url: e.Link.Href})
+			}
+		}
 	}
 
 	files, err := t.Store.RemoveOld(t.FeedName, t.MaxItems)
@@ -595,6 +623,21 @@ func (t *TelegramBot) removeOldEntries() {
 		} else {
 			log.Printf("[INFO] auto-removed old file %s", f)
 		}
+	}
+
+	for _, o := range overflow {
+		if err := t.Store.MarkHistoryDeleted(t.FeedName, o.videoID, o.url); err != nil {
+			log.Printf("[WARN] failed to mark history deleted for %s: %v", o.videoID, err)
+		}
+	}
+}
+
+// logHistory writes a history entry, swallowing errors (history is
+// best-effort metadata, never block a successful operation).
+func (t *TelegramBot) logHistory(e ytstore.HistoryEntry) {
+	e.FeedName = t.FeedName
+	if err := t.Store.LogHistory(e); err != nil {
+		log.Printf("[WARN] history log: %v", err)
 	}
 }
 
@@ -635,7 +678,9 @@ func (t *TelegramBot) createEntry(info *ytfeed.VideoInfo, file string, duration 
 			} `xml:"thumbnail"`
 		}{
 			Description: template.HTML(info.Description),
-			Thumbnail:   struct{ URL string `xml:"url,attr"` }{URL: info.Thumbnail},
+			Thumbnail: struct {
+				URL string `xml:"url,attr"`
+			}{URL: info.Thumbnail},
 		},
 		Author: struct {
 			Name string `xml:"name"`
@@ -676,6 +721,63 @@ func (t *TelegramBot) parsePageSize(text string, def int) int {
 		return maxPageSize
 	}
 	return n
+}
+
+// buildHistoryMessage renders the permanent history log. `entries` is the
+// current page only (newest-first), `total` is full count. Each line shows
+// ✓ / ✗ for active vs deleted entries.
+func (t *TelegramBot) buildHistoryMessage(entries []ytstore.HistoryEntry, total, page, pageSize int) (string, *tb.ReplyMarkup) {
+	if pageSize <= 0 {
+		pageSize = defaultHistoryPageSize
+	}
+	if page < 0 {
+		page = 0
+	}
+	pages := (total + pageSize - 1) / pageSize
+	if pages == 0 {
+		pages = 1
+	}
+	if page >= pages {
+		page = pages - 1
+	}
+
+	msg := fmt.Sprintf("📜 History (%d) — page %d/%d:\n\n", total, page+1, pages)
+	for i, e := range entries {
+		num := total - (page*pageSize + i)
+		mark := "✓"
+		suffix := ""
+		if e.Deleted {
+			mark = "✗"
+			if !e.DeletedAt.IsZero() {
+				suffix = fmt.Sprintf("  [deleted %s]", e.DeletedAt.Format("2006-01-02"))
+			} else {
+				suffix = "  [deleted]"
+			}
+		}
+		dur := ""
+		if e.Duration != "" {
+			dur = " · " + e.Duration
+		}
+		msg += fmt.Sprintf("%d. %s %s  %s (%s%s)%s\n%s\n\n",
+			num, mark, e.Timestamp.Format("2006-01-02 15:04"),
+			e.Title, e.Action, dur, suffix, e.URL)
+	}
+
+	markup := &tb.ReplyMarkup{}
+	if pages > 1 {
+		prevPage := page - 1
+		if prevPage < 0 {
+			prevPage = pages - 1
+		}
+		nextPage := page + 1
+		if nextPage >= pages {
+			nextPage = 0
+		}
+		btnPrev := markup.Data("◀︎", "list_page", t.packCallbackData("history", prevPage, pageSize, ""))
+		btnNext := markup.Data("▶︎", "list_page", t.packCallbackData("history", nextPage, pageSize, ""))
+		markup.InlineKeyboard = append(markup.InlineKeyboard, []tb.InlineButton{*btnPrev.Inline(), *btnNext.Inline()})
+	}
+	return msg, markup
 }
 
 // buildListMessage builds paginated list/history output and inline keyboard
@@ -951,6 +1053,18 @@ func (t *TelegramBot) handleListPageCallback(c *tb.Callback) {
 		kind = "list"
 	}
 
+	if kind == "history" {
+		entries, total, err := t.Store.LoadHistory(t.FeedName, page*pageSize, pageSize)
+		if err != nil {
+			_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Error loading history"})
+			return
+		}
+		msg, markup := t.buildHistoryMessage(entries, total, page, pageSize)
+		_, _ = t.Bot.Edit(c.Message, msg, markup, tb.NoPreview)
+		_ = t.Bot.Respond(c)
+		return
+	}
+
 	entries, err := t.Store.Load(t.FeedName, t.MaxItems)
 	if err != nil {
 		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Error loading entries"})
@@ -1019,6 +1133,11 @@ func (t *TelegramBot) deleteEntry(entry ytfeed.Entry) error {
 
 	// reset processed status so it can be re-added if needed
 	_ = t.Store.ResetProcessed(entry)
+
+	// mark the matching history entry as deleted (history record itself stays)
+	if err := t.Store.MarkHistoryDeleted(t.FeedName, entry.VideoID, entry.Link.Href); err != nil {
+		log.Printf("[WARN] failed to mark history deleted for %s: %v", entry.VideoID, err)
+	}
 
 	log.Printf("[INFO] deleted entry %s: %s", entry.VideoID, entry.Title)
 	return nil
@@ -1115,7 +1234,16 @@ func (t *TelegramBot) processArticle(ctx context.Context, chat *tb.Chat, statusM
 		log.Printf("[WARN] failed to mark as processed: %v", err)
 	}
 
-	// 10. Remove old entries if exceeding MaxItems
+	// 10. Append to permanent history log
+	articleDur := time.Duration(duration) * time.Second
+	t.logHistory(ytstore.HistoryEntry{
+		URL:      articleURL,
+		Title:    article.Title,
+		Action:   "article",
+		Duration: t.formatDuration(articleDur),
+	})
+
+	// 11. Remove old entries if exceeding MaxItems
 	t.removeOldEntries()
 
 	dur := time.Duration(duration) * time.Second
@@ -1164,7 +1292,9 @@ func (t *TelegramBot) createArticleEntry(article *Article, url, file string, dur
 			} `xml:"thumbnail"`
 		}{
 			Description: template.HTML(fmt.Sprintf("TTS озвучка статьи: %s", url)),
-			Thumbnail:   struct{ URL string `xml:"url,attr"` }{URL: thumbnail},
+			Thumbnail: struct {
+				URL string `xml:"url,attr"`
+			}{URL: thumbnail},
 		},
 		Author: struct {
 			Name string `xml:"name"`
@@ -1333,7 +1463,9 @@ func (t *TelegramBot) processVoiceover(ctx context.Context, chat *tb.Chat, statu
 			} `xml:"thumbnail"`
 		}{
 			Description: template.HTML(fmt.Sprintf("Озвучка YouTube видео (%s): %s\n%s", method, info.Title, info.Description)),
-			Thumbnail:   struct{ URL string `xml:"url,attr"` }{URL: thumbnail},
+			Thumbnail: struct {
+				URL string `xml:"url,attr"`
+			}{URL: thumbnail},
 		},
 		Author: struct {
 			Name string `xml:"name"`
@@ -1362,10 +1494,19 @@ func (t *TelegramBot) processVoiceover(ctx context.Context, chat *tb.Chat, statu
 		log.Printf("[WARN] failed to mark as processed: %v", err)
 	}
 
-	// 10. Remove old entries if exceeding MaxItems
+	// 10. Append to permanent history log
+	dur := time.Duration(duration) * time.Second
+	t.logHistory(ytstore.HistoryEntry{
+		URL:      videoURL,
+		Title:    titleEmoji + " " + info.Title,
+		Action:   "voiceover",
+		VideoID:  videoID,
+		Duration: t.formatDuration(dur),
+	})
+
+	// 11. Remove old entries if exceeding MaxItems
 	t.removeOldEntries()
 
-	dur := time.Duration(duration) * time.Second
 	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("✅ %s %s (%s)", titleEmoji, info.Title, t.formatDuration(dur)))
 
 	log.Printf("[INFO] added voiceover %s via %s: %s (duration: %s)", voiceoverID, method, info.Title, dur.String())

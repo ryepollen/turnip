@@ -313,3 +313,154 @@ func TestBoltDB_Last(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "vid3", res.VideoID)
 }
+
+func TestStore_HistoryLogAndLoad(t *testing.T) {
+	tmpfile := filepath.Join(os.TempDir(), "history-test.db")
+	defer os.Remove(tmpfile)
+
+	db, err := bolt.Open(tmpfile, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	require.NoError(t, err)
+	s := BoltDB{DB: db}
+
+	// Empty bucket returns zero state.
+	entries, total, err := s.LoadHistory("manual", 0, 10)
+	require.NoError(t, err)
+	assert.Equal(t, 0, total)
+	assert.Len(t, entries, 0)
+
+	t0 := time.Date(2026, time.June, 1, 10, 0, 0, 0, time.UTC)
+	require.NoError(t, s.LogHistory(HistoryEntry{
+		Timestamp: t0,
+		URL:       "https://youtube.com/watch?v=aaa",
+		Title:     "First",
+		Action:    "audio",
+		VideoID:   "aaa",
+		FeedName:  "manual",
+	}))
+	require.NoError(t, s.LogHistory(HistoryEntry{
+		Timestamp: t0.Add(time.Hour),
+		URL:       "https://youtube.com/watch?v=bbb",
+		Title:     "Second",
+		Action:    "voiceover",
+		VideoID:   "bbb",
+		FeedName:  "manual",
+	}))
+	require.NoError(t, s.LogHistory(HistoryEntry{
+		Timestamp: t0.Add(2 * time.Hour),
+		URL:       "https://nytimes.com/article/x",
+		Title:     "Third",
+		Action:    "article",
+		FeedName:  "manual",
+	}))
+	// Different feed — should be isolated.
+	require.NoError(t, s.LogHistory(HistoryEntry{
+		Timestamp: t0,
+		URL:       "https://youtube.com/watch?v=zzz",
+		Title:     "Other feed",
+		Action:    "audio",
+		VideoID:   "zzz",
+		FeedName:  "other",
+	}))
+
+	entries, total, err = s.LoadHistory("manual", 0, 10)
+	require.NoError(t, err)
+	assert.Equal(t, 3, total)
+	require.Len(t, entries, 3)
+	// Newest-first
+	assert.Equal(t, "Third", entries[0].Title)
+	assert.Equal(t, "Second", entries[1].Title)
+	assert.Equal(t, "First", entries[2].Title)
+	assert.Equal(t, "manual", entries[0].FeedName)
+}
+
+func TestStore_HistoryPagination(t *testing.T) {
+	tmpfile := filepath.Join(os.TempDir(), "history-paginate.db")
+	defer os.Remove(tmpfile)
+
+	db, err := bolt.Open(tmpfile, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	require.NoError(t, err)
+	s := BoltDB{DB: db}
+
+	t0 := time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 25; i++ {
+		require.NoError(t, s.LogHistory(HistoryEntry{
+			Timestamp: t0.Add(time.Duration(i) * time.Minute),
+			Title:     "n",
+			VideoID:   "id-" + time.Duration(i).String(),
+			FeedName:  "manual",
+		}))
+	}
+
+	page0, total, err := s.LoadHistory("manual", 0, 10)
+	require.NoError(t, err)
+	assert.Equal(t, 25, total)
+	assert.Len(t, page0, 10)
+
+	page1, _, err := s.LoadHistory("manual", 10, 10)
+	require.NoError(t, err)
+	assert.Len(t, page1, 10)
+	// No overlap between pages
+	for _, a := range page0 {
+		for _, b := range page1 {
+			assert.NotEqual(t, a.VideoID, b.VideoID)
+		}
+	}
+
+	page2, _, err := s.LoadHistory("manual", 20, 10)
+	require.NoError(t, err)
+	assert.Len(t, page2, 5)
+}
+
+func TestStore_MarkHistoryDeleted(t *testing.T) {
+	tmpfile := filepath.Join(os.TempDir(), "history-delete.db")
+	defer os.Remove(tmpfile)
+
+	db, err := bolt.Open(tmpfile, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	require.NoError(t, err)
+	s := BoltDB{DB: db}
+
+	t0 := time.Date(2026, time.June, 1, 10, 0, 0, 0, time.UTC)
+	require.NoError(t, s.LogHistory(HistoryEntry{
+		Timestamp: t0, Title: "A", VideoID: "aaa", URL: "u1", FeedName: "manual",
+	}))
+	require.NoError(t, s.LogHistory(HistoryEntry{
+		Timestamp: t0.Add(time.Hour), Title: "B", VideoID: "bbb", URL: "u2", FeedName: "manual",
+	}))
+
+	// Mark by videoID
+	require.NoError(t, s.MarkHistoryDeleted("manual", "aaa", ""))
+	entries, _, err := s.LoadHistory("manual", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	// Find each
+	var foundA, foundB *HistoryEntry
+	for i := range entries {
+		if entries[i].VideoID == "aaa" {
+			foundA = &entries[i]
+		}
+		if entries[i].VideoID == "bbb" {
+			foundB = &entries[i]
+		}
+	}
+	require.NotNil(t, foundA)
+	require.NotNil(t, foundB)
+	assert.True(t, foundA.Deleted)
+	assert.False(t, foundA.DeletedAt.IsZero())
+	assert.False(t, foundB.Deleted)
+
+	// Idempotent: marking twice doesn't break (finds another candidate or no-op)
+	require.NoError(t, s.MarkHistoryDeleted("manual", "aaa", ""))
+
+	// Mark by URL when videoID empty
+	require.NoError(t, s.LogHistory(HistoryEntry{
+		Timestamp: t0.Add(2 * time.Hour), Title: "article", URL: "https://x.com/y", Action: "article", FeedName: "manual",
+	}))
+	require.NoError(t, s.MarkHistoryDeleted("manual", "", "https://x.com/y"))
+	entries, _, err = s.LoadHistory("manual", 0, 10)
+	require.NoError(t, err)
+	for _, e := range entries {
+		if e.URL == "https://x.com/y" {
+			assert.True(t, e.Deleted)
+		}
+	}
+}

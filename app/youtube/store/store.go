@@ -17,6 +17,22 @@ import (
 )
 
 var processedBkt = []byte("processed")
+var historyLogBkt = []byte("history_log")
+
+// HistoryEntry is an append-only record of a user-submitted item. Unlike
+// the feed bucket (which is bounded by max_items and pruned by /del), the
+// history log is permanent — entries are only marked Deleted, never removed.
+type HistoryEntry struct {
+	Timestamp time.Time `json:"ts"`
+	URL       string    `json:"url"`
+	Title     string    `json:"title"`
+	Action    string    `json:"action"`             // "audio", "voiceover", "article"
+	VideoID   string    `json:"video_id,omitempty"` // for YouTube actions
+	Duration  string    `json:"duration,omitempty"`
+	FeedName  string    `json:"feed"`
+	Deleted   bool      `json:"deleted,omitempty"`
+	DeletedAt time.Time `json:"deleted_at,omitempty"`
+}
 
 // BoltDB store for metadata related to downloaded YouTube audio.
 type BoltDB struct {
@@ -316,6 +332,120 @@ func (s *BoltDB) ListProcessed() (res []string, err error) {
 		return nil
 	})
 	return res, err
+}
+
+// LogHistory appends an entry to the per-feed history log. Key is
+// "{unix_nanos}-{videoID|hash}" so cursor.Prev() yields newest-first.
+// Duplicate calls for the same (feed,videoID) within the same nanosecond
+// are deduped by the timestamp prefix, but distinct submissions of the
+// same URL are intentionally separate entries (each is a user action).
+func (s *BoltDB) LogHistory(entry HistoryEntry) error {
+	if entry.FeedName == "" {
+		return fmt.Errorf("LogHistory: empty FeedName")
+	}
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now().UTC()
+	}
+
+	disc := entry.VideoID
+	if disc == "" {
+		h := sha1.New()
+		_, _ = h.Write([]byte(entry.URL))
+		disc = fmt.Sprintf("%x", h.Sum(nil))[:12]
+	}
+	key := []byte(fmt.Sprintf("%020d-%s", entry.Timestamp.UnixNano(), disc))
+
+	return s.Update(func(tx *bolt.Tx) error {
+		root, e := tx.CreateBucketIfNotExists(historyLogBkt)
+		if e != nil {
+			return fmt.Errorf("create history_log bucket: %w", e)
+		}
+		feedBucket, e := root.CreateBucketIfNotExists([]byte(entry.FeedName))
+		if e != nil {
+			return fmt.Errorf("create history feed bucket %s: %w", entry.FeedName, e)
+		}
+		jdata, jerr := json.Marshal(&entry)
+		if jerr != nil {
+			return fmt.Errorf("marshal history entry: %w", jerr)
+		}
+		log.Printf("[INFO] history log %s - %s - %s", entry.Action, entry.Title, entry.URL)
+		return feedBucket.Put(key, jdata)
+	})
+}
+
+// MarkHistoryDeleted finds the most recent non-deleted history entry for
+// the given feed+videoID and flips it to Deleted=true (preserving the
+// rest of the record). Matches by VideoID when present, otherwise by URL.
+func (s *BoltDB) MarkHistoryDeleted(feedName, videoID, url string) error {
+	return s.Update(func(tx *bolt.Tx) error {
+		root := tx.Bucket(historyLogBkt)
+		if root == nil {
+			return nil
+		}
+		feedBucket := root.Bucket([]byte(feedName))
+		if feedBucket == nil {
+			return nil
+		}
+		c := feedBucket.Cursor()
+		for k, v := c.Last(); k != nil; k, v = c.Prev() {
+			var item HistoryEntry
+			if err := json.Unmarshal(v, &item); err != nil {
+				continue
+			}
+			if item.Deleted {
+				continue
+			}
+			match := (videoID != "" && item.VideoID == videoID) ||
+				(videoID == "" && url != "" && item.URL == url)
+			if !match {
+				continue
+			}
+			item.Deleted = true
+			item.DeletedAt = time.Now().UTC()
+			jdata, jerr := json.Marshal(&item)
+			if jerr != nil {
+				return fmt.Errorf("marshal history entry: %w", jerr)
+			}
+			return feedBucket.Put(k, jdata)
+		}
+		return nil
+	})
+}
+
+// LoadHistory returns up to `limit` entries newest-first starting at `offset`
+// for the given feed, plus the total count.
+func (s *BoltDB) LoadHistory(feedName string, offset, limit int) (entries []HistoryEntry, total int, err error) {
+	err = s.View(func(tx *bolt.Tx) error {
+		root := tx.Bucket(historyLogBkt)
+		if root == nil {
+			return nil
+		}
+		feedBucket := root.Bucket([]byte(feedName))
+		if feedBucket == nil {
+			return nil
+		}
+		total = feedBucket.Stats().KeyN
+
+		c := feedBucket.Cursor()
+		skipped := 0
+		for k, v := c.Last(); k != nil; k, v = c.Prev() {
+			if skipped < offset {
+				skipped++
+				continue
+			}
+			if len(entries) >= limit {
+				break
+			}
+			var item HistoryEntry
+			if jerr := json.Unmarshal(v, &item); jerr != nil {
+				log.Printf("[WARN] history unmarshal: %v", jerr)
+				continue
+			}
+			entries = append(entries, item)
+		}
+		return nil
+	})
+	return entries, total, err
 }
 
 func (s *BoltDB) key(entry feed.Entry) ([]byte, error) {
