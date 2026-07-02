@@ -32,6 +32,7 @@ type TelegramBot struct {
 	DurationSvc      DurationService
 	FilesLocation    string
 	BaseURL          string
+	CookiesFile      string
 	TTSEnabled       bool
 	TTS              TTSProvider
 	ArticleExtractor *ArticleExtractor
@@ -110,6 +111,7 @@ func NewTelegramBot(params TelegramBotParams) (*TelegramBot, error) {
 		DurationSvc:    params.DurationSvc,
 		FilesLocation:  params.FilesLocation,
 		BaseURL:        params.BaseURL,
+		CookiesFile:    params.CookiesFile,
 		TTSEnabled:     params.TTSEnabled,
 		pendingActions: make(map[string]*pendingAction),
 	}
@@ -142,6 +144,9 @@ func (t *TelegramBot) Run(ctx context.Context) error {
 	t.Bot.Handle("/vo", t.handleVoiceover)
 	t.Bot.Handle("/help", t.handleHelp)
 	t.Bot.Handle("/start", t.handleHelp)
+
+	// Document uploads: currently only cookies.txt refresh
+	t.Bot.Handle(tb.OnDocument, t.handleDocument)
 
 	// Callback handler for pagination and delete actions
 	t.Bot.Handle(tb.OnCallback, t.handleCallback)
@@ -382,10 +387,107 @@ Commands:
 /del N - delete entry N from feed
 /help - this help
 
+Attach a file (cookies.txt) to refresh YouTube auth cookies —
+the message auto-deletes after upload.
+
 TTS: %v
 RSS: %s/yt/rss/%s`, t.TTSEnabled, t.BaseURL, t.FeedName)
 
 	_, _ = t.Bot.Send(m.Chat, help)
+}
+
+// handleDocument receives file uploads. Right now the only supported flow is
+// a fresh YouTube cookies.txt export — the bot validates content, atomically
+// replaces /srv/etc/cookies.txt (with a .bak backup), and immediately deletes
+// the user's message so cookies don't linger in the chat history.
+//
+// yt-dlp reads the cookies file on every invocation, so no container restart
+// is needed — the next video download picks up the new file.
+func (t *TelegramBot) handleDocument(m *tb.Message) {
+	if !t.isAuthorized(m.Sender) {
+		return
+	}
+	if m.Document == nil {
+		return
+	}
+	if t.CookiesFile == "" {
+		_, _ = t.Bot.Send(m.Chat, "❌ Cookies file path is not configured on server.")
+		return
+	}
+
+	doc := m.Document
+	// Netscape cookies files are small text. 2MB ceiling catches typos
+	// (someone attaching an mp3 by mistake) without cutting off big exports.
+	const maxCookiesSize = 2 * 1024 * 1024
+	if doc.FileSize > maxCookiesSize {
+		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("❌ File too large (%d bytes). Expected a cookies.txt export.", doc.FileSize))
+		return
+	}
+
+	status, _ := t.Bot.Send(m.Chat, fmt.Sprintf("🍪 Receiving %s...", doc.FileName))
+
+	// Download to a temp path next to the target so the final rename is atomic
+	// (same filesystem). Any partial download stays in /tmp-style location.
+	tmpPath := t.CookiesFile + ".incoming"
+	if err := t.Bot.Download(&doc.File, tmpPath); err != nil {
+		_, _ = t.Bot.Edit(status, fmt.Sprintf("❌ Download failed: %v", err))
+		return
+	}
+	// Best-effort cleanup on any early return.
+	defer os.Remove(tmpPath)
+
+	raw, err := os.ReadFile(tmpPath)
+	if err != nil {
+		_, _ = t.Bot.Edit(status, fmt.Sprintf("❌ Read failed: %v", err))
+		return
+	}
+
+	if !isValidYouTubeCookies(raw) {
+		_, _ = t.Bot.Edit(status,
+			"❌ Not a valid YouTube auth cookies file (no SAPISID/SID/LOGIN_INFO found). "+
+				"Make sure you're logged into YouTube in your browser before exporting.")
+		return
+	}
+
+	// Backup existing cookies before overwriting (helps if new export is somehow bad).
+	if _, statErr := os.Stat(t.CookiesFile); statErr == nil {
+		bakPath := t.CookiesFile + ".bak"
+		if existing, rerr := os.ReadFile(t.CookiesFile); rerr == nil {
+			_ = os.WriteFile(bakPath, existing, 0o600)
+		}
+	}
+
+	// Atomic replace: rename over the target (same fs).
+	if err := os.Rename(tmpPath, t.CookiesFile); err != nil {
+		_, _ = t.Bot.Edit(status, fmt.Sprintf("❌ Install failed: %v", err))
+		return
+	}
+	// Tighten perms; cookies file is sensitive.
+	_ = os.Chmod(t.CookiesFile, 0o600)
+
+	log.Printf("[INFO] cookies file updated via telegram: %d bytes", len(raw))
+
+	// Delete the user's message so cookies don't linger in chat history.
+	if delErr := t.Bot.Delete(m); delErr != nil {
+		log.Printf("[WARN] failed to delete cookies message: %v", delErr)
+	}
+
+	_, _ = t.Bot.Edit(status, fmt.Sprintf("✅ Cookies updated (%d bytes). Try a YouTube link now.", len(raw)))
+	t.deleteMessageAfterDelay(status, 15*time.Second)
+}
+
+// isValidYouTubeCookies checks that the uploaded file looks like a Netscape
+// cookies export from a logged-in YouTube session. We require at least one
+// auth-bearing cookie name — otherwise the file is anonymous and won't help
+// yt-dlp past the "sign in to confirm you're not a bot" prompt.
+func isValidYouTubeCookies(data []byte) bool {
+	s := string(data)
+	for _, marker := range []string{"SAPISID", "__Secure-1PSID", "__Secure-3PSID", "LOGIN_INFO"} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // isAuthorized checks if user is allowed
