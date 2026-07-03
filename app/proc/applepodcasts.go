@@ -67,22 +67,43 @@ func parseAppleURL(rawURL string) (podcastID, episodeID string, err error) {
 	return podcastID, episodeID, nil
 }
 
+// appleDescription tolerates both shapes Apple uses for episode description:
+// a plain string or a nested {"standard": "..."} object, varying per feed
+type appleDescription struct {
+	Standard string
+}
+
+// UnmarshalJSON never fails: description is best-effort metadata and must not
+// break the whole lookup response
+func (d *appleDescription) UnmarshalJSON(data []byte) error {
+	var s string
+	if json.Unmarshal(data, &s) == nil {
+		d.Standard = s
+		return nil
+	}
+	var obj struct {
+		Standard string `json:"standard"`
+	}
+	if json.Unmarshal(data, &obj) == nil {
+		d.Standard = obj.Standard
+	}
+	return nil
+}
+
 // lookupItem is one result entry of the iTunes Lookup API
 type lookupItem struct {
-	WrapperType      string    `json:"wrapperType"` // "track" for podcastEpisode
-	Kind             string    `json:"kind"`        // "podcast-episode"
-	TrackID          int64     `json:"trackId"`
-	TrackName        string    `json:"trackName"`
-	CollectionName   string    `json:"collectionName"`
-	EpisodeURL       string    `json:"episodeUrl"`
-	ReleaseDate      string    `json:"releaseDate"` // RFC3339
-	TrackTimeMillis  int64     `json:"trackTimeMillis"`
-	ArtworkURL600    string    `json:"artworkUrl600"`
-	ArtworkURL160    string    `json:"artworkUrl160"`
-	DescriptionBlock *struct { //nolint:staticcheck // apple nests it
-		Standard string `json:"standard"`
-	} `json:"description"`
-	ShortDescription string `json:"shortDescription"`
+	WrapperType      string            `json:"wrapperType"` // "track" for podcastEpisode
+	Kind             string            `json:"kind"`        // "podcast-episode"
+	TrackID          int64             `json:"trackId"`
+	TrackName        string            `json:"trackName"`
+	CollectionName   string            `json:"collectionName"`
+	EpisodeURL       string            `json:"episodeUrl"`
+	ReleaseDate      string            `json:"releaseDate"` // RFC3339
+	TrackTimeMillis  int64             `json:"trackTimeMillis"`
+	ArtworkURL600    string            `json:"artworkUrl600"`
+	ArtworkURL160    string            `json:"artworkUrl160"`
+	DescriptionBlock *appleDescription `json:"description"`
+	ShortDescription string            `json:"shortDescription"`
 }
 
 // lookupResult mirrors the fields we need from the iTunes Lookup API

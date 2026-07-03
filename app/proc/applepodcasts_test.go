@@ -2,6 +2,7 @@ package proc
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -91,12 +92,25 @@ func TestAppleResolverResolve(t *testing.T) {
 	assert.Contains(t, err.Error(), "конкретный эпизод")
 }
 
+func TestAppleDescriptionBothShapes(t *testing.T) {
+	var item lookupItem
+	require.NoError(t, json.Unmarshal([]byte(`{"trackId":1,"description":"plain string form"}`), &item))
+	require.NotNil(t, item.DescriptionBlock)
+	assert.Equal(t, "plain string form", item.DescriptionBlock.Standard)
+
+	require.NoError(t, json.Unmarshal([]byte(`{"trackId":2,"description":{"standard":"nested form"}}`), &item))
+	assert.Equal(t, "nested form", item.DescriptionBlock.Standard)
+
+	// garbage shape must not fail the decode
+	require.NoError(t, json.Unmarshal([]byte(`{"trackId":3,"description":42}`), &item))
+}
+
 func TestAppleResolverResolveShow(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"results":[
 			{"wrapperType":"collection","collectionName":"Boomtown"},
-			{"wrapperType":"track","kind":"podcast-episode","trackId":2,"trackName":"Episode 2",
+			{"wrapperType":"track","kind":"podcast-episode","trackId":2,"trackName":"Episode 2","description":"string desc",
 			 "collectionName":"Boomtown","episodeUrl":"https://cdn.example.com/2.mp3","releaseDate":"2026-02-01T10:00:00Z","trackTimeMillis":60000},
 			{"wrapperType":"track","kind":"podcast-episode","trackId":3,"trackName":"No Audio","collectionName":"Boomtown","releaseDate":"2026-03-01T10:00:00Z"},
 			{"wrapperType":"track","kind":"podcast-episode","trackId":1,"trackName":"Episode 1",
