@@ -267,6 +267,7 @@ func makeNotesService(conf *config.Conf, ytStore *store.BoltDB, outWr, errWr io.
 		Downloader:  notesDownloader,
 		SubtitleSvc: proc.NewSubtitleService(filepath.Join(conf.Notes.MDLocation, "tmp"), conf.YouTube.CookiesFile),
 		Extractor:   proc.NewArticleExtractor(),
+		Apple:       proc.NewAppleResolver(),
 		Concurrency: conf.Notes.Concurrency,
 		JobStore:    ytStore,
 	})

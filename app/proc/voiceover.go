@@ -73,8 +73,15 @@ func (v *VoiceoverService) TranslateVideo(ctx context.Context, videoURL string) 
 	if videoID == "" {
 		return nil, fmt.Errorf("could not extract video ID from URL")
 	}
+	return v.TranslateURL(ctx, videoURL, videoID)
+}
 
-	outputFile := filepath.Join(v.OutputDir, fmt.Sprintf("vo_%s_%d.mp3", videoID, time.Now().Unix()))
+// TranslateURL runs vot-cli on an arbitrary media URL (e.g. a direct podcast
+// enclosure). Yandex VOT supports some direct media links but not all —
+// callers should be ready to fall back when it fails.
+func (v *VoiceoverService) TranslateURL(ctx context.Context, mediaURL, outID string) (*VoiceoverResult, error) {
+	videoURL := mediaURL
+	outputFile := filepath.Join(v.OutputDir, fmt.Sprintf("vo_%s_%d.mp3", outID, time.Now().Unix()))
 
 	// Build vot-cli command
 	// vot-cli --output /path/to --output-file name.mp3 --reslang ru "URL"

@@ -40,7 +40,8 @@ type TelegramBot struct {
 	VoiceoverSvc     *VoiceoverService
 	SubtitleSvc      *SubtitleService
 	Translator       *Translator
-	NotesSvc         *NotesService // nil when notes feature is disabled
+	NotesSvc         *NotesService  // nil when notes feature is disabled
+	Apple            *AppleResolver // apple podcasts links resolution
 
 	pendingMu      sync.Mutex
 	pendingActions map[string]*pendingAction
@@ -132,6 +133,9 @@ func NewTelegramBot(params TelegramBotParams) (*TelegramBot, error) {
 	// Initialize subtitle service and translator (for long video fallback)
 	tb.SubtitleSvc = NewSubtitleService(params.FilesLocation, params.CookiesFile)
 	tb.Translator = NewTranslatorWithKey(os.Getenv("YANDEX_TRANSLATE_KEY"), os.Getenv("YANDEX_FOLDER_ID"), "ru")
+
+	// Apple Podcasts links resolution (no auth, public iTunes lookup)
+	tb.Apple = NewAppleResolver()
 
 	return tb, nil
 }
@@ -235,6 +239,16 @@ func (t *TelegramBot) handleText(m *tb.Message) {
 		return
 	}
 
+	if podcastURL := t.extractURL(m.Text); podcastURL != "" && IsApplePodcastURL(podcastURL) {
+		if _, episodeID, err := parseAppleURL(podcastURL); err == nil && episodeID == "" {
+			_, _ = t.Bot.Send(m.Chat, "Это ссылка на подкаст целиком — пришли ссылку на конкретный эпизод")
+			return
+		}
+		token := t.storePendingAction(&pendingAction{kind: "podcast", url: podcastURL, originalMsg: m})
+		_, _ = t.Bot.Send(m.Chat, "🤔 Что сделать с эпизодом?", t.buildActionMenu(token, "podcast"))
+		return
+	}
+
 	articleURL := t.extractURL(m.Text)
 	if articleURL != "" && t.TTSEnabled && IsArticleURL(articleURL) {
 		token := t.storePendingAction(&pendingAction{kind: "article", url: articleURL, originalMsg: m})
@@ -265,6 +279,15 @@ func (t *TelegramBot) buildActionMenu(token, kind string) *tb.ReplyMarkup {
 			rows = append(rows,
 				[]tb.InlineButton{*btnMD.Inline(), *btnNotes.Inline()},
 				[]tb.InlineButton{*btnBoth.Inline()})
+		}
+	case "podcast":
+		btnAudio := markup.Data("🎧 В ленту", "act", token+"|audio")
+		btnVO := markup.Data("🎙 Перевод RU", "act", token+"|vo")
+		rows = append(rows, []tb.InlineButton{*btnAudio.Inline(), *btnVO.Inline()})
+		if t.NotesSvc != nil {
+			btnMD := markup.Data("📄 MD-файл", "act", token+"|md")
+			btnNotes := markup.Data("📓 Notion", "act", token+"|notes")
+			rows = append(rows, []tb.InlineButton{*btnMD.Inline(), *btnNotes.Inline()})
 		}
 	case "article":
 		btnTTS := markup.Data("📝 Озвучить", "act", token+"|tts")
@@ -1129,6 +1152,29 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 		default:
 			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
 		}
+	case "podcast":
+		switch action {
+		case "audio":
+			_, _ = t.Bot.Edit(statusMsg, "⏳ Скачиваю эпизод...")
+			go func() {
+				if err := t.processPodcastAudio(context.Background(), chat, statusMsg, pa.originalMsg, pa.url); err != nil {
+					log.Printf("[ERROR] failed to process podcast %s: %v", pa.url, err)
+					_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+				}
+			}()
+		case "vo":
+			_, _ = t.Bot.Edit(statusMsg, "⏳ Получаю перевод...")
+			go func() {
+				if err := t.processPodcastVoiceover(context.Background(), chat, statusMsg, pa.originalMsg, pa.url); err != nil {
+					log.Printf("[ERROR] failed to process podcast voiceover %s: %v", pa.url, err)
+					_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+				}
+			}()
+		case "md", "notes":
+			t.enqueueNotesJob(statusMsg, pa.originalMsg, pa.url, action)
+		default:
+			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
+		}
 	case "article":
 		switch action {
 		case "tts":
@@ -1571,8 +1617,8 @@ func (t *TelegramBot) enqueueNotesJob(statusMsg, originalMsg *tb.Message, rawURL
 	if originalMsg != nil {
 		rec.OrigMsgID = originalMsg.ID
 	}
-	if source == "youtube" {
-		// reuse the feed's mp3 if this video was already added to the podcast
+	if source == "youtube" || source == "podcast" {
+		// reuse the feed's mp3 if this episode was already added for listening
 		reuse := filepath.Join(t.FilesLocation, t.makeFileName(sourceID)+".mp3")
 		if fi, err := os.Stat(reuse); err == nil && fi.Size() > 0 {
 			rec.ReuseAudio = reuse
@@ -1753,6 +1799,215 @@ func sanitizeFileName(name string) string {
 		name = "transcript"
 	}
 	return name
+}
+
+// createPodcastEntry builds a feed entry for an Apple Podcasts episode.
+// Published is the time of addition (see createEntry for reasoning).
+func (t *TelegramBot) createPodcastEntry(ep *ApplePodcastEpisode, rawURL, file string, duration int) ytfeed.Entry {
+	description := ep.Description
+	if ep.Date != "" {
+		description = "📅 Вышло: " + ep.Date + "\n\n" + description
+	}
+	return ytfeed.Entry{
+		ChannelID: t.FeedName,
+		VideoID:   ep.SourceID(),
+		Title:     ep.Title,
+		Link: struct {
+			Href string `xml:"href,attr"`
+		}{Href: rawURL},
+		Published: time.Now(),
+		Updated:   time.Now(),
+		Media: struct {
+			Description template.HTML `xml:"description"`
+			Thumbnail   struct {
+				URL string `xml:"url,attr"`
+			} `xml:"thumbnail"`
+		}{
+			Description: template.HTML(description), //nolint:gosec // apple catalog description
+			Thumbnail: struct {
+				URL string `xml:"url,attr"`
+			}{URL: ep.Artwork},
+		},
+		Author: struct {
+			Name string `xml:"name"`
+			URI  string `xml:"uri"`
+		}{Name: ep.Show, URI: rawURL},
+		File:     file,
+		Duration: duration,
+	}
+}
+
+// processPodcastAudio downloads an Apple Podcasts episode into the feed
+func (t *TelegramBot) processPodcastAudio(ctx context.Context, chat *tb.Chat, statusMsg, originalMsg *tb.Message, rawURL string) error {
+	ep, err := t.Apple.Resolve(ctx, rawURL)
+	if err != nil {
+		return err
+	}
+
+	tempEntry := ytfeed.Entry{ChannelID: t.FeedName, VideoID: ep.SourceID()}
+	if found, _, _ := t.Store.CheckProcessed(tempEntry); found {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ %s (already in feed)", ep.Title))
+		return nil
+	}
+
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⬇️ Скачиваю: %s...", ep.Title))
+	file := filepath.Join(t.FilesLocation, t.makeFileName(ep.SourceID())+".mp3")
+	if err := t.Apple.DownloadEnclosure(ctx, ep.AudioURL, file); err != nil {
+		return err
+	}
+
+	duration := t.DurationSvc.File(file)
+	entry := t.createPodcastEntry(ep, rawURL, file, duration)
+	if _, err := t.Store.Save(entry); err != nil {
+		return fmt.Errorf("failed to save entry: %w", err)
+	}
+	if err := t.Store.SetProcessed(entry); err != nil {
+		log.Printf("[WARN] failed to set processed for %s: %v", ep.SourceID(), err)
+	}
+	t.logHistory(ytstore.HistoryEntry{
+		URL:      rawURL,
+		Title:    ep.Title,
+		Action:   "audio",
+		VideoID:  ep.SourceID(),
+		Duration: t.formatDuration(time.Duration(duration) * time.Second),
+	})
+	t.removeOldEntries()
+
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("✅ %s (%s)", ep.Title, t.formatDuration(time.Duration(duration)*time.Second)))
+	t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
+	_ = chat
+	return nil
+}
+
+// processPodcastVoiceover translates an Apple Podcasts episode to Russian:
+// vot-cli on the direct enclosure first (works for some links), then the
+// Whisper → Translate → Edge TTS chain as a universal fallback.
+func (t *TelegramBot) processPodcastVoiceover(ctx context.Context, chat *tb.Chat, statusMsg, originalMsg *tb.Message, rawURL string) error {
+	ep, err := t.Apple.Resolve(ctx, rawURL)
+	if err != nil {
+		return err
+	}
+
+	voID := "vo_" + ep.SourceID()
+	tempEntry := ytfeed.Entry{ChannelID: t.FeedName, VideoID: voID}
+	if found, _, _ := t.Store.CheckProcessed(tempEntry); found {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ 🎙 %s (already in feed)", ep.Title))
+		return nil
+	}
+
+	var voFile string
+	titleEmoji := "🎙"
+	if IsVotCliAvailable() {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🎙 Пробую Яндекс-перевод: %s...", ep.Title))
+		if res, votErr := t.VoiceoverSvc.TranslateURL(ctx, ep.AudioURL, ep.SourceID()); votErr == nil {
+			voFile = res.FilePath
+		} else {
+			log.Printf("[WARN] vot-cli failed for podcast %s, falling back to whisper: %v", rawURL, votErr)
+		}
+	}
+
+	if voFile == "" {
+		voFile, err = t.podcastVoiceoverViaWhisper(ctx, statusMsg, ep)
+		if err != nil {
+			return err
+		}
+		titleEmoji = "📝"
+	}
+
+	duration := t.DurationSvc.File(voFile)
+	entry := t.createPodcastEntry(ep, rawURL, voFile, duration)
+	entry.VideoID = voID
+	entry.Title = titleEmoji + " " + ep.Title
+	if _, err := t.Store.Save(entry); err != nil {
+		return fmt.Errorf("failed to save entry: %w", err)
+	}
+	if err := t.Store.SetProcessed(entry); err != nil {
+		log.Printf("[WARN] failed to set processed for %s: %v", voID, err)
+	}
+	t.logHistory(ytstore.HistoryEntry{
+		URL:      rawURL,
+		Title:    titleEmoji + " " + ep.Title,
+		Action:   "voiceover",
+		VideoID:  voID,
+		Duration: t.formatDuration(time.Duration(duration) * time.Second),
+	})
+	t.removeOldEntries()
+
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("✅ %s %s (%s)", titleEmoji, ep.Title, t.formatDuration(time.Duration(duration)*time.Second)))
+	t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
+	_ = chat
+	return nil
+}
+
+// podcastVoiceoverViaWhisper builds a Russian voiceover for arbitrary audio:
+// download enclosure -> Whisper transcript -> Yandex Translate -> Edge TTS
+func (t *TelegramBot) podcastVoiceoverViaWhisper(ctx context.Context, statusMsg *tb.Message, ep *ApplePodcastEpisode) (string, error) {
+	if t.NotesSvc == nil || t.NotesSvc.Transcriber == nil {
+		return "", fmt.Errorf("перевод недоступен: нужен GROQ_API_KEY (notes.enabled)")
+	}
+	if t.TTS == nil {
+		return "", fmt.Errorf("перевод недоступен: включи tts_enabled")
+	}
+
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⬇️ Скачиваю аудио: %s...", ep.Title))
+	tempAudio := filepath.Join(os.TempDir(), "vo_src_"+ep.SourceID()+".mp3")
+	if err := t.Apple.DownloadEnclosure(ctx, ep.AudioURL, tempAudio); err != nil {
+		return "", err
+	}
+	defer func() {
+		if rmErr := os.Remove(tempAudio); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.Printf("[WARN] failed to remove temp audio %s: %v", tempAudio, rmErr)
+		}
+	}()
+
+	tr, err := t.NotesSvc.Transcriber.Transcribe(ctx, tempAudio, func(done, total int) {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🎧 Транскрибирую %d/%d: %s...", done, total, ep.Title))
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to transcribe: %w", err)
+	}
+
+	var sb strings.Builder
+	for _, seg := range tr.Segments {
+		if text := strings.TrimSpace(seg.Text); text != "" {
+			sb.WriteString(text)
+			sb.WriteString(" ")
+		}
+	}
+	text := strings.TrimSpace(sb.String())
+	const maxVoiceoverLen = 150000 // ~2.5 hours of audio, same cap as subtitles/articles
+	if runes := []rune(text); len(runes) > maxVoiceoverLen {
+		text = string(runes[:maxVoiceoverLen])
+		log.Printf("[WARN] podcast transcript truncated from %d to %d characters", len(runes), maxVoiceoverLen)
+	}
+	if text == "" {
+		return "", fmt.Errorf("empty transcript")
+	}
+
+	if t.Translator != nil && t.Translator.NeedsTranslation(text) {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🌐 Перевожу: %s...", ep.Title))
+		translated, trErr := t.Translator.Translate(ctx, text)
+		if trErr != nil {
+			return "", fmt.Errorf("failed to translate: %w", trErr)
+		}
+		text = translated
+	}
+
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🗣 Озвучиваю: %s...", ep.Title))
+	edgeTTS, ok := t.TTS.(*EdgeTTS)
+	if !ok {
+		return "", fmt.Errorf("TTS provider is not EdgeTTS")
+	}
+	audioData, err := edgeTTS.SynthesizeLongText(ctx, text, 3000)
+	if err != nil {
+		return "", fmt.Errorf("failed to synthesize: %w", err)
+	}
+
+	voFile := filepath.Join(t.FilesLocation, fmt.Sprintf("vo_%s_%d.mp3", ep.SourceID(), time.Now().Unix()))
+	if err := os.WriteFile(voFile, audioData, 0o640); err != nil { //nolint:gosec
+		return "", fmt.Errorf("failed to write voiceover file: %w", err)
+	}
+	return voFile, nil
 }
 
 // appendNotionLinkToEntry adds the Notion page link to the episode description

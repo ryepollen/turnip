@@ -104,11 +104,14 @@ func readNoteFile(path string) (NoteMeta, string, error) {
 	return meta, strings.TrimSpace(body), nil
 }
 
-// noteSourceID derives the dedup key for a link: YouTube video ID, or a short
-// hash of the URL for everything else
+// noteSourceID derives the dedup key for a link: YouTube video ID, Apple
+// Podcasts episode id, or a short hash of the URL for everything else
 func noteSourceID(rawURL string) (id, source string) {
 	if vid := extractVideoID(normalizeYouTubeURL(rawURL)); vid != "" {
 		return vid, "youtube"
+	}
+	if apID := appleEpisodeIDFromURL(rawURL); apID != "" {
+		return apID, "podcast"
 	}
 	h := sha1.New() //nolint:gosec // not used for security
 	h.Write([]byte("note::" + rawURL))
@@ -173,7 +176,8 @@ type NotesService struct {
 	Notion      *NotionWriter      // nil -> /notes degrades to /md
 	Downloader  *ytfeed.Downloader // separate instance, destination is a tmp dir
 	SubtitleSvc *SubtitleService   // fallback transcript source
-	Extractor   *ArticleExtractor  // L1 source for non-YouTube links
+	Extractor   *ArticleExtractor  // L1 source for plain article links
+	Apple       *AppleResolver     // apple podcasts episode resolution
 	Concurrency int
 	JobStore    NotesJobStore
 	Notifier    NotesNotifier // set once before Run, nil-safe
@@ -190,6 +194,7 @@ type NotesParams struct {
 	Downloader  *ytfeed.Downloader
 	SubtitleSvc *SubtitleService
 	Extractor   *ArticleExtractor
+	Apple       *AppleResolver
 	Concurrency int
 	JobStore    NotesJobStore
 }
@@ -208,6 +213,7 @@ func NewNotesService(params NotesParams) *NotesService {
 		Downloader:  params.Downloader,
 		SubtitleSvc: params.SubtitleSvc,
 		Extractor:   params.Extractor,
+		Apple:       params.Apple,
 		Concurrency: concurrency,
 		JobStore:    params.JobStore,
 		kick:        make(chan struct{}, 1),
@@ -354,17 +360,30 @@ func (n *NotesService) progress(job ytstore.NotesJobRecord, stage string) {
 // seedFor gathers source metadata before the pipeline runs
 func (n *NotesService) seedFor(ctx context.Context, job ytstore.NotesJobRecord) seedMeta {
 	seed := seedMeta{Title: job.URL}
-	if job.Source != "youtube" || n.Downloader == nil {
-		return seed
-	}
-	info, err := n.Downloader.GetInfo(ctx, "https://www.youtube.com/watch?v="+job.SourceID)
-	if err != nil {
-		log.Printf("[WARN] failed to get source info for %s: %v", job.URL, err)
-		return seed
-	}
-	seed = seedMeta{Title: info.Title, Channel: info.Uploader, DurationMin: int(info.Duration) / 60}
-	if parsed, perr := time.Parse("20060102", info.UploadDate); perr == nil {
-		seed.Date = parsed.Format("2006-01-02")
+	switch job.Source {
+	case "youtube":
+		if n.Downloader == nil {
+			return seed
+		}
+		info, err := n.Downloader.GetInfo(ctx, "https://www.youtube.com/watch?v="+job.SourceID)
+		if err != nil {
+			log.Printf("[WARN] failed to get source info for %s: %v", job.URL, err)
+			return seed
+		}
+		seed = seedMeta{Title: info.Title, Channel: info.Uploader, DurationMin: int(info.Duration) / 60}
+		if parsed, perr := time.Parse("20060102", info.UploadDate); perr == nil {
+			seed.Date = parsed.Format("2006-01-02")
+		}
+	case "podcast":
+		if n.Apple == nil {
+			return seed
+		}
+		ep, err := n.Apple.Resolve(ctx, job.URL)
+		if err != nil {
+			log.Printf("[WARN] failed to resolve apple episode %s: %v", job.URL, err)
+			return seed
+		}
+		seed = seedMeta{Title: ep.Title, Channel: ep.Show, Date: ep.Date, DurationMin: ep.DurationMin}
 	}
 	return seed
 }
@@ -446,6 +465,8 @@ func (n *NotesService) ensureL1(ctx context.Context, job ytstore.NotesJobRecord,
 	switch job.Source {
 	case "youtube":
 		body, fidelityNote, err = n.transcribeYouTube(ctx, job)
+	case "podcast":
+		body, err = n.transcribePodcast(ctx, job)
 	default:
 		body, err = n.extractArticleText(ctx, job, &seed)
 	}
@@ -564,7 +585,63 @@ func (n *NotesService) audioFor(ctx context.Context, job ytstore.NotesJobRecord)
 	}, nil
 }
 
-// extractArticleText produces the L1 body for a non-YouTube link from the
+// transcribePodcast produces the cleaned transcript body for an Apple Podcasts
+// episode. No subtitle fallback exists for podcasts: Whisper or nothing.
+func (n *NotesService) transcribePodcast(ctx context.Context, job ytstore.NotesJobRecord) (string, error) {
+	audioPath, cleanup, err := n.podcastAudioFor(ctx, job)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+
+	tr, err := n.Transcriber.Transcribe(ctx, audioPath, func(done, total int) {
+		n.progress(job, fmt.Sprintf("🎧 транскрибирую %d/%d", done, total))
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to transcribe: %w", err)
+	}
+
+	n.progress(job, "🧹 чищу текст")
+	body, err := n.Enricher.CleanTranscript(ctx, tr, func(done, total int) {
+		if total > 1 {
+			n.progress(job, fmt.Sprintf("🧹 чищу текст %d/%d", done, total))
+		}
+	})
+	if err != nil {
+		return "", err
+	}
+	return body, nil
+}
+
+// podcastAudioFor returns a local mp3 for a podcast job: the feed's file when
+// the episode was added for listening, otherwise a temp enclosure download
+func (n *NotesService) podcastAudioFor(ctx context.Context, job ytstore.NotesJobRecord) (path string, cleanup func(), err error) {
+	noop := func() {}
+	if job.ReuseAudio != "" {
+		if fi, statErr := os.Stat(job.ReuseAudio); statErr == nil && fi.Size() > 0 {
+			return job.ReuseAudio, noop, nil
+		}
+	}
+	if n.Apple == nil {
+		return "", noop, fmt.Errorf("apple podcasts resolver not configured")
+	}
+	ep, err := n.Apple.Resolve(ctx, job.URL)
+	if err != nil {
+		return "", noop, err
+	}
+	n.progress(job, "⬇️ скачиваю аудио")
+	dest := filepath.Join(n.MDLocation, "tmp", job.SourceID+".mp3")
+	if err := n.Apple.DownloadEnclosure(ctx, ep.AudioURL, dest); err != nil {
+		return "", noop, err
+	}
+	return dest, func() {
+		if rmErr := os.Remove(dest); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.Printf("[WARN] failed to remove temp audio %s: %v", dest, rmErr)
+		}
+	}, nil
+}
+
+// extractArticleText produces the L1 body for a plain article link from the
 // article text (no audio, no timecodes)
 func (n *NotesService) extractArticleText(ctx context.Context, job ytstore.NotesJobRecord, seed *seedMeta) (string, error) {
 	if n.Extractor == nil {
