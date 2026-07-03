@@ -63,6 +63,7 @@ const (
 	defaultHistoryPageSize = 10
 	maxPageSize            = 50
 	pendingActionTTL       = 10 * time.Minute
+	maxShowEpisodes        = 50 // cap for "add the whole show" batches
 )
 
 // TelegramBotParams contains all parameters for creating a new TelegramBot
@@ -241,7 +242,18 @@ func (t *TelegramBot) handleText(m *tb.Message) {
 
 	if podcastURL := t.extractURL(m.Text); podcastURL != "" && IsApplePodcastURL(podcastURL) {
 		if _, episodeID, err := parseAppleURL(podcastURL); err == nil && episodeID == "" {
-			_, _ = t.Bot.Send(m.Chat, "Это ссылка на подкаст целиком — пришли ссылку на конкретный эпизод")
+			// link to a whole show: offer adding all catalog episodes
+			show, eps, rerr := t.Apple.ResolveShow(context.Background(), podcastURL)
+			if rerr != nil {
+				_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("❌ %v", rerr))
+				return
+			}
+			token := t.storePendingAction(&pendingAction{kind: "podcast_show", url: podcastURL, originalMsg: m})
+			prompt := fmt.Sprintf("🎙 «%s» — %d эпизодов в каталоге. Добавить все в ленту?", show, len(eps))
+			if len(eps) > maxShowEpisodes {
+				prompt = fmt.Sprintf("🎙 «%s» — %d эпизодов в каталоге. Добавлю последние %d. Продолжить?", show, len(eps), maxShowEpisodes)
+			}
+			_, _ = t.Bot.Send(m.Chat, prompt, t.buildActionMenu(token, "podcast_show"))
 			return
 		}
 		token := t.storePendingAction(&pendingAction{kind: "podcast", url: podcastURL, originalMsg: m})
@@ -289,6 +301,9 @@ func (t *TelegramBot) buildActionMenu(token, kind string) *tb.ReplyMarkup {
 			btnNotes := markup.Data("📓 Notion", "act", token+"|notes")
 			rows = append(rows, []tb.InlineButton{*btnMD.Inline(), *btnNotes.Inline()})
 		}
+	case "podcast_show":
+		btnAll := markup.Data("🎧 Добавить все", "act", token+"|audio")
+		rows = append(rows, []tb.InlineButton{*btnAll.Inline()})
 	case "article":
 		btnTTS := markup.Data("📝 Озвучить", "act", token+"|tts")
 		rows = append(rows, []tb.InlineButton{*btnTTS.Inline()})
@@ -1175,6 +1190,13 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 		default:
 			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
 		}
+	case "podcast_show":
+		if action == "audio" {
+			_, _ = t.Bot.Edit(statusMsg, "⏳ Добавляю эпизоды...")
+			go t.processPodcastShowBatch(context.Background(), chat, statusMsg, pa.originalMsg, pa.url)
+		} else {
+			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
+		}
 	case "article":
 		switch action {
 		case "tts":
@@ -1837,6 +1859,37 @@ func (t *TelegramBot) createPodcastEntry(ep *ApplePodcastEpisode, rawURL, file s
 	}
 }
 
+// addPodcastEpisode is the UI-free core: download the enclosure and store the
+// feed entry. skipped is true when the episode is already in the feed.
+func (t *TelegramBot) addPodcastEpisode(ctx context.Context, ep *ApplePodcastEpisode, linkURL string) (duration int, skipped bool, err error) {
+	tempEntry := ytfeed.Entry{ChannelID: t.FeedName, VideoID: ep.SourceID()}
+	if found, _, _ := t.Store.CheckProcessed(tempEntry); found {
+		return 0, true, nil
+	}
+
+	file := filepath.Join(t.FilesLocation, t.makeFileName(ep.SourceID())+".mp3")
+	if err := t.Apple.DownloadEnclosure(ctx, ep.AudioURL, file); err != nil {
+		return 0, false, err
+	}
+
+	duration = t.DurationSvc.File(file)
+	entry := t.createPodcastEntry(ep, linkURL, file, duration)
+	if _, err := t.Store.Save(entry); err != nil {
+		return 0, false, fmt.Errorf("failed to save entry: %w", err)
+	}
+	if err := t.Store.SetProcessed(entry); err != nil {
+		log.Printf("[WARN] failed to set processed for %s: %v", ep.SourceID(), err)
+	}
+	t.logHistory(ytstore.HistoryEntry{
+		URL:      linkURL,
+		Title:    ep.Title,
+		Action:   "audio",
+		VideoID:  ep.SourceID(),
+		Duration: t.formatDuration(time.Duration(duration) * time.Second),
+	})
+	return duration, false, nil
+}
+
 // processPodcastAudio downloads an Apple Podcasts episode into the feed
 func (t *TelegramBot) processPodcastAudio(ctx context.Context, chat *tb.Chat, statusMsg, originalMsg *tb.Message, rawURL string) error {
 	ep, err := t.Apple.Resolve(ctx, rawURL)
@@ -1844,39 +1897,64 @@ func (t *TelegramBot) processPodcastAudio(ctx context.Context, chat *tb.Chat, st
 		return err
 	}
 
-	tempEntry := ytfeed.Entry{ChannelID: t.FeedName, VideoID: ep.SourceID()}
-	if found, _, _ := t.Store.CheckProcessed(tempEntry); found {
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⬇️ Скачиваю: %s...", ep.Title))
+	duration, skipped, err := t.addPodcastEpisode(ctx, ep, rawURL)
+	if err != nil {
+		return err
+	}
+	if skipped {
 		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ %s (already in feed)", ep.Title))
 		return nil
 	}
-
-	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⬇️ Скачиваю: %s...", ep.Title))
-	file := filepath.Join(t.FilesLocation, t.makeFileName(ep.SourceID())+".mp3")
-	if err := t.Apple.DownloadEnclosure(ctx, ep.AudioURL, file); err != nil {
-		return err
-	}
-
-	duration := t.DurationSvc.File(file)
-	entry := t.createPodcastEntry(ep, rawURL, file, duration)
-	if _, err := t.Store.Save(entry); err != nil {
-		return fmt.Errorf("failed to save entry: %w", err)
-	}
-	if err := t.Store.SetProcessed(entry); err != nil {
-		log.Printf("[WARN] failed to set processed for %s: %v", ep.SourceID(), err)
-	}
-	t.logHistory(ytstore.HistoryEntry{
-		URL:      rawURL,
-		Title:    ep.Title,
-		Action:   "audio",
-		VideoID:  ep.SourceID(),
-		Duration: t.formatDuration(time.Duration(duration) * time.Second),
-	})
 	t.removeOldEntries()
 
 	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("✅ %s (%s)", ep.Title, t.formatDuration(time.Duration(duration)*time.Second)))
 	t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
 	_ = chat
 	return nil
+}
+
+// processPodcastShowBatch adds all catalog episodes of a show sequentially,
+// oldest first (so the feed chronology matches the show), with batch progress
+// in the style of processVideoBatch
+func (t *TelegramBot) processPodcastShowBatch(ctx context.Context, chat *tb.Chat, statusMsg, originalMsg *tb.Message, rawURL string) {
+	show, eps, err := t.Apple.ResolveShow(ctx, rawURL)
+	if err != nil {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+		return
+	}
+	if len(eps) > maxShowEpisodes {
+		eps = eps[len(eps)-maxShowEpisodes:] // keep the newest, order stays chronological
+	}
+
+	added, skipped, failed := 0, 0, 0
+	for i, ep := range eps {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⬇️ %d/%d: %s...", i+1, len(eps), ep.Title))
+		duration, skip, aerr := t.addPodcastEpisode(ctx, ep, ep.EpisodeLink())
+		switch {
+		case aerr != nil:
+			failed++
+			log.Printf("[ERROR] failed to add show episode %s: %v", ep.EpisodeLink(), aerr)
+		case skip:
+			skipped++
+		default:
+			added++
+			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("✅ %d/%d: %s (%s)", i+1, len(eps), ep.Title,
+				t.formatDuration(time.Duration(duration)*time.Second)))
+		}
+	}
+	t.removeOldEntries()
+
+	summary := fmt.Sprintf("✅ «%s»: добавлено %d/%d", show, added, len(eps))
+	if skipped > 0 {
+		summary += fmt.Sprintf(" (%d уже в ленте)", skipped)
+	}
+	if failed > 0 {
+		summary += fmt.Sprintf(" (%d с ошибками)", failed)
+	}
+	_, _ = t.Bot.Edit(statusMsg, summary)
+	t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
+	_ = chat
 }
 
 // processPodcastVoiceover translates an Apple Podcasts episode to Russian:

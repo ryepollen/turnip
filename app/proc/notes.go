@@ -412,11 +412,12 @@ func (n *NotesService) process(ctx context.Context, job ytstore.NotesJobRecord) 
 		return res, fmt.Errorf("notion не настроен (NOTION_TOKEN + notion_parent_page), сохранён только транскрипт %s", filepath.Base(mdPath))
 	}
 
-	n.progress(job, "📚 конспектирую")
+	n.progress(job, "📚 конспектирую (саммари)")
 	summary, err := n.Enricher.Summarize(ctx, body)
 	if err != nil {
 		return res, fmt.Errorf("failed to summarize: %w", err)
 	}
+	n.progress(job, "📚 конспектирую (отсылки)")
 	refs, err := n.Enricher.ExtractReferences(ctx, body)
 	if err != nil {
 		log.Printf("[WARN] references extraction failed for %s, continuing without: %v", job.URL, err)

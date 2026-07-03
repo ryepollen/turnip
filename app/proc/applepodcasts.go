@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"time"
 )
 
@@ -66,36 +67,31 @@ func parseAppleURL(rawURL string) (podcastID, episodeID string, err error) {
 	return podcastID, episodeID, nil
 }
 
-// lookupResult mirrors the fields we need from the iTunes Lookup API
-type lookupResult struct {
-	Results []struct {
-		WrapperType      string    `json:"wrapperType"` // "track" for podcastEpisode
-		Kind             string    `json:"kind"`        // "podcast-episode"
-		TrackID          int64     `json:"trackId"`
-		TrackName        string    `json:"trackName"`
-		CollectionName   string    `json:"collectionName"`
-		EpisodeURL       string    `json:"episodeUrl"`
-		ReleaseDate      string    `json:"releaseDate"` // RFC3339
-		TrackTimeMillis  int64     `json:"trackTimeMillis"`
-		ArtworkURL600    string    `json:"artworkUrl600"`
-		ArtworkURL160    string    `json:"artworkUrl160"`
-		DescriptionBlock *struct { //nolint:staticcheck // apple nests it
-			Standard string `json:"standard"`
-		} `json:"description"`
-		ShortDescription string `json:"shortDescription"`
-	} `json:"results"`
+// lookupItem is one result entry of the iTunes Lookup API
+type lookupItem struct {
+	WrapperType      string    `json:"wrapperType"` // "track" for podcastEpisode
+	Kind             string    `json:"kind"`        // "podcast-episode"
+	TrackID          int64     `json:"trackId"`
+	TrackName        string    `json:"trackName"`
+	CollectionName   string    `json:"collectionName"`
+	EpisodeURL       string    `json:"episodeUrl"`
+	ReleaseDate      string    `json:"releaseDate"` // RFC3339
+	TrackTimeMillis  int64     `json:"trackTimeMillis"`
+	ArtworkURL600    string    `json:"artworkUrl600"`
+	ArtworkURL160    string    `json:"artworkUrl160"`
+	DescriptionBlock *struct { //nolint:staticcheck // apple nests it
+		Standard string `json:"standard"`
+	} `json:"description"`
+	ShortDescription string `json:"shortDescription"`
 }
 
-// Resolve fetches episode metadata and the direct audio URL for an episode link
-func (r *AppleResolver) Resolve(ctx context.Context, rawURL string) (*ApplePodcastEpisode, error) {
-	podcastID, episodeID, err := parseAppleURL(rawURL)
-	if err != nil {
-		return nil, err
-	}
-	if episodeID == "" {
-		return nil, fmt.Errorf("это ссылка на подкаст целиком — нужна ссылка на конкретный эпизод (открой эпизод и поделись им)")
-	}
+// lookupResult mirrors the fields we need from the iTunes Lookup API
+type lookupResult struct {
+	Results []lookupItem `json:"results"`
+}
 
+// lookupEpisodes fetches all catalog episodes of a podcast (latest ~200)
+func (r *AppleResolver) lookupEpisodes(ctx context.Context, podcastID string) (*lookupResult, error) {
 	lookupURL := fmt.Sprintf("%s/lookup?id=%s&entity=podcastEpisode&limit=200", r.BaseURL, podcastID)
 	req, err := http.NewRequestWithContext(ctx, "GET", lookupURL, http.NoBody)
 	if err != nil {
@@ -114,7 +110,51 @@ func (r *AppleResolver) Resolve(ctx context.Context, rawURL string) (*ApplePodca
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 5*1024*1024)).Decode(&lr); err != nil {
 		return nil, fmt.Errorf("failed to decode lookup response: %w", err)
 	}
+	return &lr, nil
+}
 
+// episodeFromLookup converts one lookup item into ApplePodcastEpisode
+func episodeFromLookup(podcastID string, item lookupItem) *ApplePodcastEpisode {
+	ep := &ApplePodcastEpisode{
+		PodcastID:   podcastID,
+		EpisodeID:   fmt.Sprintf("%d", item.TrackID),
+		Title:       item.TrackName,
+		Show:        item.CollectionName,
+		AudioURL:    item.EpisodeURL,
+		DurationMin: int(item.TrackTimeMillis / 60000),
+		Description: item.ShortDescription,
+	}
+	if item.DescriptionBlock != nil && item.DescriptionBlock.Standard != "" {
+		ep.Description = item.DescriptionBlock.Standard
+	}
+	if ep.Artwork = item.ArtworkURL600; ep.Artwork == "" {
+		ep.Artwork = item.ArtworkURL160
+	}
+	if parsed, perr := time.Parse(time.RFC3339, item.ReleaseDate); perr == nil {
+		ep.Date = parsed.Format("2006-01-02")
+	}
+	return ep
+}
+
+// EpisodeLink rebuilds a canonical apple podcasts episode URL
+func (e *ApplePodcastEpisode) EpisodeLink() string {
+	return fmt.Sprintf("https://podcasts.apple.com/podcast/id%s?i=%s", e.PodcastID, e.EpisodeID)
+}
+
+// Resolve fetches episode metadata and the direct audio URL for an episode link
+func (r *AppleResolver) Resolve(ctx context.Context, rawURL string) (*ApplePodcastEpisode, error) {
+	podcastID, episodeID, err := parseAppleURL(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	if episodeID == "" {
+		return nil, fmt.Errorf("это ссылка на подкаст целиком — нужна ссылка на конкретный эпизод (открой эпизод и поделись им)")
+	}
+
+	lr, err := r.lookupEpisodes(ctx, podcastID)
+	if err != nil {
+		return nil, err
+	}
 	for _, item := range lr.Results {
 		if fmt.Sprintf("%d", item.TrackID) != episodeID || item.Kind != "podcast-episode" {
 			continue
@@ -122,28 +162,39 @@ func (r *AppleResolver) Resolve(ctx context.Context, rawURL string) (*ApplePodca
 		if item.EpisodeURL == "" {
 			return nil, fmt.Errorf("у эпизода нет прямой аудио-ссылки в каталоге Apple")
 		}
-		ep := &ApplePodcastEpisode{
-			PodcastID:   podcastID,
-			EpisodeID:   episodeID,
-			Title:       item.TrackName,
-			Show:        item.CollectionName,
-			AudioURL:    item.EpisodeURL,
-			DurationMin: int(item.TrackTimeMillis / 60000),
-			Description: item.ShortDescription,
-		}
-		if item.DescriptionBlock != nil && item.DescriptionBlock.Standard != "" {
-			ep.Description = item.DescriptionBlock.Standard
-		}
-		if ep.Artwork = item.ArtworkURL600; ep.Artwork == "" {
-			ep.Artwork = item.ArtworkURL160
-		}
-		if parsed, perr := time.Parse(time.RFC3339, item.ReleaseDate); perr == nil {
-			ep.Date = parsed.Format("2006-01-02")
-		}
-		return ep, nil
+		return episodeFromLookup(podcastID, item), nil
 	}
 	// lookup returns the latest ~200 episodes; very old ones may be missing
 	return nil, fmt.Errorf("эпизод %s не найден в каталоге (lookup отдаёт только последние ~200 эпизодов)", episodeID)
+}
+
+// ResolveShow fetches all catalog episodes of a show link, oldest first —
+// adding them in this order keeps the feed chronology right (pubDate = time
+// of addition, each next episode lands newer)
+func (r *AppleResolver) ResolveShow(ctx context.Context, rawURL string) (show string, eps []*ApplePodcastEpisode, err error) {
+	podcastID, _, err := parseAppleURL(rawURL)
+	if err != nil {
+		return "", nil, err
+	}
+	lr, err := r.lookupEpisodes(ctx, podcastID)
+	if err != nil {
+		return "", nil, err
+	}
+	for _, item := range lr.Results {
+		if item.Kind != "podcast-episode" || item.EpisodeURL == "" {
+			continue
+		}
+		ep := episodeFromLookup(podcastID, item)
+		if show == "" {
+			show = ep.Show
+		}
+		eps = append(eps, ep)
+	}
+	if len(eps) == 0 {
+		return show, nil, fmt.Errorf("в каталоге не нашлось эпизодов с аудио")
+	}
+	sort.Slice(eps, func(i, j int) bool { return eps[i].Date < eps[j].Date })
+	return show, eps, nil
 }
 
 // DownloadEnclosure downloads the episode audio to destPath (atomic via .part)

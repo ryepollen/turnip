@@ -91,6 +91,32 @@ func TestAppleResolverResolve(t *testing.T) {
 	assert.Contains(t, err.Error(), "конкретный эпизод")
 }
 
+func TestAppleResolverResolveShow(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[
+			{"wrapperType":"collection","collectionName":"Boomtown"},
+			{"wrapperType":"track","kind":"podcast-episode","trackId":2,"trackName":"Episode 2",
+			 "collectionName":"Boomtown","episodeUrl":"https://cdn.example.com/2.mp3","releaseDate":"2026-02-01T10:00:00Z","trackTimeMillis":60000},
+			{"wrapperType":"track","kind":"podcast-episode","trackId":3,"trackName":"No Audio","collectionName":"Boomtown","releaseDate":"2026-03-01T10:00:00Z"},
+			{"wrapperType":"track","kind":"podcast-episode","trackId":1,"trackName":"Episode 1",
+			 "collectionName":"Boomtown","episodeUrl":"https://cdn.example.com/1.mp3","releaseDate":"2026-01-01T10:00:00Z","trackTimeMillis":60000}
+		]}`))
+	}))
+	defer ts.Close()
+
+	r := NewAppleResolver()
+	r.BaseURL = ts.URL
+
+	show, eps, err := r.ResolveShow(context.Background(), "https://podcasts.apple.com/us/podcast/boomtown/id99")
+	require.NoError(t, err)
+	assert.Equal(t, "Boomtown", show)
+	require.Len(t, eps, 2, "episode without audio skipped")
+	assert.Equal(t, "Episode 1", eps[0].Title, "oldest first")
+	assert.Equal(t, "Episode 2", eps[1].Title)
+	assert.Equal(t, "https://podcasts.apple.com/podcast/id99?i=1", eps[0].EpisodeLink())
+}
+
 func TestNoteSourceIDPodcast(t *testing.T) {
 	id, source := noteSourceID("https://podcasts.apple.com/us/podcast/x/id99?i=555")
 	assert.Equal(t, "ap_555", id)
