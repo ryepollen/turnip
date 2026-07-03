@@ -166,9 +166,6 @@ func main() {
 		botDownloader := ytfeed.NewDownloader(conf.YouTube.DlTemplate, outWr, errWr, conf.YouTube.FilesLocation, conf.YouTube.CookiesFile)
 
 		notesSvc := makeNotesService(conf, ytStore, outWr, errWr)
-		if notesSvc != nil {
-			go notesSvc.Run(context.Background())
-		}
 
 		tgBot, err := proc.NewTelegramBot(proc.TelegramBotParams{
 			Token:         opts.TelegramToken,
@@ -190,11 +187,17 @@ func main() {
 		if err != nil {
 			log.Printf("[ERROR] failed to create telegram bot: %v", err)
 		} else {
+			if notesSvc != nil {
+				notesSvc.Notifier = tgBot // set before Run starts the workers
+			}
 			go func() {
 				if err := tgBot.Run(context.Background()); err != nil {
 					log.Printf("[ERROR] telegram bot failed: %v", err)
 				}
 			}()
+		}
+		if notesSvc != nil {
+			go notesSvc.Run(context.Background())
 		}
 	}
 
@@ -265,6 +268,7 @@ func makeNotesService(conf *config.Conf, ytStore *store.BoltDB, outWr, errWr io.
 		SubtitleSvc: proc.NewSubtitleService(filepath.Join(conf.Notes.MDLocation, "tmp"), conf.YouTube.CookiesFile),
 		Extractor:   proc.NewArticleExtractor(),
 		Concurrency: conf.Notes.Concurrency,
+		JobStore:    ytStore,
 	})
 }
 

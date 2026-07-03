@@ -2,13 +2,44 @@ package proc
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	bolt "go.etcd.io/bbolt"
+
+	ytstore "github.com/umputun/feed-master/app/youtube/store"
 )
+
+// newTestJobStore opens a temp bolt-backed store for queue tests
+func newTestJobStore(t *testing.T) *ytstore.BoltDB {
+	dbFile := filepath.Join(t.TempDir(), "test-notes.db")
+	db, err := bolt.Open(dbFile, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	return &ytstore.BoltDB{DB: db}
+}
+
+// captureNotifier records lifecycle events for assertions
+type captureNotifier struct {
+	stages []string
+	done   chan NotesResult
+	failed chan error
+}
+
+func newCaptureNotifier() *captureNotifier {
+	return &captureNotifier{done: make(chan NotesResult, 8), failed: make(chan error, 8)}
+}
+
+func (c *captureNotifier) NotesJobProgress(_ ytstore.NotesJobRecord, stage string) {
+	c.stages = append(c.stages, stage)
+}
+func (c *captureNotifier) NotesJobDone(_ ytstore.NotesJobRecord, res NotesResult) { c.done <- res }
+func (c *captureNotifier) NotesJobFailed(_ ytstore.NotesJobRecord, err error)     { c.failed <- err }
 
 func TestNoteFileRoundtrip(t *testing.T) {
 	tests := []struct {
@@ -149,41 +180,40 @@ func TestNoteCaption(t *testing.T) {
 }
 
 func TestNotesEnqueueDedupAndOverflow(t *testing.T) {
-	svc := NewNotesService(NotesParams{MDLocation: t.TempDir(), Concurrency: 1})
+	store := newTestJobStore(t)
+	svc := NewNotesService(NotesParams{MDLocation: t.TempDir(), Concurrency: 1, JobStore: store})
 
-	// worker not running: jobs stay queued
-	require.NoError(t, svc.Enqueue(NotesJob{SourceID: "vid1", Level: "md"}))
-	assert.ErrorIs(t, svc.Enqueue(NotesJob{SourceID: "vid1", Level: "md"}), errAlreadyQueued)
+	// worker not running: jobs stay queued in the store
+	require.NoError(t, svc.Enqueue(ytstore.NotesJobRecord{SourceID: "vid1", Level: "md", URL: "u1"}))
+	assert.ErrorIs(t, svc.Enqueue(ytstore.NotesJobRecord{SourceID: "vid1", Level: "md", URL: "u1"}), errAlreadyQueued)
 
-	for i := 0; i < notesQueueSize-1; i++ {
-		require.NoError(t, svc.Enqueue(NotesJob{SourceID: string(rune('a' + i)), Level: "md"}))
+	for i := 0; i < maxQueuedNotesJobs-1; i++ {
+		require.NoError(t, svc.Enqueue(ytstore.NotesJobRecord{SourceID: fmt.Sprintf("vid-%03d", i), Level: "md"}))
 	}
-	assert.ErrorIs(t, svc.Enqueue(NotesJob{SourceID: "overflow", Level: "md"}), errQueueFull)
+	assert.ErrorIs(t, svc.Enqueue(ytstore.NotesJobRecord{SourceID: "overflow", Level: "md"}), errQueueFull)
 
-	// rejected overflow job must not stay in the inflight set
-	svc.mu.Lock()
-	_, stillThere := svc.inflight["overflow"]
-	svc.mu.Unlock()
-	assert.False(t, stillThere)
+	queued, err := store.CountNotesJobs(ytstore.NotesJobQueued)
+	require.NoError(t, err)
+	assert.Equal(t, maxQueuedNotesJobs, queued, "rejected job must not be stored")
 }
 
 func TestNotesProcessReusesL1(t *testing.T) {
 	dir := t.TempDir()
 	svc := NewNotesService(NotesParams{MDLocation: dir, Concurrency: 1})
+	notifier := newCaptureNotifier()
+	svc.Notifier = notifier
 
 	meta := NoteMeta{Title: "Готовый", Source: "youtube", URL: "https://youtu.be/reuse123",
 		Date: "2026-06-01", Lang: "ru", Processed: []string{"md"}}
 	require.NoError(t, writeNoteFile(filepath.Join(dir, "reuse123.md"), meta, "[00:00] тело"))
 
-	var stages []string
-	res, err := svc.process(context.Background(), NotesJob{
+	res, err := svc.process(context.Background(), ytstore.NotesJobRecord{
 		URL: "https://youtu.be/reuse123", SourceID: "reuse123", Source: "youtube", Level: "md",
-		Progress: func(s string) { stages = append(stages, s) },
 	})
 	require.NoError(t, err)
 	assert.True(t, res.Reused)
 	assert.Equal(t, "Готовый", res.Title)
-	assert.Contains(t, stages, "♻️ найден готовый транскрипт")
+	assert.Contains(t, notifier.stages, "♻️ найден готовый транскрипт")
 }
 
 func TestNotesProcessNotesWithoutNotion(t *testing.T) {
@@ -193,9 +223,67 @@ func TestNotesProcessNotesWithoutNotion(t *testing.T) {
 	meta := NoteMeta{Title: "x", Source: "youtube", URL: "u", Date: "2026-06-01", Lang: "ru"}
 	require.NoError(t, writeNoteFile(filepath.Join(dir, "vid42.md"), meta, "тело"))
 
-	_, err := svc.process(context.Background(), NotesJob{
+	_, err := svc.process(context.Background(), ytstore.NotesJobRecord{
 		URL: "u", SourceID: "vid42", Source: "youtube", Level: "notes",
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "notion не настроен")
+}
+
+func TestNotesWorkerDrainsQueue(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestJobStore(t)
+	svc := NewNotesService(NotesParams{MDLocation: dir, Concurrency: 1, JobStore: store})
+	notifier := newCaptureNotifier()
+	svc.Notifier = notifier
+
+	// pre-made L1 file: the job completes without any network calls
+	meta := NoteMeta{Title: "Из очереди", Source: "youtube", URL: "https://youtu.be/queued01",
+		Date: "2026-06-01", Lang: "ru", Processed: []string{"md"}}
+	require.NoError(t, writeNoteFile(filepath.Join(dir, "queued01.md"), meta, "[00:00] тело"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go svc.Run(ctx)
+
+	require.NoError(t, svc.Enqueue(ytstore.NotesJobRecord{
+		URL: "https://youtu.be/queued01", SourceID: "queued01", Source: "youtube", Level: "md",
+	}))
+
+	select {
+	case res := <-notifier.done:
+		assert.True(t, res.Reused)
+		assert.Equal(t, "Из очереди", res.Title)
+	case err := <-notifier.failed:
+		t.Fatalf("job failed: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("job was not processed in time")
+	}
+
+	// the stored record must be marked done
+	require.Eventually(t, func() bool {
+		jobs, err := store.LoadNotesJobs(ytstore.NotesJobDone, 1)
+		return err == nil && len(jobs) == 1 && jobs[0].SourceID == "queued01"
+	}, 5*time.Second, 100*time.Millisecond)
+}
+
+func TestNotesRunRequeuesInterrupted(t *testing.T) {
+	store := newTestJobStore(t)
+
+	// simulate a job that was processing when the previous run died
+	stuck := ytstore.NotesJobRecord{
+		ID: "00000000000000000001-stuck1", SourceID: "stuck1", URL: "u",
+		Source: "youtube", Level: "md", Status: ytstore.NotesJobProcessing,
+	}
+	require.NoError(t, store.SaveNotesJob(stuck))
+
+	count, err := store.ResetProcessingNotesJobs()
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+
+	job, ok, err := store.ClaimNextNotesJob()
+	require.NoError(t, err)
+	require.True(t, ok, "requeued job must be claimable")
+	assert.Equal(t, "stuck1", job.SourceID)
+	assert.Equal(t, ytstore.NotesJobProcessing, job.Status)
 }

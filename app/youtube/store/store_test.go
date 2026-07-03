@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -520,4 +521,90 @@ func TestStore_NotionMeta(t *testing.T) {
 	res, err = s.LoadNotionMeta("bootstrap")
 	require.NoError(t, err)
 	assert.Equal(t, "v2", string(res), "overwrite works")
+}
+
+func TestStore_NotesJobs(t *testing.T) {
+	tmpfile := filepath.Join(os.TempDir(), "test-notes-jobs.db")
+	defer os.Remove(tmpfile)
+
+	db, err := bolt.Open(tmpfile, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	require.NoError(t, err)
+
+	s := BoltDB{DB: db}
+
+	// empty queue
+	_, ok, err := s.ClaimNextNotesJob()
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	mkJob := func(n int, sourceID string) NotesJobRecord {
+		return NotesJobRecord{
+			ID: fmt.Sprintf("%020d-%s", n, sourceID), SourceID: sourceID,
+			URL: "https://youtu.be/" + sourceID, Level: "md",
+			Status: NotesJobQueued, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		}
+	}
+	require.NoError(t, s.SaveNotesJob(mkJob(1, "aaa")))
+	require.NoError(t, s.SaveNotesJob(mkJob(2, "bbb")))
+
+	assert.Error(t, s.SaveNotesJob(NotesJobRecord{}), "empty id rejected")
+
+	// FIFO claim order + status change
+	job1, ok, err := s.ClaimNextNotesJob()
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "aaa", job1.SourceID)
+	assert.Equal(t, NotesJobProcessing, job1.Status)
+
+	job2, ok, err := s.ClaimNextNotesJob()
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "bbb", job2.SourceID)
+
+	_, ok, err = s.ClaimNextNotesJob()
+	require.NoError(t, err)
+	assert.False(t, ok, "nothing left to claim")
+
+	// active detection covers processing too
+	active, err := s.HasActiveNotesJob("aaa")
+	require.NoError(t, err)
+	assert.True(t, active)
+	active, err = s.HasActiveNotesJob("ccc")
+	require.NoError(t, err)
+	assert.False(t, active)
+
+	// finish one, fail one
+	job1.Status = NotesJobDone
+	job1.UpdatedAt = time.Now().Add(-30 * 24 * time.Hour) // old, prunable
+	require.NoError(t, s.SaveNotesJob(job1))
+	job2.Status, job2.Error = NotesJobFailed, "boom"
+	require.NoError(t, s.SaveNotesJob(job2))
+
+	active, err = s.HasActiveNotesJob("aaa")
+	require.NoError(t, err)
+	assert.False(t, active, "done job is not active")
+
+	count, err := s.CountNotesJobs(NotesJobFailed)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+
+	// newest-first listing
+	jobs, err := s.LoadNotesJobs("", 0)
+	require.NoError(t, err)
+	require.Len(t, jobs, 2)
+	assert.Equal(t, "bbb", jobs[0].SourceID)
+
+	// requeue processing (none right now)
+	n, err := s.ResetProcessingNotesJobs()
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+
+	// prune removes only old finished records
+	n, err = s.DeleteOldNotesJobs(time.Now().Add(-14 * 24 * time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	jobs, err = s.LoadNotesJobs("", 0)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Equal(t, "bbb", jobs[0].SourceID)
 }

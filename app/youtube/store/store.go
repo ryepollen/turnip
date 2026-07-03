@@ -19,6 +19,34 @@ import (
 var processedBkt = []byte("processed")
 var historyLogBkt = []byte("history_log")
 var notionMetaBkt = []byte("notion_meta")
+var notesJobsBkt = []byte("notes_jobs")
+
+// notes job statuses
+const (
+	NotesJobQueued     = "queued"
+	NotesJobProcessing = "processing"
+	NotesJobDone       = "done"
+	NotesJobFailed     = "failed"
+)
+
+// NotesJobRecord is one persisted transcription/notes task. The queue lives in
+// bolt (not in memory) so jobs survive container restarts; telegram message ids
+// are stored so the worker can keep editing the same status message afterwards.
+type NotesJobRecord struct {
+	ID          string    `json:"id"` // {unix_nanos padded}-{sourceID}, key order = FIFO
+	URL         string    `json:"url"`
+	SourceID    string    `json:"source_id"`
+	Source      string    `json:"source"` // "youtube" | "article"
+	Level       string    `json:"level"`  // "md" | "notes"
+	ReuseAudio  string    `json:"reuse_audio,omitempty"`
+	Status      string    `json:"status"`
+	Error       string    `json:"error,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	ChatID      int64     `json:"chat_id,omitempty"`
+	StatusMsgID int       `json:"status_msg_id,omitempty"`
+	OrigMsgID   int       `json:"orig_msg_id,omitempty"`
+}
 
 // HistoryEntry is an append-only record of a user-submitted item. Unlike
 // the feed bucket (which is bounded by max_items and pruned by /del), the
@@ -478,6 +506,184 @@ func (s *BoltDB) LoadHistory(feedName string, offset, limit int) (entries []Hist
 		return nil
 	})
 	return entries, total, err
+}
+
+// SaveNotesJob creates or updates a notes job record keyed by its ID
+func (s *BoltDB) SaveNotesJob(job NotesJobRecord) error {
+	if job.ID == "" {
+		return errors.New("notes job id is empty")
+	}
+	return s.Update(func(tx *bolt.Tx) error {
+		bucket, e := tx.CreateBucketIfNotExists(notesJobsBkt)
+		if e != nil {
+			return fmt.Errorf("create bucket %s: %w", notesJobsBkt, e)
+		}
+		jdata, jerr := json.Marshal(&job)
+		if jerr != nil {
+			return fmt.Errorf("marshal notes job %s: %w", job.ID, jerr)
+		}
+		return bucket.Put([]byte(job.ID), jdata)
+	})
+}
+
+// ClaimNextNotesJob atomically takes the oldest queued job and marks it
+// processing. ok is false when the queue is empty. Safe with multiple workers:
+// the claim happens inside a single bolt update transaction.
+func (s *BoltDB) ClaimNextNotesJob() (job NotesJobRecord, ok bool, err error) {
+	err = s.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(notesJobsBkt)
+		if bucket == nil {
+			return nil
+		}
+		c := bucket.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var item NotesJobRecord
+			if jerr := json.Unmarshal(v, &item); jerr != nil {
+				log.Printf("[WARN] notes job unmarshal %s: %v", string(k), jerr)
+				continue
+			}
+			if item.Status != NotesJobQueued {
+				continue
+			}
+			item.Status = NotesJobProcessing
+			item.UpdatedAt = time.Now().UTC()
+			jdata, jerr := json.Marshal(&item)
+			if jerr != nil {
+				return fmt.Errorf("marshal notes job %s: %w", item.ID, jerr)
+			}
+			if perr := bucket.Put(k, jdata); perr != nil {
+				return fmt.Errorf("claim notes job %s: %w", item.ID, perr)
+			}
+			job, ok = item, true
+			return nil
+		}
+		return nil
+	})
+	return job, ok, err
+}
+
+// LoadNotesJobs returns jobs newest-first, filtered by status ("" = all),
+// up to limit (0 = no limit)
+func (s *BoltDB) LoadNotesJobs(status string, limit int) (jobs []NotesJobRecord, err error) {
+	err = s.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(notesJobsBkt)
+		if bucket == nil {
+			return nil
+		}
+		c := bucket.Cursor()
+		for k, v := c.Last(); k != nil; k, v = c.Prev() {
+			var item NotesJobRecord
+			if jerr := json.Unmarshal(v, &item); jerr != nil {
+				continue
+			}
+			if status != "" && item.Status != status {
+				continue
+			}
+			jobs = append(jobs, item)
+			if limit > 0 && len(jobs) >= limit {
+				break
+			}
+		}
+		return nil
+	})
+	return jobs, err
+}
+
+// CountNotesJobs counts jobs with the given status
+func (s *BoltDB) CountNotesJobs(status string) (count int, err error) {
+	jobs, err := s.LoadNotesJobs(status, 0)
+	return len(jobs), err
+}
+
+// HasActiveNotesJob reports whether a queued or processing job exists for sourceID
+func (s *BoltDB) HasActiveNotesJob(sourceID string) (found bool, err error) {
+	err = s.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(notesJobsBkt)
+		if bucket == nil {
+			return nil
+		}
+		return bucket.ForEach(func(_, v []byte) error {
+			var item NotesJobRecord
+			if jerr := json.Unmarshal(v, &item); jerr != nil {
+				return nil //nolint:nilerr // skip broken record
+			}
+			if item.SourceID == sourceID && (item.Status == NotesJobQueued || item.Status == NotesJobProcessing) {
+				found = true
+			}
+			return nil
+		})
+	})
+	return found, err
+}
+
+// ResetProcessingNotesJobs returns interrupted processing jobs back to queued.
+// Called on startup: a processing record with no live worker means the previous
+// run died mid-job.
+func (s *BoltDB) ResetProcessingNotesJobs() (count int, err error) {
+	err = s.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(notesJobsBkt)
+		if bucket == nil {
+			return nil
+		}
+		// collect first: mutating a bucket while iterating its cursor is unsafe
+		var stuck []NotesJobRecord
+		if ferr := bucket.ForEach(func(_, v []byte) error {
+			var item NotesJobRecord
+			if jerr := json.Unmarshal(v, &item); jerr == nil && item.Status == NotesJobProcessing {
+				stuck = append(stuck, item)
+			}
+			return nil
+		}); ferr != nil {
+			return ferr
+		}
+		for _, item := range stuck {
+			item.Status = NotesJobQueued
+			item.UpdatedAt = time.Now().UTC()
+			jdata, jerr := json.Marshal(&item)
+			if jerr != nil {
+				return fmt.Errorf("marshal notes job %s: %w", item.ID, jerr)
+			}
+			if perr := bucket.Put([]byte(item.ID), jdata); perr != nil {
+				return fmt.Errorf("requeue notes job %s: %w", item.ID, perr)
+			}
+			count++
+		}
+		return nil
+	})
+	return count, err
+}
+
+// DeleteOldNotesJobs removes done/failed records updated before cutoff,
+// keeping the bucket from growing forever
+func (s *BoltDB) DeleteOldNotesJobs(cutoff time.Time) (count int, err error) {
+	err = s.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(notesJobsBkt)
+		if bucket == nil {
+			return nil
+		}
+		// collect first: deleting while iterating a cursor skips entries
+		var old [][]byte
+		if ferr := bucket.ForEach(func(k, v []byte) error {
+			var item NotesJobRecord
+			if jerr := json.Unmarshal(v, &item); jerr != nil {
+				return nil //nolint:nilerr // skip broken record
+			}
+			if (item.Status == NotesJobDone || item.Status == NotesJobFailed) && !item.UpdatedAt.After(cutoff) {
+				old = append(old, append([]byte(nil), k...))
+			}
+			return nil
+		}); ferr != nil {
+			return ferr
+		}
+		for _, k := range old {
+			if derr := bucket.Delete(k); derr != nil {
+				return fmt.Errorf("delete notes job %s: %w", string(k), derr)
+			}
+			count++
+		}
+		return nil
+	})
+	return count, err
 }
 
 // SaveNotionMeta stores an opaque value in the notion metadata bucket.

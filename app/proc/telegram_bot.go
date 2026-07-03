@@ -148,6 +148,7 @@ func (t *TelegramBot) Run(ctx context.Context) error {
 	t.Bot.Handle("/vo", t.handleVoiceover)
 	t.Bot.Handle("/md", t.handleMD)
 	t.Bot.Handle("/notes", t.handleNotes)
+	t.Bot.Handle("/status", t.handleStatus)
 	t.Bot.Handle("/help", t.handleHelp)
 	t.Bot.Handle("/start", t.handleHelp)
 
@@ -394,6 +395,7 @@ Commands:
 /vo <url> - озвучка YouTube на русском
 /md <url> - транскрипт в MD-файл (Whisper + LLM-очистка)
 /notes <url> - транскрипт + саммари + отсылки в Notion
+/status - очередь конспектов (переживает рестарты)
 /list - what's currently in feed (files on disk)
 /history - permanent activity log (survives /del and auto-cleanup)
 /del - delete most recent from feed
@@ -1537,78 +1539,146 @@ func (t *TelegramBot) handleNotesCommand(m *tb.Message, level string) {
 	t.enqueueNotesJob(statusMsg, m, rawURL, level)
 }
 
-// enqueueNotesJob submits one link to the notes pipeline. statusMsg is edited
-// as the job advances; originalMsg (if any) is deleted after success. Unlike
-// the audio flow, notes never touch the RSS feed bucket.
+// enqueueNotesJob persists one link as a notes job. The queue lives in bolt,
+// so the telegram context (chat + status message ids) rides along in the
+// record and survives restarts. Unlike the audio flow, notes never touch the
+// RSS feed bucket.
 func (t *TelegramBot) enqueueNotesJob(statusMsg, originalMsg *tb.Message, rawURL, level string) {
 	if t.NotesSvc == nil || statusMsg == nil {
 		return
 	}
 
 	sourceID, source := noteSourceID(rawURL)
-	job := NotesJob{URL: rawURL, SourceID: sourceID, Source: source, Level: level}
-
-	historyVideoID := ""
+	rec := ytstore.NotesJobRecord{
+		URL:         rawURL,
+		SourceID:    sourceID,
+		Source:      source,
+		Level:       level,
+		ChatID:      statusMsg.Chat.ID,
+		StatusMsgID: statusMsg.ID,
+	}
+	if originalMsg != nil {
+		rec.OrigMsgID = originalMsg.ID
+	}
 	if source == "youtube" {
-		historyVideoID = sourceID
 		// reuse the feed's mp3 if this video was already added to the podcast
 		reuse := filepath.Join(t.FilesLocation, t.makeFileName(sourceID)+".mp3")
 		if fi, err := os.Stat(reuse); err == nil && fi.Size() > 0 {
-			job.ReuseAudio = reuse
-		}
-		job.SeedInfo = func(ctx context.Context) (seedMeta, error) {
-			info, err := t.Downloader.GetInfo(ctx, "https://www.youtube.com/watch?v="+sourceID)
-			if err != nil {
-				return seedMeta{}, err
-			}
-			seed := seedMeta{Title: info.Title, Channel: info.Uploader, DurationMin: int(info.Duration) / 60}
-			if parsed, perr := time.Parse("20060102", info.UploadDate); perr == nil {
-				seed.Date = parsed.Format("2006-01-02")
-			}
-			return seed, nil
+			rec.ReuseAudio = reuse
 		}
 	}
 
-	// short label so parallel status messages are tellable apart
-	label := strings.TrimPrefix(strings.TrimPrefix(rawURL, "https://"), "www.")
-	job.Progress = func(stage string) {
-		_, _ = t.Bot.Edit(statusMsg, stage+"...\n"+label)
+	if err := t.NotesSvc.Enqueue(rec); err != nil {
+		_, _ = t.Bot.Edit(statusMsg, "⚠️ "+err.Error())
 	}
-	job.Done = func(res NotesResult, err error) {
-		if err != nil {
-			if ytfeed.IsCookieError(err.Error()) {
-				_, _ = t.Bot.Edit(statusMsg,
-					"❌ YouTube cookies expired. This video requires authentication.\nRun update-cookies.sh to fix.")
-			} else {
-				_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
-			}
-			return
-		}
+}
+
+// notesChatMsg reconstructs the chat and status message references from a
+// persisted job record (telebot only needs ids for Edit/Send/Delete)
+func (t *TelegramBot) notesChatMsg(job ytstore.NotesJobRecord) (*tb.Chat, *tb.Message) {
+	chat := &tb.Chat{ID: job.ChatID}
+	return chat, &tb.Message{ID: job.StatusMsgID, Chat: chat}
+}
+
+// notesLabel shortens a URL so parallel status messages are tellable apart
+func notesLabel(rawURL string) string {
+	return strings.TrimPrefix(strings.TrimPrefix(rawURL, "https://"), "www.")
+}
+
+// NotesJobProgress implements NotesNotifier
+func (t *TelegramBot) NotesJobProgress(job ytstore.NotesJobRecord, stage string) {
+	if job.StatusMsgID == 0 {
+		return
+	}
+	_, statusMsg := t.notesChatMsg(job)
+	_, _ = t.Bot.Edit(statusMsg, stage+"...\n"+notesLabel(job.URL))
+}
+
+// NotesJobDone implements NotesNotifier: reports success, sends the MD
+// document for /md, links Notion into the feed entry and logs history
+func (t *TelegramBot) NotesJobDone(job ytstore.NotesJobRecord, res NotesResult) {
+	chat, statusMsg := t.notesChatMsg(job)
+
+	if job.StatusMsgID != 0 {
 		msg := fmt.Sprintf("✅ %s\n📄 %s", res.Title, filepath.Base(res.MDPath))
 		if res.NotionPageURL != "" {
 			msg += "\n📓 " + res.NotionPageURL
 		}
 		_, _ = t.Bot.Edit(statusMsg, msg)
-		if level == "md" {
-			t.sendNoteDocument(statusMsg.Chat, res)
-		}
-		if res.NotionPageURL != "" && source == "youtube" {
-			t.appendNotionLinkToEntry(sourceID, res.NotionPageURL)
-		}
-		t.logHistory(ytstore.HistoryEntry{
-			URL:     rawURL,
-			Title:   res.Title,
-			Action:  level,
-			VideoID: historyVideoID,
-		})
-		if originalMsg != nil {
-			t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
-		}
+	}
+	if job.Level == "md" {
+		t.sendNoteDocument(chat, res)
+	}
+	if res.NotionPageURL != "" && job.Source == "youtube" {
+		t.appendNotionLinkToEntry(job.SourceID, res.NotionPageURL)
 	}
 
-	if err := t.NotesSvc.Enqueue(job); err != nil {
-		_, _ = t.Bot.Edit(statusMsg, "⚠️ "+err.Error())
+	historyVideoID := ""
+	if job.Source == "youtube" {
+		historyVideoID = job.SourceID
 	}
+	t.logHistory(ytstore.HistoryEntry{
+		URL:     job.URL,
+		Title:   res.Title,
+		Action:  job.Level,
+		VideoID: historyVideoID,
+	})
+	if job.OrigMsgID != 0 {
+		t.deleteMessageAfterDelay(&tb.Message{ID: job.OrigMsgID, Chat: chat}, 5*time.Second)
+	}
+}
+
+// NotesJobFailed implements NotesNotifier
+func (t *TelegramBot) NotesJobFailed(job ytstore.NotesJobRecord, err error) {
+	if job.StatusMsgID == 0 {
+		return
+	}
+	_, statusMsg := t.notesChatMsg(job)
+	if ytfeed.IsCookieError(err.Error()) {
+		_, _ = t.Bot.Edit(statusMsg,
+			"❌ YouTube cookies expired. This video requires authentication.\nRun update-cookies.sh to fix.")
+		return
+	}
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v\n%s", err, notesLabel(job.URL)))
+}
+
+// handleStatus shows the notes queue state
+func (t *TelegramBot) handleStatus(m *tb.Message) {
+	if !t.isAuthorized(m.Sender) {
+		return
+	}
+	if t.NotesSvc == nil {
+		_, _ = t.Bot.Send(m.Chat, "Конспекты выключены")
+		return
+	}
+	queued, processing, recent, err := t.NotesSvc.QueueStatus()
+	if err != nil {
+		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Error: %v", err))
+		return
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "📋 Очередь конспектов\n⏳ в очереди: %d\n⚙️ в работе: %d\n", queued, processing)
+	if len(recent) > 0 {
+		b.WriteString("\nПоследние задачи:\n")
+		icons := map[string]string{
+			ytstore.NotesJobQueued:     "⏳",
+			ytstore.NotesJobProcessing: "⚙️",
+			ytstore.NotesJobDone:       "✅",
+			ytstore.NotesJobFailed:     "❌",
+		}
+		for _, j := range recent {
+			fmt.Fprintf(&b, "%s /%s %s\n", icons[j.Status], j.Level, notesLabel(j.URL))
+			if j.Error != "" {
+				errText := j.Error
+				if runes := []rune(errText); len(runes) > 80 {
+					errText = string(runes[:80]) + "…"
+				}
+				fmt.Fprintf(&b, "   └ %s\n", errText)
+			}
+		}
+	}
+	_, _ = t.Bot.Send(m.Chat, b.String())
 }
 
 // sendNoteDocument sends the L1 markdown file to the chat as a document with a
