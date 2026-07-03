@@ -39,7 +39,9 @@ func (c *captureNotifier) NotesJobProgress(_ ytstore.NotesJobRecord, stage strin
 	c.stages = append(c.stages, stage)
 }
 func (c *captureNotifier) NotesJobDone(_ ytstore.NotesJobRecord, res NotesResult) { c.done <- res }
-func (c *captureNotifier) NotesJobFailed(_ ytstore.NotesJobRecord, err error)     { c.failed <- err }
+func (c *captureNotifier) NotesJobFailed(_ ytstore.NotesJobRecord, _ NotesResult, err error) {
+	c.failed <- err
+}
 
 func TestNoteFileRoundtrip(t *testing.T) {
 	tests := []struct {

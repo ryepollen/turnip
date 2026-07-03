@@ -256,16 +256,24 @@ func (t *TelegramBot) buildActionMenu(token, kind string) *tb.ReplyMarkup {
 	switch kind {
 	case "yt":
 		btnAudio := markup.Data("🎵 Аудио", "act", token+"|audio")
-		btnVO := markup.Data("🎙 Озвучка (RU)", "act", token+"|vo")
+		btnVO := markup.Data("🎙 Перевод RU", "act", token+"|vo")
 		rows = append(rows, []tb.InlineButton{*btnAudio.Inline(), *btnVO.Inline()})
 		if t.NotesSvc != nil {
-			btnNotes := markup.Data("📓 Конспект", "act", token+"|notes")
-			btnBoth := markup.Data("🎵+📓 Аудио и конспект", "act", token+"|audio_notes")
-			rows = append(rows, []tb.InlineButton{*btnNotes.Inline(), *btnBoth.Inline()})
+			btnMD := markup.Data("📄 MD-файл", "act", token+"|md")
+			btnNotes := markup.Data("📓 Notion", "act", token+"|notes")
+			btnBoth := markup.Data("🎵+📓 Аудио и Notion", "act", token+"|audio_notes")
+			rows = append(rows,
+				[]tb.InlineButton{*btnMD.Inline(), *btnNotes.Inline()},
+				[]tb.InlineButton{*btnBoth.Inline()})
 		}
 	case "article":
 		btnTTS := markup.Data("📝 Озвучить", "act", token+"|tts")
 		rows = append(rows, []tb.InlineButton{*btnTTS.Inline()})
+		if t.NotesSvc != nil {
+			btnMD := markup.Data("📄 MD-файл", "act", token+"|md")
+			btnNotes := markup.Data("📓 Notion", "act", token+"|notes")
+			rows = append(rows, []tb.InlineButton{*btnMD.Inline(), *btnNotes.Inline()})
+		}
 	}
 	btnCancel := markup.Data("🚫 Отмена", "act", token+"|cancel")
 	rows = append(rows, []tb.InlineButton{*btnCancel.Inline()})
@@ -1074,7 +1082,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 		switch action {
 		case "audio":
 			t.startAudioProcessing(chat, statusMsg, pa)
-		case "notes":
+		case "md", "notes":
 			for i, videoID := range pa.videoIDs {
 				st := statusMsg
 				if i > 0 {
@@ -1084,7 +1092,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 				if i == 0 {
 					origMsg = pa.originalMsg
 				}
-				t.enqueueNotesJob(st, origMsg, "https://www.youtube.com/watch?v="+videoID, "notes")
+				t.enqueueNotesJob(st, origMsg, "https://www.youtube.com/watch?v="+videoID, action)
 			}
 		case "audio_notes":
 			t.startAudioProcessing(chat, statusMsg, pa)
@@ -1122,7 +1130,8 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
 		}
 	case "article":
-		if action == "tts" {
+		switch action {
+		case "tts":
 			_, _ = t.Bot.Edit(statusMsg, "⏳ Озвучиваю статью...")
 			go func() {
 				if err := t.processArticle(context.Background(), chat, statusMsg, pa.originalMsg, pa.url); err != nil {
@@ -1130,7 +1139,9 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 					_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
 				}
 			}()
-		} else {
+		case "md", "notes":
+			t.enqueueNotesJob(statusMsg, pa.originalMsg, pa.url, action)
+		default:
 			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
 		}
 	}
@@ -1628,12 +1639,23 @@ func (t *TelegramBot) NotesJobDone(job ytstore.NotesJobRecord, res NotesResult) 
 	}
 }
 
-// NotesJobFailed implements NotesNotifier
-func (t *TelegramBot) NotesJobFailed(job ytstore.NotesJobRecord, err error) {
+// NotesJobFailed implements NotesNotifier. When the transcript itself is done
+// (a later stage like Notion failed), it still hands out the MD file instead
+// of silently losing the work.
+func (t *TelegramBot) NotesJobFailed(job ytstore.NotesJobRecord, res NotesResult, err error) {
+	chat, statusMsg := t.notesChatMsg(job)
+
+	if res.MDPath != "" {
+		if job.StatusMsgID != 0 {
+			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ %s\n📄 транскрипт готов (файл ниже), но дальше не получилось:\n%v", res.Title, err))
+		}
+		t.sendNoteDocument(chat, res)
+		return
+	}
+
 	if job.StatusMsgID == 0 {
 		return
 	}
-	_, statusMsg := t.notesChatMsg(job)
 	if ytfeed.IsCookieError(err.Error()) {
 		_, _ = t.Bot.Edit(statusMsg,
 			"❌ YouTube cookies expired. This video requires authentication.\nRun update-cookies.sh to fix.")

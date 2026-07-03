@@ -145,7 +145,10 @@ var (
 type NotesNotifier interface {
 	NotesJobProgress(job ytstore.NotesJobRecord, stage string)
 	NotesJobDone(job ytstore.NotesJobRecord, res NotesResult)
-	NotesJobFailed(job ytstore.NotesJobRecord, err error)
+	// NotesJobFailed carries the partial result too: when L1 succeeded but a
+	// later stage (e.g. Notion) failed, res.MDPath points to the finished
+	// transcript and the bot can still hand it out.
+	NotesJobFailed(job ytstore.NotesJobRecord, res NotesResult, err error)
 }
 
 // NotesJobStore persists the job queue (implemented by ytstore.BoltDB)
@@ -327,7 +330,7 @@ func (n *NotesService) runJob(ctx context.Context, job ytstore.NotesJobRecord) {
 		log.Printf("[ERROR] notes job failed for %s: %v", job.URL, err)
 		job.Status, job.Error = ytstore.NotesJobFailed, err.Error()
 		if n.Notifier != nil {
-			n.Notifier.NotesJobFailed(job, err)
+			n.Notifier.NotesJobFailed(job, res, err)
 		}
 	} else {
 		log.Printf("[INFO] notes job done for %s: %s", job.URL, res.MDPath)
