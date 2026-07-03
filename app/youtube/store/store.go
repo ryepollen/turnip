@@ -18,6 +18,7 @@ import (
 
 var processedBkt = []byte("processed")
 var historyLogBkt = []byte("history_log")
+var notionMetaBkt = []byte("notion_meta")
 
 // HistoryEntry is an append-only record of a user-submitted item. Unlike
 // the feed bucket (which is bounded by max_items and pruned by /del), the
@@ -213,6 +214,37 @@ func (s *BoltDB) Remove(entry feed.Entry) error {
 	})
 
 	return err
+}
+
+// UpdateEntry replaces the stored entry matched by VideoID and ChannelID,
+// keeping its original key. Returns an error if the entry is not found.
+func (s *BoltDB) UpdateEntry(entry feed.Entry) error {
+	return s.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(entry.ChannelID))
+		if bucket == nil {
+			return fmt.Errorf("no bucket for %s", entry.ChannelID)
+		}
+		c := bucket.Cursor()
+		for k, v := c.Last(); k != nil; k, v = c.Prev() {
+			var item feed.Entry
+			if err := json.Unmarshal(v, &item); err != nil {
+				log.Printf("[WARN] failed to unmarshal, %v", err)
+				continue
+			}
+			if item.VideoID == entry.VideoID {
+				jdata, jerr := json.Marshal(&entry)
+				if jerr != nil {
+					return fmt.Errorf("marshal entry %s: %w", entry.VideoID, jerr)
+				}
+				if err := bucket.Put(k, jdata); err != nil {
+					return fmt.Errorf("failed to update %s (%s): %w", string(k), item.VideoID, err)
+				}
+				log.Printf("[INFO] update %s - %s", string(k), entry.String())
+				return nil
+			}
+		}
+		return fmt.Errorf("entry %s not found in %s", entry.VideoID, entry.ChannelID)
+	})
 }
 
 // SetProcessed sets processed status with ts for a given channel+video
@@ -446,6 +478,34 @@ func (s *BoltDB) LoadHistory(feedName string, offset, limit int) (entries []Hist
 		return nil
 	})
 	return entries, total, err
+}
+
+// SaveNotionMeta stores an opaque value in the notion metadata bucket.
+// Used for Notion database IDs and episode page mappings; the store stays
+// unaware of the payload structure.
+func (s *BoltDB) SaveNotionMeta(key string, data []byte) error {
+	return s.Update(func(tx *bolt.Tx) error {
+		bucket, e := tx.CreateBucketIfNotExists(notionMetaBkt)
+		if e != nil {
+			return fmt.Errorf("create bucket %s: %w", notionMetaBkt, e)
+		}
+		return bucket.Put([]byte(key), data)
+	})
+}
+
+// LoadNotionMeta returns the stored value for key, nil if absent
+func (s *BoltDB) LoadNotionMeta(key string) (res []byte, err error) {
+	err = s.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(notionMetaBkt)
+		if bucket == nil {
+			return nil
+		}
+		if v := bucket.Get([]byte(key)); v != nil {
+			res = append([]byte(nil), v...)
+		}
+		return nil
+	})
+	return res, err
 }
 
 func (s *BoltDB) key(entry feed.Entry) ([]byte, error) {

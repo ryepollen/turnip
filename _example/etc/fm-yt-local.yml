@@ -31,3 +31,16 @@ system:
   max_total: 50
   max_keep: 1000
   base_url: http://localhost:8080
+
+# transcription -> LLM -> Notion pipeline (/md and /notes bot commands)
+# secrets via env: GROQ_API_KEY (required), NOTION_TOKEN (for /notes L2),
+# LLM_API_KEY (optional override when llm_base_url points to another provider)
+notes:
+  enabled: true
+  md_location: ./var/md            # L1 markdown transcripts
+  whisper_model: whisper-large-v3  # Groq Whisper model
+  llm_model: llama-3.3-70b-versatile
+  llm_base_url: ""                 # OpenAI-compatible endpoint, default Groq
+  notion_parent_page: ""           # Notion page ID to create databases under
+  concurrency: 1                   # notes worker pool size (max 2, Groq rate limits)
+  chunk_seconds: 600               # audio chunk length for transcription

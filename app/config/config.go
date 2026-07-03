@@ -55,6 +55,17 @@ type Conf struct {
 		TTSEnabled      bool   `yaml:"tts_enabled"`
 		TTSVoice        string `yaml:"tts_voice"`
 	} `yaml:"telegram_bot"`
+
+	Notes struct {
+		Enabled          bool   `yaml:"enabled"`
+		MDLocation       string `yaml:"md_location"`
+		WhisperModel     string `yaml:"whisper_model"`
+		LLMModel         string `yaml:"llm_model"`
+		LLMBaseURL       string `yaml:"llm_base_url"` // OpenAI-compatible; default Groq
+		NotionParentPage string `yaml:"notion_parent_page"`
+		Concurrency      int    `yaml:"concurrency"`
+		ChunkSeconds     int    `yaml:"chunk_seconds"`
+	} `yaml:"notes"`
 }
 
 // Source defines config section for source
@@ -219,5 +230,25 @@ func (c *Conf) setDefaults() {
 	}
 	if c.TelegramBot.TTSVoice == "" {
 		c.TelegramBot.TTSVoice = "ru-RU-DmitryNeural" // Russian male voice for Edge TTS
+	}
+
+	// set notes defaults
+	if c.Notes.MDLocation == "" {
+		c.Notes.MDLocation = "var/md"
+	}
+	if c.Notes.WhisperModel == "" {
+		c.Notes.WhisperModel = "whisper-large-v3"
+	}
+	if c.Notes.LLMModel == "" {
+		c.Notes.LLMModel = "llama-3.3-70b-versatile"
+	}
+	if c.Notes.Concurrency == 0 {
+		c.Notes.Concurrency = 1
+	}
+	if c.Notes.Concurrency > 2 { // Groq free tier rate limits
+		c.Notes.Concurrency = 2
+	}
+	if c.Notes.ChunkSeconds == 0 {
+		c.Notes.ChunkSeconds = 600
 	}
 }

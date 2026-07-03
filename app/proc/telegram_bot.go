@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -39,6 +40,7 @@ type TelegramBot struct {
 	VoiceoverSvc     *VoiceoverService
 	SubtitleSvc      *SubtitleService
 	Translator       *Translator
+	NotesSvc         *NotesService // nil when notes feature is disabled
 
 	pendingMu      sync.Mutex
 	pendingActions map[string]*pendingAction
@@ -78,6 +80,7 @@ type TelegramBotParams struct {
 	TTSEnabled    bool
 	TTSVoice      string
 	CookiesFile   string
+	NotesSvc      *NotesService
 }
 
 // NewTelegramBot creates a new bot for receiving YouTube URLs
@@ -113,6 +116,7 @@ func NewTelegramBot(params TelegramBotParams) (*TelegramBot, error) {
 		BaseURL:        params.BaseURL,
 		CookiesFile:    params.CookiesFile,
 		TTSEnabled:     params.TTSEnabled,
+		NotesSvc:       params.NotesSvc,
 		pendingActions: make(map[string]*pendingAction),
 	}
 
@@ -142,6 +146,8 @@ func (t *TelegramBot) Run(ctx context.Context) error {
 	t.Bot.Handle("/history", t.handleHistory)
 	t.Bot.Handle("/del", t.handleDelete)
 	t.Bot.Handle("/vo", t.handleVoiceover)
+	t.Bot.Handle("/md", t.handleMD)
+	t.Bot.Handle("/notes", t.handleNotes)
 	t.Bot.Handle("/help", t.handleHelp)
 	t.Bot.Handle("/start", t.handleHelp)
 
@@ -251,6 +257,11 @@ func (t *TelegramBot) buildActionMenu(token, kind string) *tb.ReplyMarkup {
 		btnAudio := markup.Data("🎵 Аудио", "act", token+"|audio")
 		btnVO := markup.Data("🎙 Озвучка (RU)", "act", token+"|vo")
 		rows = append(rows, []tb.InlineButton{*btnAudio.Inline(), *btnVO.Inline()})
+		if t.NotesSvc != nil {
+			btnNotes := markup.Data("📓 Конспект", "act", token+"|notes")
+			btnBoth := markup.Data("🎵+📓 Аудио и конспект", "act", token+"|audio_notes")
+			rows = append(rows, []tb.InlineButton{*btnNotes.Inline(), *btnBoth.Inline()})
+		}
 	case "article":
 		btnTTS := markup.Data("📝 Озвучить", "act", token+"|tts")
 		rows = append(rows, []tb.InlineButton{*btnTTS.Inline()})
@@ -381,6 +392,8 @@ Send a URL to add audio to your feed:
 
 Commands:
 /vo <url> - озвучка YouTube на русском
+/md <url> - транскрипт в MD-файл (Whisper + LLM-очистка)
+/notes <url> - транскрипт + саммари + отсылки в Notion
 /list - what's currently in feed (files on disk)
 /history - permanent activity log (survives /del and auto-cleanup)
 /del - delete most recent from feed
@@ -754,13 +767,16 @@ func (t *TelegramBot) formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", m, s)
 }
 
-// createEntry creates ytfeed.Entry from VideoInfo
+// createEntry creates ytfeed.Entry from VideoInfo.
+// Published is the time the episode was added to the feed, NOT the video's
+// upload date: podcast clients sort by pubDate, and an old video would sink
+// to the bottom of the list and never show up as new. The original release
+// date is kept as a line in the description instead.
 func (t *TelegramBot) createEntry(info *ytfeed.VideoInfo, file string, duration int) ytfeed.Entry {
-	published := time.Now()
-	// Parse upload date if available: YYYYMMDD
+	description := info.Description
 	if info.UploadDate != "" {
 		if parsed, err := time.Parse("20060102", info.UploadDate); err == nil {
-			published = parsed
+			description = "📅 Вышло: " + parsed.Format("2006-01-02") + "\n\n" + description
 		}
 	}
 
@@ -771,7 +787,7 @@ func (t *TelegramBot) createEntry(info *ytfeed.VideoInfo, file string, duration 
 		Link: struct {
 			Href string `xml:"href,attr"`
 		}{Href: info.WebpageURL},
-		Published: published,
+		Published: time.Now(),
 		Updated:   time.Now(),
 		Media: struct {
 			Description template.HTML `xml:"description"`
@@ -779,7 +795,7 @@ func (t *TelegramBot) createEntry(info *ytfeed.VideoInfo, file string, duration 
 				URL string `xml:"url,attr"`
 			} `xml:"thumbnail"`
 		}{
-			Description: template.HTML(info.Description),
+			Description: template.HTML(description), //nolint:gosec // youtube description, shown as-is like before
 			Thumbnail: struct {
 				URL string `xml:"url,attr"`
 			}{URL: info.Thumbnail},
@@ -1055,22 +1071,26 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 	case "yt":
 		switch action {
 		case "audio":
-			if len(pa.videoIDs) == 1 {
-				_, _ = t.Bot.Edit(statusMsg, "⏳ Processing...")
-				go func() {
-					if err := t.processVideo(context.Background(), chat, statusMsg, pa.originalMsg, pa.videoIDs[0]); err != nil {
-						log.Printf("[ERROR] failed to process video %s: %v", pa.videoIDs[0], err)
-						if ytfeed.IsCookieError(err.Error()) {
-							_, _ = t.Bot.Edit(statusMsg,
-								"❌ YouTube cookies expired. This video requires authentication.\nRun update-cookies.sh to fix.")
-						} else {
-							_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
-						}
-					}
-				}()
-			} else {
-				_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⏳ Processing %d videos...", len(pa.videoIDs)))
-				go t.processVideoBatch(context.Background(), chat, statusMsg, pa.originalMsg, pa.videoIDs)
+			t.startAudioProcessing(chat, statusMsg, pa)
+		case "notes":
+			for i, videoID := range pa.videoIDs {
+				st := statusMsg
+				if i > 0 {
+					st, _ = t.Bot.Send(chat, "⏳ Конспект в очереди...")
+				}
+				var origMsg *tb.Message
+				if i == 0 {
+					origMsg = pa.originalMsg
+				}
+				t.enqueueNotesJob(st, origMsg, "https://www.youtube.com/watch?v="+videoID, "notes")
+			}
+		case "audio_notes":
+			t.startAudioProcessing(chat, statusMsg, pa)
+			// notes jobs get their own status messages; the audio flow owns
+			// statusMsg and the original message deletion
+			for _, videoID := range pa.videoIDs {
+				st, _ := t.Bot.Send(chat, "⏳ Конспект в очереди...")
+				t.enqueueNotesJob(st, nil, "https://www.youtube.com/watch?v="+videoID, "notes")
 			}
 		case "vo":
 			if !IsVotCliAvailable() {
@@ -1448,6 +1468,222 @@ func (t *TelegramBot) handleVoiceover(m *tb.Message) {
 			}
 		}
 	}()
+}
+
+// startAudioProcessing kicks off the existing audio download flow for one or
+// many videos (extracted from the "audio" menu action, behavior unchanged)
+func (t *TelegramBot) startAudioProcessing(chat *tb.Chat, statusMsg *tb.Message, pa *pendingAction) {
+	if len(pa.videoIDs) == 1 {
+		_, _ = t.Bot.Edit(statusMsg, "⏳ Processing...")
+		go func() {
+			if err := t.processVideo(context.Background(), chat, statusMsg, pa.originalMsg, pa.videoIDs[0]); err != nil {
+				log.Printf("[ERROR] failed to process video %s: %v", pa.videoIDs[0], err)
+				if ytfeed.IsCookieError(err.Error()) {
+					_, _ = t.Bot.Edit(statusMsg,
+						"❌ YouTube cookies expired. This video requires authentication.\nRun update-cookies.sh to fix.")
+				} else {
+					_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+				}
+			}
+		}()
+		return
+	}
+	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⏳ Processing %d videos...", len(pa.videoIDs)))
+	go t.processVideoBatch(context.Background(), chat, statusMsg, pa.originalMsg, pa.videoIDs)
+}
+
+// handleMD handles /md <url> — transcript only (L1)
+func (t *TelegramBot) handleMD(m *tb.Message) { t.handleNotesCommand(m, "md") }
+
+// handleNotes handles /notes <url> — transcript + summary + Notion (L1+L2)
+func (t *TelegramBot) handleNotes(m *tb.Message) { t.handleNotesCommand(m, "notes") }
+
+func (t *TelegramBot) handleNotesCommand(m *tb.Message, level string) {
+	if !t.isAuthorized(m.Sender) {
+		return
+	}
+	if t.NotesSvc == nil {
+		_, _ = t.Bot.Send(m.Chat, "❌ Конспекты не настроены (notes.enabled в конфиге + GROQ_API_KEY)")
+		return
+	}
+
+	args := regexp.MustCompile(`\s+`).Split(m.Text, 2)
+	if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
+		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Usage: /%s <url> [url2 ...]", level))
+		return
+	}
+
+	// batch: all YouTube links from the message, each with its own status
+	// message — results arrive as each job finishes
+	if videoIDs := t.extractAllYouTubeVideoIDs(args[1]); len(videoIDs) > 0 {
+		for i, videoID := range videoIDs {
+			statusMsg, _ := t.Bot.Send(m.Chat, "⏳ В очереди...")
+			var origMsg *tb.Message
+			if i == 0 {
+				origMsg = m
+			}
+			t.enqueueNotesJob(statusMsg, origMsg, "https://www.youtube.com/watch?v="+videoID, level)
+		}
+		return
+	}
+
+	rawURL := t.extractURL(args[1])
+	if rawURL == "" {
+		_, _ = t.Bot.Send(m.Chat, "❌ Не нашёл ссылку в сообщении")
+		return
+	}
+
+	statusMsg, _ := t.Bot.Send(m.Chat, "⏳ В очереди...")
+	t.enqueueNotesJob(statusMsg, m, rawURL, level)
+}
+
+// enqueueNotesJob submits one link to the notes pipeline. statusMsg is edited
+// as the job advances; originalMsg (if any) is deleted after success. Unlike
+// the audio flow, notes never touch the RSS feed bucket.
+func (t *TelegramBot) enqueueNotesJob(statusMsg, originalMsg *tb.Message, rawURL, level string) {
+	if t.NotesSvc == nil || statusMsg == nil {
+		return
+	}
+
+	sourceID, source := noteSourceID(rawURL)
+	job := NotesJob{URL: rawURL, SourceID: sourceID, Source: source, Level: level}
+
+	historyVideoID := ""
+	if source == "youtube" {
+		historyVideoID = sourceID
+		// reuse the feed's mp3 if this video was already added to the podcast
+		reuse := filepath.Join(t.FilesLocation, t.makeFileName(sourceID)+".mp3")
+		if fi, err := os.Stat(reuse); err == nil && fi.Size() > 0 {
+			job.ReuseAudio = reuse
+		}
+		job.SeedInfo = func(ctx context.Context) (seedMeta, error) {
+			info, err := t.Downloader.GetInfo(ctx, "https://www.youtube.com/watch?v="+sourceID)
+			if err != nil {
+				return seedMeta{}, err
+			}
+			seed := seedMeta{Title: info.Title, Channel: info.Uploader, DurationMin: int(info.Duration) / 60}
+			if parsed, perr := time.Parse("20060102", info.UploadDate); perr == nil {
+				seed.Date = parsed.Format("2006-01-02")
+			}
+			return seed, nil
+		}
+	}
+
+	// short label so parallel status messages are tellable apart
+	label := strings.TrimPrefix(strings.TrimPrefix(rawURL, "https://"), "www.")
+	job.Progress = func(stage string) {
+		_, _ = t.Bot.Edit(statusMsg, stage+"...\n"+label)
+	}
+	job.Done = func(res NotesResult, err error) {
+		if err != nil {
+			if ytfeed.IsCookieError(err.Error()) {
+				_, _ = t.Bot.Edit(statusMsg,
+					"❌ YouTube cookies expired. This video requires authentication.\nRun update-cookies.sh to fix.")
+			} else {
+				_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+			}
+			return
+		}
+		msg := fmt.Sprintf("✅ %s\n📄 %s", res.Title, filepath.Base(res.MDPath))
+		if res.NotionPageURL != "" {
+			msg += "\n📓 " + res.NotionPageURL
+		}
+		_, _ = t.Bot.Edit(statusMsg, msg)
+		if level == "md" {
+			t.sendNoteDocument(statusMsg.Chat, res)
+		}
+		if res.NotionPageURL != "" && source == "youtube" {
+			t.appendNotionLinkToEntry(sourceID, res.NotionPageURL)
+		}
+		t.logHistory(ytstore.HistoryEntry{
+			URL:     rawURL,
+			Title:   res.Title,
+			Action:  level,
+			VideoID: historyVideoID,
+		})
+		if originalMsg != nil {
+			t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
+		}
+	}
+
+	if err := t.NotesSvc.Enqueue(job); err != nil {
+		_, _ = t.Bot.Edit(statusMsg, "⚠️ "+err.Error())
+	}
+}
+
+// sendNoteDocument sends the L1 markdown file to the chat as a document with a
+// human-readable filename and a short stats caption. The server copy stays the
+// canonical artifact (needed for /digest); the Telegram copy is a hand-out.
+func (t *TelegramBot) sendNoteDocument(chat *tb.Chat, res NotesResult) {
+	doc := &tb.Document{
+		File:     tb.FromDisk(res.MDPath),
+		FileName: sanitizeFileName(res.Title) + ".md",
+		Caption:  noteCaption(res),
+	}
+	if _, err := t.Bot.Send(chat, doc); err != nil {
+		log.Printf("[WARN] failed to send note document %s: %v", res.MDPath, err)
+	}
+}
+
+// noteCaption builds the stats line under the document: duration, words, tags
+func noteCaption(res NotesResult) string {
+	var parts []string
+	if res.Meta.DurationMin > 0 {
+		if h := res.Meta.DurationMin / 60; h > 0 {
+			parts = append(parts, fmt.Sprintf("⏱ %dч %02dм", h, res.Meta.DurationMin%60))
+		} else {
+			parts = append(parts, fmt.Sprintf("⏱ %dм", res.Meta.DurationMin))
+		}
+	}
+	if res.WordCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d слов", res.WordCount))
+	}
+	if len(res.Meta.Tags) > 0 {
+		parts = append(parts, "🏷 "+strings.Join(res.Meta.Tags, ", "))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// sanitizeFileName turns an episode title into a safe filename
+func sanitizeFileName(name string) string {
+	name = strings.Map(func(r rune) rune {
+		switch r {
+		case '/', '\\', ':', '*', '?', '"', '<', '>', '|', '\n', '\r', '\t':
+			return ' '
+		}
+		return r
+	}, name)
+	name = strings.Join(strings.Fields(name), " ") // collapse whitespace
+	if runes := []rune(name); len(runes) > 100 {
+		name = string(runes[:100])
+	}
+	if name == "" {
+		name = "transcript"
+	}
+	return name
+}
+
+// appendNotionLinkToEntry adds the Notion page link to the episode description
+// in the feed bucket, so podcast clients (Overcast) show a direct link to the
+// notes under the episode. No-op when the video is not in the feed.
+func (t *TelegramBot) appendNotionLinkToEntry(videoID, notionURL string) {
+	entries, err := t.Store.Load(t.FeedName, 0)
+	if err != nil {
+		return // feed bucket may not exist yet — nothing to update
+	}
+	for _, e := range entries {
+		if e.VideoID != videoID {
+			continue
+		}
+		if strings.Contains(string(e.Media.Description), notionURL) {
+			return
+		}
+		e.Media.Description += template.HTML("\n\n📓 Конспект: " + notionURL) //nolint:gosec // plain url, not user html
+		if err := t.Store.UpdateEntry(e); err != nil {
+			log.Printf("[WARN] failed to add notion link to entry %s: %v", videoID, err)
+		}
+		return
+	}
 }
 
 // processVoiceover downloads voice-over translated audio for a YouTube video

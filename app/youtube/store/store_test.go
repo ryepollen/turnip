@@ -464,3 +464,60 @@ func TestStore_MarkHistoryDeleted(t *testing.T) {
 		}
 	}
 }
+
+func TestStore_UpdateEntry(t *testing.T) {
+	tmpfile := filepath.Join(os.TempDir(), "test-update.db")
+	defer os.Remove(tmpfile)
+
+	db, err := bolt.Open(tmpfile, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	require.NoError(t, err)
+
+	s := BoltDB{DB: db}
+
+	entry := feed.Entry{
+		ChannelID: "chan1",
+		VideoID:   "vid1",
+		Title:     "original title",
+		Published: time.Date(2022, time.March, 21, 16, 45, 22, 0, time.UTC),
+	}
+	_, err = s.Save(entry)
+	require.NoError(t, err)
+
+	entry.Title = "updated title"
+	require.NoError(t, s.UpdateEntry(entry))
+
+	res, err := s.Load("chan1", 100)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(res), "update must not create a second record")
+	assert.Equal(t, "updated title", res[0].Title)
+
+	missing := feed.Entry{ChannelID: "chan1", VideoID: "nope"}
+	assert.Error(t, s.UpdateEntry(missing))
+
+	noBucket := feed.Entry{ChannelID: "nochan", VideoID: "vid1"}
+	assert.Error(t, s.UpdateEntry(noBucket))
+}
+
+func TestStore_NotionMeta(t *testing.T) {
+	tmpfile := filepath.Join(os.TempDir(), "test-notion.db")
+	defer os.Remove(tmpfile)
+
+	db, err := bolt.Open(tmpfile, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	require.NoError(t, err)
+
+	s := BoltDB{DB: db}
+
+	res, err := s.LoadNotionMeta("bootstrap")
+	require.NoError(t, err)
+	assert.Nil(t, res, "absent key returns nil")
+
+	require.NoError(t, s.SaveNotionMeta("bootstrap", []byte(`{"episodes_db":"x"}`)))
+	res, err = s.LoadNotionMeta("bootstrap")
+	require.NoError(t, err)
+	assert.Equal(t, `{"episodes_db":"x"}`, string(res))
+
+	require.NoError(t, s.SaveNotionMeta("bootstrap", []byte(`v2`)))
+	res, err = s.LoadNotionMeta("bootstrap")
+	require.NoError(t, err)
+	assert.Equal(t, "v2", string(res), "overwrite works")
+}

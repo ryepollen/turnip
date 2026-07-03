@@ -114,9 +114,22 @@ func TestSetDefault(t *testing.T) {
 	assert.Equal(t, "/yt/media", c.YouTube.BaseURL)
 	assert.Equal(t, "var/yt", c.YouTube.FilesLocation)
 	assert.Equal(t, "var/rss", c.YouTube.RSSLocation)
-	assert.Equal(t, "yt-dlp --extract-audio --audio-format=mp3 --audio-quality=0 -f m4a/bestaudio \"https://www.youtube.com/watch?v={{.ID}}\" --no-progress -o {{.FileName}} --match-filter \"!is_live & availability=public\"", c.YouTube.DlTemplate)
+	assert.Equal(t, "yt-dlp --extract-audio --audio-format=mp3 --audio-quality=0 -f m4a/bestaudio --no-playlist \"https://www.youtube.com/watch?v={{.ID}}\" --no-progress -o {{.FileName}} --match-filter \"!is_live & availability=public\"", c.YouTube.DlTemplate)
 	assert.Equal(t, "https://www.youtube.com/feeds/videos.xml?channel_id=", c.YouTube.BaseChanURL)
 	assert.Equal(t, "https://www.youtube.com/feeds/videos.xml?playlist_id=", c.YouTube.BasePlaylistURL)
+
+	assert.Equal(t, "var/md", c.Notes.MDLocation)
+	assert.Equal(t, "whisper-large-v3", c.Notes.WhisperModel)
+	assert.Equal(t, "llama-3.3-70b-versatile", c.Notes.LLMModel)
+	assert.Equal(t, 1, c.Notes.Concurrency)
+	assert.Equal(t, 600, c.Notes.ChunkSeconds)
+}
+
+func TestSetDefaultNotesConcurrencyCap(t *testing.T) {
+	c := Conf{}
+	c.Notes.Concurrency = 5
+	c.setDefaults()
+	assert.Equal(t, 2, c.Notes.Concurrency, "capped due to Groq rate limits")
 }
 
 func TestFilter(t *testing.T) {

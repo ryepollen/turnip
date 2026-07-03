@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"text/template"
 	"time"
@@ -163,6 +165,11 @@ func main() {
 		errWr := log.ToWriter(log.Default(), "INFO")
 		botDownloader := ytfeed.NewDownloader(conf.YouTube.DlTemplate, outWr, errWr, conf.YouTube.FilesLocation, conf.YouTube.CookiesFile)
 
+		notesSvc := makeNotesService(conf, ytStore, outWr, errWr)
+		if notesSvc != nil {
+			go notesSvc.Run(context.Background())
+		}
+
 		tgBot, err := proc.NewTelegramBot(proc.TelegramBotParams{
 			Token:         opts.TelegramToken,
 			APIURL:        opts.TelegramServer,
@@ -178,6 +185,7 @@ func main() {
 			TTSEnabled:    conf.TelegramBot.TTSEnabled,
 			TTSVoice:      conf.TelegramBot.TTSVoice,
 			CookiesFile:   conf.YouTube.CookiesFile,
+			NotesSvc:      notesSvc,
 		})
 		if err != nil {
 			log.Printf("[ERROR] failed to create telegram bot: %v", err)
@@ -204,6 +212,60 @@ func main() {
 		AdminPasswd:  opts.AdminPasswd,
 	}
 	server.Run(context.Background(), opts.Port)
+}
+
+// makeNotesService builds the transcription/notes pipeline when enabled and
+// GROQ_API_KEY is set. Notion publishing additionally needs NOTION_TOKEN and
+// notion_parent_page; without them /notes degrades to /md.
+func makeNotesService(conf *config.Conf, ytStore *store.BoltDB, outWr, errWr io.Writer) *proc.NotesService {
+	if !conf.Notes.Enabled {
+		return nil
+	}
+	groqKey := os.Getenv("GROQ_API_KEY")
+	if groqKey == "" {
+		log.Printf("[WARN] notes enabled but GROQ_API_KEY is not set, disabling notes")
+		return nil
+	}
+
+	// text-LLM provider is swappable: LLM_API_KEY + notes.llm_base_url override
+	// the default (same Groq key, Groq endpoint); whisper always goes to Groq
+	llmKey := os.Getenv("LLM_API_KEY")
+	if llmKey == "" {
+		llmKey = groqKey
+	}
+
+	var notion *proc.NotionWriter
+	notionToken := os.Getenv("NOTION_TOKEN")
+	switch {
+	case notionToken != "" && conf.Notes.NotionParentPage != "":
+		notion = proc.NewNotionWriter(notionToken, conf.Notes.NotionParentPage, ytStore)
+	case notionToken == "":
+		log.Printf("[INFO] NOTION_TOKEN not set, /notes will be transcript-only")
+	default:
+		log.Printf("[INFO] notes.notion_parent_page not set, /notes will be transcript-only")
+	}
+
+	notesDownloader := ytfeed.NewDownloader(conf.YouTube.DlTemplate, outWr, errWr,
+		filepath.Join(conf.Notes.MDLocation, "tmp"), conf.YouTube.CookiesFile)
+
+	log.Printf("[INFO] notes enabled: md location %s, whisper %s, llm %s, notion: %v",
+		conf.Notes.MDLocation, conf.Notes.WhisperModel, conf.Notes.LLMModel, notion != nil)
+
+	enricher := proc.NewEnrichService(llmKey, conf.Notes.LLMModel)
+	if conf.Notes.LLMBaseURL != "" {
+		enricher.BaseURL = conf.Notes.LLMBaseURL
+	}
+
+	return proc.NewNotesService(proc.NotesParams{
+		MDLocation:  conf.Notes.MDLocation,
+		Transcriber: proc.NewTranscribeService(groqKey, conf.Notes.WhisperModel, conf.Notes.ChunkSeconds, &duration.Service{}),
+		Enricher:    enricher,
+		Notion:      notion,
+		Downloader:  notesDownloader,
+		SubtitleSvc: proc.NewSubtitleService(filepath.Join(conf.Notes.MDLocation, "tmp"), conf.YouTube.CookiesFile),
+		Extractor:   proc.NewArticleExtractor(),
+		Concurrency: conf.Notes.Concurrency,
+	})
 }
 
 func makeBoltDB(dbFile string) (*bolt.DB, error) {
