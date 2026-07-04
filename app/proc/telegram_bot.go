@@ -441,6 +441,7 @@ Send a URL to add audio to your feed:
 Commands:
 /vo <url> - озвучка YouTube на русском
 /md <url> - транскрипт в MD-файл (Whisper + LLM-очистка)
+/md - список всех транскриптов (скачать/в Notion/удалить)
 /notes <url> - транскрипт + саммари + отсылки в Notion
 /status - очередь конспектов (переживает рестарты)
 /list - what's currently in feed (files on disk)
@@ -1079,6 +1080,12 @@ func (t *TelegramBot) handleCallback(c *tb.Callback) {
 	case strings.HasPrefix(c.Data, "\fact|"):
 		c.Data = strings.TrimPrefix(c.Data, "\fact|")
 		t.handleActionCallback(c)
+	case strings.HasPrefix(c.Data, "\fmdl_page|"):
+		c.Data = strings.TrimPrefix(c.Data, "\fmdl_page|")
+		t.handleMDListPageCallback(c)
+	case strings.HasPrefix(c.Data, "\fmdl_act|"):
+		c.Data = strings.TrimPrefix(c.Data, "\fmdl_act|")
+		t.handleMDListActionCallback(c)
 	default:
 		log.Printf("[WARN] unknown callback: %q", c.Data)
 		_ = t.Bot.Respond(c)
@@ -1595,6 +1602,10 @@ func (t *TelegramBot) handleNotesCommand(m *tb.Message, level string) {
 
 	args := regexp.MustCompile(`\s+`).Split(m.Text, 2)
 	if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
+		if level == "md" {
+			t.handleMDList(m) // bare /md shows the stored transcripts
+			return
+		}
 		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Usage: /%s <url> [url2 ...]", level))
 		return
 	}
