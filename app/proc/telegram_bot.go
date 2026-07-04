@@ -303,7 +303,8 @@ func (t *TelegramBot) buildActionMenu(token, kind string) *tb.ReplyMarkup {
 		}
 	case "podcast_show":
 		btnAll := markup.Data("🎧 Добавить все", "act", token+"|audio")
-		rows = append(rows, []tb.InlineButton{*btnAll.Inline()})
+		btnVOAll := markup.Data("🎙 Перевод всех RU", "act", token+"|vo")
+		rows = append(rows, []tb.InlineButton{*btnAll.Inline(), *btnVOAll.Inline()})
 	case "article":
 		btnTTS := markup.Data("📝 Озвучить", "act", token+"|tts")
 		rows = append(rows, []tb.InlineButton{*btnTTS.Inline()})
@@ -1191,10 +1192,14 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
 		}
 	case "podcast_show":
-		if action == "audio" {
+		switch action {
+		case "audio":
 			_, _ = t.Bot.Edit(statusMsg, "⏳ Добавляю эпизоды...")
 			go t.processPodcastShowBatch(context.Background(), chat, statusMsg, pa.originalMsg, pa.url)
-		} else {
+		case "vo":
+			_, _ = t.Bot.Edit(statusMsg, "⏳ Перевожу эпизоды...")
+			go t.processPodcastShowVoiceoverBatch(context.Background(), chat, statusMsg, pa.originalMsg, pa.url)
+		default:
 			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
 		}
 	case "article":
@@ -1957,64 +1962,121 @@ func (t *TelegramBot) processPodcastShowBatch(ctx context.Context, chat *tb.Chat
 	_ = chat
 }
 
-// processPodcastVoiceover translates an Apple Podcasts episode to Russian:
+// translatePodcastEpisode is the UI-light core of podcast translation:
 // vot-cli on the direct enclosure first (works for some links), then the
-// Whisper → Translate → Edge TTS chain as a universal fallback.
-func (t *TelegramBot) processPodcastVoiceover(ctx context.Context, chat *tb.Chat, statusMsg, originalMsg *tb.Message, rawURL string) error {
-	ep, err := t.Apple.Resolve(ctx, rawURL)
-	if err != nil {
-		return err
-	}
-
+// Whisper → Translate → Edge TTS chain as a universal fallback. statusMsg is
+// used only for stage updates within the episode.
+func (t *TelegramBot) translatePodcastEpisode(ctx context.Context, statusMsg *tb.Message, ep *ApplePodcastEpisode, linkURL string) (duration int, titleEmoji string, skipped bool, err error) {
 	voID := "vo_" + ep.SourceID()
 	tempEntry := ytfeed.Entry{ChannelID: t.FeedName, VideoID: voID}
 	if found, _, _ := t.Store.CheckProcessed(tempEntry); found {
-		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ 🎙 %s (already in feed)", ep.Title))
-		return nil
+		return 0, "🎙", true, nil
 	}
 
 	var voFile string
-	titleEmoji := "🎙"
+	titleEmoji = "🎙"
 	if IsVotCliAvailable() {
 		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🎙 Пробую Яндекс-перевод: %s...", ep.Title))
 		if res, votErr := t.VoiceoverSvc.TranslateURL(ctx, ep.AudioURL, ep.SourceID()); votErr == nil {
 			voFile = res.FilePath
 		} else {
-			log.Printf("[WARN] vot-cli failed for podcast %s, falling back to whisper: %v", rawURL, votErr)
+			log.Printf("[WARN] vot-cli failed for podcast %s, falling back to whisper: %v", linkURL, votErr)
 		}
 	}
 
 	if voFile == "" {
 		voFile, err = t.podcastVoiceoverViaWhisper(ctx, statusMsg, ep)
 		if err != nil {
-			return err
+			return 0, "", false, err
 		}
 		titleEmoji = "📝"
 	}
 
-	duration := t.DurationSvc.File(voFile)
-	entry := t.createPodcastEntry(ep, rawURL, voFile, duration)
+	duration = t.DurationSvc.File(voFile)
+	entry := t.createPodcastEntry(ep, linkURL, voFile, duration)
 	entry.VideoID = voID
 	entry.Title = titleEmoji + " " + ep.Title
 	if _, err := t.Store.Save(entry); err != nil {
-		return fmt.Errorf("failed to save entry: %w", err)
+		return 0, "", false, fmt.Errorf("failed to save entry: %w", err)
 	}
 	if err := t.Store.SetProcessed(entry); err != nil {
 		log.Printf("[WARN] failed to set processed for %s: %v", voID, err)
 	}
 	t.logHistory(ytstore.HistoryEntry{
-		URL:      rawURL,
+		URL:      linkURL,
 		Title:    titleEmoji + " " + ep.Title,
 		Action:   "voiceover",
 		VideoID:  voID,
 		Duration: t.formatDuration(time.Duration(duration) * time.Second),
 	})
+	return duration, titleEmoji, false, nil
+}
+
+// processPodcastVoiceover translates a single Apple Podcasts episode to Russian
+func (t *TelegramBot) processPodcastVoiceover(ctx context.Context, chat *tb.Chat, statusMsg, originalMsg *tb.Message, rawURL string) error {
+	ep, err := t.Apple.Resolve(ctx, rawURL)
+	if err != nil {
+		return err
+	}
+
+	duration, titleEmoji, skipped, err := t.translatePodcastEpisode(ctx, statusMsg, ep, rawURL)
+	if err != nil {
+		return err
+	}
+	if skipped {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ 🎙 %s (already in feed)", ep.Title))
+		return nil
+	}
 	t.removeOldEntries()
 
 	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("✅ %s %s (%s)", titleEmoji, ep.Title, t.formatDuration(time.Duration(duration)*time.Second)))
 	t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
 	_ = chat
 	return nil
+}
+
+// processPodcastShowVoiceoverBatch translates all catalog episodes of a show
+// sequentially, oldest first. Heavy: each episode goes through vot-cli or
+// Whisper+Translate+TTS, a season can take hours — progress keeps the user
+// posted, failures don't stop the batch.
+func (t *TelegramBot) processPodcastShowVoiceoverBatch(ctx context.Context, chat *tb.Chat, statusMsg, originalMsg *tb.Message, rawURL string) {
+	show, eps, err := t.Apple.ResolveShow(ctx, rawURL)
+	if err != nil {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+		return
+	}
+	if len(eps) > maxShowEpisodes {
+		eps = eps[len(eps)-maxShowEpisodes:]
+	}
+
+	added, skipped, failed := 0, 0, 0
+	for i, ep := range eps {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🎙 %d/%d: %s...", i+1, len(eps), ep.Title))
+		duration, titleEmoji, skip, terr := t.translatePodcastEpisode(ctx, statusMsg, ep, ep.EpisodeLink())
+		switch {
+		case terr != nil:
+			failed++
+			log.Printf("[ERROR] failed to translate show episode %s: %v", ep.EpisodeLink(), terr)
+		case skip:
+			skipped++
+		default:
+			added++
+			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("✅ %d/%d: %s %s (%s)", i+1, len(eps), titleEmoji, ep.Title,
+				t.formatDuration(time.Duration(duration)*time.Second)))
+		}
+	}
+	t.removeOldEntries()
+
+	summary := fmt.Sprintf("✅ «%s»: переведено %d/%d", show, added, len(eps))
+	if skipped > 0 {
+		summary += fmt.Sprintf(" (%d уже в ленте)", skipped)
+	}
+	if failed > 0 {
+		summary += fmt.Sprintf(" (%d с ошибками)", failed)
+	}
+	_, _ = t.Bot.Edit(statusMsg, summary)
+	t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
+	_ = chat
 }
 
 // podcastVoiceoverViaWhisper builds a Russian voiceover for arbitrary audio:
