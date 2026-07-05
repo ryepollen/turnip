@@ -195,6 +195,9 @@ func (w *NotionWriter) WriteEpisode(ctx context.Context, sourceID string, in Epi
 
 	pageID, pageURL, err := w.createEpisodePage(ctx, in)
 	if err != nil {
+		if strings.Contains(err.Error(), "object_not_found") {
+			w.invalidateIDs() // databases vanished mid-flight, revalidate next run
+		}
 		return "", false, fmt.Errorf("failed to create episode page: %w", err)
 	}
 
@@ -304,6 +307,9 @@ func (w *NotionWriter) WriteDigest(ctx context.Context, tag, title, body string,
 		"parent":     map[string]any{"database_id": w.ids.Digests},
 		"properties": props,
 	}, &resp); err != nil {
+		if strings.Contains(err.Error(), "object_not_found") {
+			w.invalidateIDs()
+		}
 		return "", fmt.Errorf("failed to create digest page: %w", err)
 	}
 
@@ -517,13 +523,29 @@ func (w *NotionWriter) pageAlive(ctx context.Context, id string) bool {
 	return !page.Archived && !page.InTrash
 }
 
-// databaseExists checks that a stored database id is still valid
+// databaseExists checks that a stored database id points to a live database.
+// Deleting a database in the Notion UI archives it (GET still returns 200
+// with archived/in_trash set), so the flags matter as much as the status.
 func (w *NotionWriter) databaseExists(ctx context.Context, id string) bool {
 	if id == "" {
 		return false
 	}
-	err := w.doNotion(ctx, "GET", "/databases/"+id, nil, nil)
-	return err == nil
+	var db struct {
+		Archived bool `json:"archived"`
+		InTrash  bool `json:"in_trash"`
+	}
+	if err := w.doNotion(ctx, "GET", "/databases/"+id, nil, &db); err != nil {
+		return false
+	}
+	return !db.Archived && !db.InTrash
+}
+
+// invalidateIDs drops the in-memory bootstrap cache: the next call revalidates
+// the stored databases and re-bootstraps if they are gone
+func (w *NotionWriter) invalidateIDs() {
+	w.mu.Lock()
+	w.ids = notionDBIDs{}
+	w.mu.Unlock()
 }
 
 // doNotion makes one throttled Notion API call with retries

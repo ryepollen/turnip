@@ -137,6 +137,11 @@ func newNotionMock(t *testing.T) (*httptest.Server, *struct {
 			_, _ = w.Write([]byte(`{"object":"error","status":404}`))
 			return
 		}
+		// a database deleted in the Notion UI: 200 but archived
+		if strings.Contains(r.URL.Path, "trashed") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "db-1", "archived": true, "in_trash": true})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"id": "db-1"})
 	})
 	mux.HandleFunc("/pages", func(w http.ResponseWriter, r *http.Request) {
@@ -217,6 +222,25 @@ func TestNotionEnsureDatabasesRebootstrapOnStaleID(t *testing.T) {
 	w := newTestNotionWriter(ts.URL, store)
 	require.NoError(t, w.EnsureDatabases(context.Background()))
 	assert.Equal(t, 3, state.dbCreates, "stale id triggers re-bootstrap")
+}
+
+func TestNotionEnsureDatabasesRebootstrapOnTrashedDB(t *testing.T) {
+	ts, state := newNotionMock(t)
+	defer ts.Close()
+
+	store := newMemMetaStore()
+	// deleting a database in the Notion UI archives it: GET is 200 + archived
+	trashed, _ := json.Marshal(notionDBIDs{ParentPage: "parent-page-id", Episodes: "trashed-id"})
+	require.NoError(t, store.SaveNotionMeta(notionBootstrapKey, trashed))
+	require.NoError(t, store.SaveNotionMeta("page:old-episode", []byte(`{"id":"x","url":"https://notion.so/dead"}`)))
+
+	w := newTestNotionWriter(ts.URL, store)
+	require.NoError(t, w.EnsureDatabases(context.Background()))
+	assert.Equal(t, 3, state.dbCreates, "archived db triggers re-bootstrap")
+
+	stale, err := store.LoadNotionMeta("page:old-episode")
+	require.NoError(t, err)
+	assert.Nil(t, stale, "stale page mappings dropped on re-bootstrap")
 }
 
 func TestNotionWriteEpisode(t *testing.T) {
