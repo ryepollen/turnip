@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -154,6 +155,7 @@ func (t *TelegramBot) Run(ctx context.Context) error {
 	t.Bot.Handle("/md", t.handleMD)
 	t.Bot.Handle("/notes", t.handleNotes)
 	t.Bot.Handle("/status", t.handleStatus)
+	t.Bot.Handle("/digest", t.handleDigest)
 	t.Bot.Handle("/help", t.handleHelp)
 	t.Bot.Handle("/start", t.handleHelp)
 
@@ -444,6 +446,7 @@ Commands:
 /md - список всех транскриптов (скачать/в Notion/удалить)
 /notes <url> - транскрипт + саммари + отсылки в Notion
 /status - очередь конспектов (переживает рестарты)
+/digest - список тегов; /digest <тег> - тематический конспект из накопленных MD
 /list - what's currently in feed (files on disk)
 /history - permanent activity log (survives /del and auto-cleanup)
 /del - delete most recent from feed
@@ -1746,6 +1749,85 @@ func (t *TelegramBot) NotesJobFailed(job ytstore.NotesJobRecord, res NotesResult
 		return
 	}
 	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v\n%s", err, notesLabel(job.URL)))
+}
+
+// handleDigest handles /digest [тег]: bare form lists available tags with
+// counts, the tag form rebuilds the thematic digest through the notes queue
+func (t *TelegramBot) handleDigest(m *tb.Message) {
+	if !t.isAuthorized(m.Sender) {
+		return
+	}
+	if t.NotesSvc == nil {
+		_, _ = t.Bot.Send(m.Chat, "❌ Конспекты не настроены (notes.enabled + GROQ_API_KEY)")
+		return
+	}
+
+	args := regexp.MustCompile(`\s+`).Split(strings.TrimSpace(m.Text), 2)
+	if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
+		stats, err := t.NotesSvc.TagStats()
+		if err != nil {
+			_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Error: %v", err))
+			return
+		}
+		if len(stats) == 0 {
+			_, _ = t.Bot.Send(m.Chat, "Пока нет транскриптов с тегами. Сначала /md или /notes.")
+			return
+		}
+		type tagCount struct {
+			tag string
+			n   int
+		}
+		list := make([]tagCount, 0, len(stats))
+		for tag, n := range stats {
+			list = append(list, tagCount{tag, n})
+		}
+		sort.Slice(list, func(i, j int) bool {
+			if list[i].n != list[j].n {
+				return list[i].n > list[j].n
+			}
+			return list[i].tag < list[j].tag
+		})
+		var b strings.Builder
+		b.WriteString("🏷 Теги в транскриптах:\n\n")
+		for _, tc := range list {
+			fmt.Fprintf(&b, "• %s (%d)\n", tc.tag, tc.n)
+		}
+		b.WriteString("\nСобрать конспект по теме: /digest <тег>")
+		_, _ = t.Bot.Send(m.Chat, b.String())
+		return
+	}
+
+	tag := normalizeTag(args[1])
+	total, fresh, err := t.NotesSvc.DigestStatus(tag)
+	if err != nil {
+		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Error: %v", err))
+		return
+	}
+	if total == 0 {
+		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Нет транскриптов с тегом «%s». Посмотри /digest без аргументов.", tag))
+		return
+	}
+	if fresh == 0 {
+		msg := fmt.Sprintf("Дайджест «%s» актуален: новых материалов нет (%d в составе).", tag, total)
+		if url := t.NotesSvc.ExistingDigestURL(tag); url != "" {
+			msg += "\n📓 " + url
+		}
+		_, _ = t.Bot.Send(m.Chat, msg)
+		return
+	}
+
+	statusMsg, _ := t.Bot.Send(m.Chat, fmt.Sprintf("⏳ В очереди: дайджест «%s» (%d новых из %d)...", tag, fresh, total))
+	rec := ytstore.NotesJobRecord{
+		URL:         tag,
+		SourceID:    "digest_" + tag,
+		Source:      "digest",
+		Level:       "digest",
+		ChatID:      statusMsg.Chat.ID,
+		StatusMsgID: statusMsg.ID,
+	}
+	if err := t.NotesSvc.Enqueue(rec); err != nil {
+		_, _ = t.Bot.Edit(statusMsg, "⚠️ "+err.Error())
+	}
 }
 
 // handleStatus shows the notes queue state

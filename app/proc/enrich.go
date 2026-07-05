@@ -171,6 +171,24 @@ func (e *EnrichService) ExtractReferences(ctx context.Context, cleaned string) (
 	return refs, nil
 }
 
+// SynthesizeDigest builds one thematic digest from per-episode summaries and
+// the previous digest text. Oversized input goes through map-reduce.
+func (e *EnrichService) SynthesizeDigest(ctx context.Context, tag, combined string) (string, error) {
+	if len(combined) <= summarizeSinglePassLimit {
+		return e.chat(ctx, digestPrompt(tag), combined, false)
+	}
+	chunks := packLines(strings.Split(combined, "\n"), summarizeSinglePassLimit)
+	var partials []string
+	for i, chunk := range chunks {
+		part, err := e.chat(ctx, digestPrompt(tag), chunk, false)
+		if err != nil {
+			return "", fmt.Errorf("failed to digest part %d/%d: %w", i+1, len(chunks), err)
+		}
+		partials = append(partials, part)
+	}
+	return e.chat(ctx, digestCombinePrompt(tag), strings.Join(partials, "\n\n---\n\n"), false)
+}
+
 // chat makes one Groq chat completions call
 func (e *EnrichService) chat(ctx context.Context, system, user string, jsonMode bool) (string, error) {
 	if e.APIKey == "" {
@@ -333,6 +351,21 @@ func partialSummaryPrompt() string {
 func combineSummaryPrompt() string {
 	return `Ниже конспекты последовательных фрагментов одного выпуска, разделённые "---".
 Собери из них единый конспект на русском: 5-10 предложений общего саммари, затем список ключевых мыслей буллетами. Убери повторы.`
+}
+
+func digestPrompt(tag string) string {
+	return fmt.Sprintf(`Ниже — конспекты нескольких выпусков по теме «%s» (и, возможно, предыдущая версия сводного конспекта).
+Собери единый тематический конспект на русском:
+- структурируй по подтемам, а не по выпускам;
+- синтезируй: сопоставляй позиции разных выпусков, убирай повторы;
+- где важно, указывай источник в скобках по названию выпуска;
+- в конце — блок «Открытые вопросы», если по теме остались противоречия.
+Не добавляй вводных фраз про "этот текст".`, tag)
+}
+
+func digestCombinePrompt(tag string) string {
+	return fmt.Sprintf(`Ниже — части сводного конспекта по теме «%s», разделённые "---".
+Собери из них один цельный конспект: единая структура по подтемам, без повторов, сохрани указания на источники.`, tag)
 }
 
 func referencesPrompt() string {

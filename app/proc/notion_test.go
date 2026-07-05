@@ -92,6 +92,19 @@ func (m *memMetaStore) LoadNotionMeta(key string) ([]byte, error) {
 	return m.data[key], nil
 }
 
+func (m *memMetaStore) DeleteNotionMetaPrefix(prefix string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for k := range m.data {
+		if strings.HasPrefix(k, prefix) {
+			delete(m.data, k)
+			n++
+		}
+	}
+	return n, nil
+}
+
 // newNotionMock builds a Notion API mock covering bootstrap and episode writing
 func newNotionMock(t *testing.T) (*httptest.Server, *struct {
 	dbCreates, pageCreates, patches int

@@ -699,6 +699,35 @@ func (s *BoltDB) SaveNotionMeta(key string, data []byte) error {
 	})
 }
 
+// DeleteNotionMetaPrefix removes all notion metadata keys with the prefix.
+// Used when databases are re-bootstrapped: old page mappings point to pages
+// in deleted databases and must not short-circuit new writes.
+func (s *BoltDB) DeleteNotionMetaPrefix(prefix string) (count int, err error) {
+	err = s.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(notionMetaBkt)
+		if bucket == nil {
+			return nil
+		}
+		var keys [][]byte
+		if ferr := bucket.ForEach(func(k, _ []byte) error {
+			if len(k) >= len(prefix) && string(k[:len(prefix)]) == prefix {
+				keys = append(keys, append([]byte(nil), k...))
+			}
+			return nil
+		}); ferr != nil {
+			return ferr
+		}
+		for _, k := range keys {
+			if derr := bucket.Delete(k); derr != nil {
+				return fmt.Errorf("delete notion meta %s: %w", string(k), derr)
+			}
+			count++
+		}
+		return nil
+	})
+	return count, err
+}
+
 // LoadNotionMeta returns the stored value for key, nil if absent
 func (s *BoltDB) LoadNotionMeta(key string) (res []byte, err error) {
 	err = s.View(func(tx *bolt.Tx) error {

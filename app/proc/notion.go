@@ -33,6 +33,7 @@ var referenceTypes = []string{
 type NotionMetaStore interface {
 	SaveNotionMeta(key string, data []byte) error
 	LoadNotionMeta(key string) ([]byte, error)
+	DeleteNotionMetaPrefix(prefix string) (int, error)
 }
 
 // notionDBIDs is the persisted bootstrap state
@@ -41,6 +42,7 @@ type notionDBIDs struct {
 	Episodes   string    `json:"episodes_db"`
 	References string    `json:"references_db"`
 	Objects    string    `json:"objects_db"`
+	Digests    string    `json:"digests_db,omitempty"` // created lazily on first /digest
 	CreatedAt  time.Time `json:"created_at"`
 }
 
@@ -111,6 +113,13 @@ func (w *NotionWriter) EnsureDatabases(ctx context.Context) error {
 	}
 
 	log.Printf("[INFO] creating notion databases under page %s", w.ParentPage)
+	// old page mappings point into deleted/stale databases — drop them so
+	// repeated /notes re-creates pages instead of returning dead links
+	if n, derr := w.Meta.DeleteNotionMetaPrefix("page:"); derr != nil {
+		log.Printf("[WARN] failed to drop stale notion page mappings: %v", derr)
+	} else if n > 0 {
+		log.Printf("[INFO] dropped %d stale notion page mappings", n)
+	}
 	ids := notionDBIDs{ParentPage: w.ParentPage, CreatedAt: time.Now()}
 
 	episodesID, err := w.createDatabase(ctx, "Эпизоды", map[string]any{
@@ -135,13 +144,17 @@ func (w *NotionWriter) EnsureDatabases(ctx context.Context) error {
 	}
 	ids.Objects = objectsID
 
+	// two-way relations: the episode page shows its «Отсылки» right in the
+	// properties, the object page shows all its mentions
 	referencesID, err := w.createDatabase(ctx, "Отсылки", map[string]any{
 		"Название": map[string]any{"title": map[string]any{}},
 		"Тип":      map[string]any{"select": selectOptions()},
 		"Таймкод":  map[string]any{"rich_text": map[string]any{}},
 		"Цитата":   map[string]any{"rich_text": map[string]any{}},
-		"Эпизод":   map[string]any{"relation": map[string]any{"database_id": episodesID, "single_property": map[string]any{}}},
-		"Объект":   map[string]any{"relation": map[string]any{"database_id": objectsID, "single_property": map[string]any{}}},
+		"Эпизод": map[string]any{"relation": map[string]any{"database_id": episodesID,
+			"dual_property": map[string]any{"synced_property_name": "Отсылки"}}},
+		"Объект": map[string]any{"relation": map[string]any{"database_id": objectsID,
+			"dual_property": map[string]any{"synced_property_name": "Упоминания"}}},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create references db: %w", err)
@@ -193,6 +206,124 @@ func (w *NotionWriter) WriteEpisode(ctx context.Context, sourceID string, in Epi
 		}
 	}
 	return pageURL, true, nil
+}
+
+// ensureDigestDatabase lazily creates the «Дайджесты» database (second table
+// on the hub page, below Эпизоды) and persists its id in the bootstrap blob
+func (w *NotionWriter) ensureDigestDatabase(ctx context.Context) error {
+	if err := w.EnsureDatabases(ctx); err != nil {
+		return err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.ids.Digests != "" && w.databaseExists(ctx, w.ids.Digests) {
+		return nil
+	}
+
+	digestsID, err := w.createDatabase(ctx, "Дайджесты", map[string]any{
+		"Тема":            map[string]any{"title": map[string]any{}},
+		"Тег":             map[string]any{"select": map[string]any{"options": []map[string]any{}}},
+		"Дата пересборки": map[string]any{"date": map[string]any{}},
+		"Эпизоды": map[string]any{"relation": map[string]any{"database_id": w.ids.Episodes,
+			"dual_property": map[string]any{"synced_property_name": "Дайджесты"}}},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create digests db: %w", err)
+	}
+	w.ids.Digests = digestsID
+
+	data, err := json.Marshal(w.ids)
+	if err != nil {
+		return fmt.Errorf("failed to marshal db ids: %w", err)
+	}
+	if err := w.Meta.SaveNotionMeta(notionBootstrapKey, data); err != nil {
+		return fmt.Errorf("failed to persist db ids: %w", err)
+	}
+	return nil
+}
+
+// EpisodePageID returns the Notion page id for a sourceID, "" if the episode
+// never went through /notes
+func (w *NotionWriter) EpisodePageID(sourceID string) string {
+	data, err := w.Meta.LoadNotionMeta("page:" + sourceID)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	var ref notionPageRef
+	if json.Unmarshal(data, &ref) != nil {
+		return ""
+	}
+	return ref.ID
+}
+
+// ExistingDigestURL returns the current digest page URL for a tag, "" if none
+func (w *NotionWriter) ExistingDigestURL(tag string) string {
+	data, err := w.Meta.LoadNotionMeta("digest:" + tag)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	var ref notionPageRef
+	if json.Unmarshal(data, &ref) != nil {
+		return ""
+	}
+	return ref.URL
+}
+
+// WriteDigest publishes a rebuilt digest: a fresh page in «Дайджесты» with
+// relations to episode pages; the previous version of this tag's digest is
+// archived so the database always holds one current page per topic
+func (w *NotionWriter) WriteDigest(ctx context.Context, tag, title, body string, episodePages []string) (pageURL string, err error) {
+	if err := w.ensureDigestDatabase(ctx); err != nil {
+		return "", err
+	}
+
+	props := map[string]any{
+		"Тема":            map[string]any{"title": richText(title)},
+		"Тег":             map[string]any{"select": map[string]any{"name": tag}},
+		"Дата пересборки": map[string]any{"date": map[string]any{"start": time.Now().Format("2006-01-02")}},
+	}
+	if len(episodePages) > 0 {
+		rel := make([]map[string]any, 0, len(episodePages))
+		for _, id := range episodePages {
+			rel = append(rel, map[string]any{"id": id})
+		}
+		props["Эпизоды"] = map[string]any{"relation": rel}
+	}
+
+	var resp struct {
+		ID  string `json:"id"`
+		URL string `json:"url"`
+	}
+	if err := w.doNotion(ctx, "POST", "/pages", map[string]any{
+		"parent":     map[string]any{"database_id": w.ids.Digests},
+		"properties": props,
+	}, &resp); err != nil {
+		return "", fmt.Errorf("failed to create digest page: %w", err)
+	}
+
+	for _, batch := range batchBlocks(mdToParagraphBlocks(body), notionBlockBatch) {
+		if err := w.doNotion(ctx, "PATCH", "/blocks/"+resp.ID+"/children",
+			map[string]any{"children": batch}, nil); err != nil {
+			return resp.URL, fmt.Errorf("failed to append digest body: %w", err)
+		}
+	}
+
+	// archive the previous version, keep exactly one live page per tag
+	if data, lerr := w.Meta.LoadNotionMeta("digest:" + tag); lerr == nil && len(data) > 0 {
+		var prev notionPageRef
+		if json.Unmarshal(data, &prev) == nil && prev.ID != "" {
+			if aerr := w.doNotion(ctx, "PATCH", "/pages/"+prev.ID,
+				map[string]any{"archived": true}, nil); aerr != nil {
+				log.Printf("[WARN] failed to archive previous digest %s: %v", prev.ID, aerr)
+			}
+		}
+	}
+	if data, jerr := json.Marshal(notionPageRef{ID: resp.ID, URL: resp.URL}); jerr == nil {
+		if serr := w.Meta.SaveNotionMeta("digest:"+tag, data); serr != nil {
+			log.Printf("[WARN] failed to persist digest mapping for %s: %v", tag, serr)
+		}
+	}
+	return resp.URL, nil
 }
 
 // createEpisodePage creates the page with properties, summary and an empty

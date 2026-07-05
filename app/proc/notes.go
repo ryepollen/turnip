@@ -390,6 +390,10 @@ func (n *NotesService) seedFor(ctx context.Context, job ytstore.NotesJobRecord) 
 
 // process executes the pipeline for one job
 func (n *NotesService) process(ctx context.Context, job ytstore.NotesJobRecord) (NotesResult, error) {
+	if job.Level == "digest" {
+		return n.processDigest(ctx, job)
+	}
+
 	mdPath := filepath.Join(n.MDLocation, job.SourceID+".md")
 
 	meta, body, reused, err := n.ensureL1(ctx, job, mdPath)
