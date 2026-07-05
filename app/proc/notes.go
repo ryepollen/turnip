@@ -133,7 +133,8 @@ type NotesResult struct {
 	Title         string
 	Meta          NoteMeta
 	WordCount     int
-	Reused        bool // transcript came from an existing L1 file
+	DurationSec   int  // for voiceover jobs: length of the produced audio
+	Reused        bool // result already existed (L1 file / episode in feed)
 }
 
 // queue errors, user-visible via bot messages
@@ -181,6 +182,12 @@ type NotesService struct {
 	Concurrency int
 	JobStore    NotesJobStore
 	Notifier    NotesNotifier // set once before Run, nil-safe
+
+	// External handles queue jobs the core pipeline doesn't know (level "vo":
+	// podcast voiceovers). Implemented by the bot, set once before Run.
+	// Routing translations through the same durable queue means deploys and
+	// restarts requeue them instead of silently killing in-flight work.
+	External func(ctx context.Context, job ytstore.NotesJobRecord) (NotesResult, error)
 
 	kick chan struct{} // wakes workers right after Enqueue, no poll latency
 }
@@ -392,6 +399,12 @@ func (n *NotesService) seedFor(ctx context.Context, job ytstore.NotesJobRecord) 
 func (n *NotesService) process(ctx context.Context, job ytstore.NotesJobRecord) (NotesResult, error) {
 	if job.Level == "digest" {
 		return n.processDigest(ctx, job)
+	}
+	if job.Level == "vo" {
+		if n.External == nil {
+			return NotesResult{}, fmt.Errorf("обработчик переводов не подключён")
+		}
+		return n.External(ctx, job)
 	}
 
 	mdPath := filepath.Join(n.MDLocation, job.SourceID+".md")

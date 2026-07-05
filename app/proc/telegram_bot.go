@@ -1189,13 +1189,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 				}
 			}()
 		case "vo":
-			_, _ = t.Bot.Edit(statusMsg, "⏳ Получаю перевод...")
-			go func() {
-				if err := t.processPodcastVoiceover(context.Background(), chat, statusMsg, pa.originalMsg, pa.url); err != nil {
-					log.Printf("[ERROR] failed to process podcast voiceover %s: %v", pa.url, err)
-					_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
-				}
-			}()
+			t.enqueueVoiceoverJob(chat, statusMsg, pa.originalMsg, pa.url)
 		case "md", "notes":
 			t.enqueueNotesJob(statusMsg, pa.originalMsg, pa.url, action)
 		default:
@@ -1207,8 +1201,13 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 			_, _ = t.Bot.Edit(statusMsg, "⏳ Добавляю эпизоды...")
 			go t.processPodcastShowBatch(context.Background(), chat, statusMsg, pa.originalMsg, pa.url)
 		case "vo":
-			_, _ = t.Bot.Edit(statusMsg, "⏳ Перевожу эпизоды...")
-			go t.processPodcastShowVoiceoverBatch(context.Background(), chat, statusMsg, pa.originalMsg, pa.url)
+			if t.NotesSvc == nil {
+				_, _ = t.Bot.Edit(statusMsg, "⏳ Перевожу эпизоды...")
+				go t.processPodcastShowVoiceoverBatch(context.Background(), chat, statusMsg, pa.originalMsg, pa.url)
+				return
+			}
+			_, _ = t.Bot.Edit(statusMsg, "⏳ Ставлю переводы в очередь...")
+			go t.enqueueShowVoiceovers(context.Background(), chat, statusMsg, pa.originalMsg, pa.url)
 		default:
 			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
 		}
@@ -1697,6 +1696,23 @@ func (t *TelegramBot) NotesJobProgress(job ytstore.NotesJobRecord, stage string)
 func (t *TelegramBot) NotesJobDone(job ytstore.NotesJobRecord, res NotesResult) {
 	chat, statusMsg := t.notesChatMsg(job)
 
+	if job.Level == "vo" {
+		// history is logged inside the translation core, only report here
+		if job.StatusMsgID != 0 {
+			msg := "✅ " + res.Title
+			if res.Reused {
+				msg = fmt.Sprintf("⚠️ %s (already in feed)", res.Title)
+			} else if res.DurationSec > 0 {
+				msg += fmt.Sprintf(" (%s)", t.formatDuration(time.Duration(res.DurationSec)*time.Second))
+			}
+			_, _ = t.Bot.Edit(statusMsg, msg)
+		}
+		if job.OrigMsgID != 0 {
+			t.deleteMessageAfterDelay(&tb.Message{ID: job.OrigMsgID, Chat: chat}, 5*time.Second)
+		}
+		return
+	}
+
 	if job.StatusMsgID != 0 {
 		msg := fmt.Sprintf("✅ %s\n📄 %s", res.Title, filepath.Base(res.MDPath))
 		if res.NotionPageURL != "" {
@@ -1724,6 +1740,112 @@ func (t *TelegramBot) NotesJobDone(job ytstore.NotesJobRecord, res NotesResult) 
 	if job.OrigMsgID != 0 {
 		t.deleteMessageAfterDelay(&tb.Message{ID: job.OrigMsgID, Chat: chat}, 5*time.Second)
 	}
+}
+
+// RunQueuedVoiceover implements the notes queue External handler for level
+// "vo" jobs: podcast translations go through the durable queue so deploys
+// and restarts requeue them instead of killing in-flight work
+func (t *TelegramBot) RunQueuedVoiceover(ctx context.Context, job ytstore.NotesJobRecord) (NotesResult, error) {
+	if job.Source != "podcast" {
+		return NotesResult{}, fmt.Errorf("неизвестный источник перевода: %s", job.Source)
+	}
+	ep, err := t.Apple.Resolve(ctx, job.URL)
+	if err != nil {
+		return NotesResult{}, err
+	}
+	_, statusMsg := t.notesChatMsg(job)
+	duration, titleEmoji, skipped, err := t.translatePodcastEpisode(ctx, statusMsg, ep, job.URL)
+	if err != nil {
+		return NotesResult{}, err
+	}
+	title := strings.TrimSpace(titleEmoji + " " + ep.Title)
+	if skipped {
+		return NotesResult{Title: title, Reused: true}, nil
+	}
+	t.removeOldEntries()
+	return NotesResult{Title: title, DurationSec: duration}, nil
+}
+
+// enqueueVoiceoverJob puts one podcast translation into the durable queue;
+// without the queue (notes disabled) it falls back to the direct goroutine
+func (t *TelegramBot) enqueueVoiceoverJob(chat *tb.Chat, statusMsg, originalMsg *tb.Message, rawURL string) {
+	if t.NotesSvc == nil {
+		go func() {
+			if err := t.processPodcastVoiceover(context.Background(), chat, statusMsg, originalMsg, rawURL); err != nil {
+				log.Printf("[ERROR] failed to process podcast voiceover %s: %v", rawURL, err)
+				_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+			}
+		}()
+		return
+	}
+
+	apID := appleEpisodeIDFromURL(rawURL)
+	if apID == "" {
+		_, _ = t.Bot.Edit(statusMsg, "❌ Не понял ссылку на эпизод")
+		return
+	}
+	rec := ytstore.NotesJobRecord{
+		URL:         rawURL,
+		SourceID:    "vo_" + apID,
+		Source:      "podcast",
+		Level:       "vo",
+		ChatID:      statusMsg.Chat.ID,
+		StatusMsgID: statusMsg.ID,
+	}
+	if originalMsg != nil {
+		rec.OrigMsgID = originalMsg.ID
+	}
+	if err := t.NotesSvc.Enqueue(rec); err != nil {
+		_, _ = t.Bot.Edit(statusMsg, "⚠️ "+err.Error())
+		return
+	}
+	_, _ = t.Bot.Edit(statusMsg, "⏳ Перевод в очереди...\n"+notesLabel(rawURL))
+}
+
+// enqueueShowVoiceovers puts every not-yet-translated catalog episode of a
+// show into the durable queue, one status message per episode
+func (t *TelegramBot) enqueueShowVoiceovers(ctx context.Context, chat *tb.Chat, statusMsg, originalMsg *tb.Message, rawURL string) {
+	show, eps, err := t.Apple.ResolveShow(ctx, rawURL)
+	if err != nil {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
+		return
+	}
+	if len(eps) > maxShowEpisodes {
+		eps = eps[len(eps)-maxShowEpisodes:]
+	}
+
+	queued, already := 0, 0
+	for _, ep := range eps {
+		voID := "vo_" + ep.SourceID()
+		if found, _, _ := t.Store.CheckProcessed(ytfeed.Entry{ChannelID: t.FeedName, VideoID: voID}); found {
+			already++
+			continue
+		}
+		st, serr := t.Bot.Send(chat, "⏳ Перевод в очереди: "+ep.Title)
+		if serr != nil {
+			continue
+		}
+		rec := ytstore.NotesJobRecord{
+			URL:         ep.EpisodeLink(),
+			SourceID:    voID,
+			Source:      "podcast",
+			Level:       "vo",
+			ChatID:      st.Chat.ID,
+			StatusMsgID: st.ID,
+		}
+		if qerr := t.NotesSvc.Enqueue(rec); qerr != nil {
+			_, _ = t.Bot.Edit(st, "⚠️ "+qerr.Error()+"\n"+ep.Title)
+			continue
+		}
+		queued++
+	}
+
+	summary := fmt.Sprintf("🎙 «%s»: поставил в очередь %d переводов", show, queued)
+	if already > 0 {
+		summary += fmt.Sprintf(" (%d уже в ленте)", already)
+	}
+	_, _ = t.Bot.Edit(statusMsg, summary)
+	t.deleteMessageAfterDelay(originalMsg, 5*time.Second)
 }
 
 // NotesJobFailed implements NotesNotifier. When the transcript itself is done

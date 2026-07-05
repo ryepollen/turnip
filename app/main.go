@@ -188,7 +188,8 @@ func main() {
 			log.Printf("[ERROR] failed to create telegram bot: %v", err)
 		} else {
 			if notesSvc != nil {
-				notesSvc.Notifier = tgBot // set before Run starts the workers
+				notesSvc.Notifier = tgBot                    // set before Run starts the workers
+				notesSvc.External = tgBot.RunQueuedVoiceover // podcast translations ride the same queue
 			}
 			go func() {
 				if err := tgBot.Run(context.Background()); err != nil {
