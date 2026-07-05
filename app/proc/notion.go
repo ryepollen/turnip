@@ -174,17 +174,23 @@ func (w *NotionWriter) EnsureDatabases(ctx context.Context) error {
 
 // WriteEpisode publishes one episode: page with summary + transcript toggle,
 // deduplicated objects and reference rows. If the episode page already exists
-// (by sourceID), returns its URL without rewriting.
+// (by sourceID) and is still alive, returns its URL without rewriting.
+// EnsureDatabases runs BEFORE the mapping check: a re-bootstrap (databases
+// deleted in the Notion UI) drops stale page mappings, otherwise the early
+// return would hand out links into deleted databases forever.
 func (w *NotionWriter) WriteEpisode(ctx context.Context, sourceID string, in EpisodeInput) (pageURL string, created bool, err error) {
+	if err := w.EnsureDatabases(ctx); err != nil {
+		return "", false, err
+	}
+
 	if data, lerr := w.Meta.LoadNotionMeta("page:" + sourceID); lerr == nil && len(data) > 0 {
 		var ref notionPageRef
 		if jerr := json.Unmarshal(data, &ref); jerr == nil && ref.URL != "" {
-			return ref.URL, false, nil
+			if w.pageAlive(ctx, ref.ID) {
+				return ref.URL, false, nil
+			}
+			log.Printf("[INFO] episode page for %s is gone, recreating", sourceID)
 		}
-	}
-
-	if err := w.EnsureDatabases(ctx); err != nil {
-		return "", false, err
 	}
 
 	pageID, pageURL, err := w.createEpisodePage(ctx, in)
@@ -493,6 +499,22 @@ func (w *NotionWriter) createDatabase(ctx context.Context, title string, propert
 		return "", err
 	}
 	return resp.ID, nil
+}
+
+// pageAlive checks that a stored page id still points to a live page
+// (deleting a page in the Notion UI archives it, deleting its database 404s)
+func (w *NotionWriter) pageAlive(ctx context.Context, id string) bool {
+	if id == "" {
+		return false
+	}
+	var page struct {
+		Archived bool `json:"archived"`
+		InTrash  bool `json:"in_trash"`
+	}
+	if err := w.doNotion(ctx, "GET", "/pages/"+id, nil, &page); err != nil {
+		return false
+	}
+	return !page.Archived && !page.InTrash
 }
 
 // databaseExists checks that a stored database id is still valid

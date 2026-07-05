@@ -154,6 +154,10 @@ func newNotionMock(t *testing.T) (*httptest.Server, *struct {
 			"url": fmt.Sprintf("https://notion.so/page-%d", n),
 		})
 	})
+	mux.HandleFunc("/pages/", func(w http.ResponseWriter, r *http.Request) {
+		// pageAlive check for existing-page short-circuit
+		_ = json.NewEncoder(w).Encode(map[string]any{"archived": false, "in_trash": false})
+	})
 	mux.HandleFunc("/blocks/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			_ = json.NewEncoder(w).Encode(map[string]any{"results": []map[string]string{

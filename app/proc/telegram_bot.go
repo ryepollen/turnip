@@ -434,30 +434,29 @@ func (t *TelegramBot) handleHelp(m *tb.Message) {
 		return
 	}
 
-	help := fmt.Sprintf(`🎧 Turnip Podcast Bot
+	help := fmt.Sprintf(`🎧 Turnip Bot
 
-Send a URL to add audio to your feed:
-• YouTube video → downloads audio
-• Article/webpage → TTS озвучка (if enabled)
+Пришли ссылку (YouTube, эпизод или подкаст Apple Podcasts, статья) —
+появится меню: слушать, перевод RU, MD-файл, Notion.
 
-Commands:
-/vo <url> - озвучка YouTube на русском
-/md <url> - транскрипт в MD-файл (Whisper + LLM-очистка)
-/md - список всех транскриптов (скачать/в Notion/удалить)
-/notes <url> - транскрипт + саммари + отсылки в Notion
-/status - очередь конспектов (переживает рестарты)
-/digest - список тегов; /digest <тег> - тематический конспект из накопленных MD
-/list - what's currently in feed (files on disk)
-/history - permanent activity log (survives /del and auto-cleanup)
-/del - delete most recent from feed
-/del N - delete entry N from feed
-/help - this help
+Слушать:
+/list — что сейчас в ленте
+/del [N] — удалить из ленты (последнее или N-е)
+/vo <url> — озвучка YouTube на русском
 
-Attach a file (cookies.txt) to refresh YouTube auth cookies —
-the message auto-deletes after upload.
+Конспекты:
+/md <url> — транскрипт в MD-файл
+/md — список транскриптов (скачать / в Notion / удалить)
+/notes <url> — транскрипт + саммари + отсылки в Notion
+/digest — теги; /digest <тег> — сводный конспект по теме
+/status — очередь задач (переживает рестарты)
 
-TTS: %v
-RSS: %s/yt/rss/%s`, t.TTSEnabled, t.BaseURL, t.FeedName)
+Прочее:
+/history — вечный лог всех отправлений
+/help — эта справка
+Файл cookies.txt вложением — обновить YouTube-куки
+
+RSS: %s/yt/rss/%s`, t.BaseURL, t.FeedName)
 
 	_, _ = t.Bot.Send(m.Chat, help)
 }
