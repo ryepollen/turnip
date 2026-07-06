@@ -36,8 +36,24 @@ func NewArticleExtractor() *ArticleExtractor {
 	}
 }
 
-// Extract fetches URL and extracts article content
+// Extract fetches URL and extracts article content. Sites behind Cloudflare
+// or aggressive bot protection (403 etc.) go through the r.jina.ai reader
+// as a fallback.
 func (e *ArticleExtractor) Extract(ctx context.Context, rawURL string) (*Article, error) {
+	article, err := e.extractDirect(ctx, rawURL)
+	if err == nil {
+		return article, nil
+	}
+
+	fallback, ferr := e.extractViaJina(ctx, rawURL)
+	if ferr != nil {
+		return nil, fmt.Errorf("%w (jina fallback: %v)", err, ferr)
+	}
+	return fallback, nil
+}
+
+// extractDirect fetches the page itself and runs readability over it
+func (e *ArticleExtractor) extractDirect(ctx context.Context, rawURL string) (*Article, error) {
 	parsedURL, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid URL: %w", err)
@@ -83,6 +99,58 @@ func (e *ArticleExtractor) Extract(ctx context.Context, rawURL string) (*Article
 		SiteName:    article.SiteName,
 		URL:         rawURL,
 	}, nil
+}
+
+// jinaReaderBase is the free r.jina.ai reader endpoint (var for tests)
+var jinaReaderBase = "https://r.jina.ai/"
+
+// extractViaJina reads the page through the r.jina.ai reader: it renders
+// JS-heavy and bot-protected pages server-side and returns
+// "Title: ...\nURL Source: ...\nMarkdown Content:\n<text>"
+func (e *ArticleExtractor) extractViaJina(ctx context.Context, rawURL string) (*Article, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jinaReaderBase+rawURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create jina request: %w", err)
+	}
+	resp, err := e.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("jina request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("jina HTTP error: %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read jina response: %w", err)
+	}
+
+	title, text := parseJinaReader(string(data))
+	if text == "" {
+		return nil, fmt.Errorf("jina returned no content")
+	}
+	return &Article{
+		Title:       title,
+		TextContent: cleanText(text),
+		URL:         rawURL,
+	}, nil
+}
+
+// parseJinaReader splits the reader's header block from the markdown body
+func parseJinaReader(raw string) (title, text string) {
+	body := raw
+	if idx := strings.Index(raw, "Markdown Content:"); idx >= 0 {
+		header := raw[:idx]
+		body = raw[idx+len("Markdown Content:"):]
+		for _, line := range strings.Split(header, "\n") {
+			if strings.HasPrefix(line, "Title:") {
+				title = strings.TrimSpace(strings.TrimPrefix(line, "Title:"))
+				break
+			}
+		}
+	}
+	return title, strings.TrimSpace(body)
 }
 
 // cleanText removes extra whitespace and cleans up text for TTS

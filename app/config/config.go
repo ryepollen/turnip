@@ -60,6 +60,7 @@ type Conf struct {
 		Enabled          bool   `yaml:"enabled"`
 		MDLocation       string `yaml:"md_location"`
 		WhisperModel     string `yaml:"whisper_model"`
+		WhisperBaseURL   string `yaml:"whisper_base_url"` // OpenAI-compatible ASR; default Groq
 		LLMModel         string `yaml:"llm_model"`
 		LLMBaseURL       string `yaml:"llm_base_url"` // OpenAI-compatible; default Groq
 		NotionParentPage string `yaml:"notion_parent_page"`

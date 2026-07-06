@@ -231,11 +231,17 @@ func makeNotesService(conf *config.Conf, ytStore *store.BoltDB, outWr, errWr io.
 		return nil
 	}
 
-	// text-LLM provider is swappable: LLM_API_KEY + notes.llm_base_url override
-	// the default (same Groq key, Groq endpoint); whisper always goes to Groq
+	// both providers are swappable via OpenAI-compatible endpoints:
+	// LLM_API_KEY + notes.llm_base_url for the text LLM,
+	// WHISPER_API_KEY + notes.whisper_base_url for transcription
+	// (defaults: the same Groq key and Groq endpoints)
 	llmKey := os.Getenv("LLM_API_KEY")
 	if llmKey == "" {
 		llmKey = groqKey
+	}
+	whisperKey := os.Getenv("WHISPER_API_KEY")
+	if whisperKey == "" {
+		whisperKey = groqKey
 	}
 
 	var notion *proc.NotionWriter
@@ -259,10 +265,14 @@ func makeNotesService(conf *config.Conf, ytStore *store.BoltDB, outWr, errWr io.
 	if conf.Notes.LLMBaseURL != "" {
 		enricher.BaseURL = conf.Notes.LLMBaseURL
 	}
+	transcriber := proc.NewTranscribeService(whisperKey, conf.Notes.WhisperModel, conf.Notes.ChunkSeconds, &duration.Service{})
+	if conf.Notes.WhisperBaseURL != "" {
+		transcriber.BaseURL = conf.Notes.WhisperBaseURL
+	}
 
 	return proc.NewNotesService(proc.NotesParams{
 		MDLocation:  conf.Notes.MDLocation,
-		Transcriber: proc.NewTranscribeService(groqKey, conf.Notes.WhisperModel, conf.Notes.ChunkSeconds, &duration.Service{}),
+		Transcriber: transcriber,
 		Enricher:    enricher,
 		Notion:      notion,
 		Downloader:  notesDownloader,
