@@ -1009,21 +1009,18 @@ func (t *TelegramBot) buildListMessage(kind string, entries []ytfeed.Entry, page
 		markup.InlineKeyboard = append(markup.InlineKeyboard, []tb.InlineButton{*btnPrev.Inline(), *btnNext.Inline()})
 	}
 
-	// Quick delete buttons for list view only
+	// per-item actions for the list view: download / notes / delete,
+	// one row per item (same language as the /md list)
 	if kind == "list" {
-		row := []tb.InlineButton{}
 		for i := start; i < end; i++ {
 			num := i + 1
 			entry := entries[i]
-			btn := markup.Data(fmt.Sprintf("🗑 %d", num), "list_del", t.packCallbackData(kind, page, pageSize, entry.VideoID))
-			row = append(row, *btn.Inline())
-			if len(row) == 5 {
-				markup.InlineKeyboard = append(markup.InlineKeyboard, row)
-				row = []tb.InlineButton{}
-			}
-		}
-		if len(row) > 0 {
-			markup.InlineKeyboard = append(markup.InlineKeyboard, row)
+			data := t.packCallbackData(kind, page, pageSize, entry.VideoID)
+			btnDL := markup.Data(fmt.Sprintf("⬇️ %d", num), "list_act", "a=dl|"+data)
+			btnNotes := markup.Data(fmt.Sprintf("📓 %d", num), "list_act", "a=nt|"+data)
+			btnDel := markup.Data(fmt.Sprintf("🗑 %d", num), "list_del", data)
+			markup.InlineKeyboard = append(markup.InlineKeyboard,
+				[]tb.InlineButton{*btnDL.Inline(), *btnNotes.Inline(), *btnDel.Inline()})
 		}
 	}
 
@@ -1079,6 +1076,9 @@ func (t *TelegramBot) handleCallback(c *tb.Callback) {
 	case strings.HasPrefix(c.Data, "\flist_del|"):
 		c.Data = strings.TrimPrefix(c.Data, "\flist_del|")
 		t.handleListDeleteCallback(c)
+	case strings.HasPrefix(c.Data, "\flist_act|"):
+		c.Data = strings.TrimPrefix(c.Data, "\flist_act|")
+		t.handleListEntryActionCallback(c)
 	case strings.HasPrefix(c.Data, "\fact|"):
 		c.Data = strings.TrimPrefix(c.Data, "\fact|")
 		t.handleActionCallback(c)
@@ -1257,6 +1257,88 @@ func (t *TelegramBot) processVoiceoverBatch(ctx context.Context, chat *tb.Chat, 
 		summary += fmt.Sprintf(" (%d failed)", failed)
 	}
 	_, _ = t.Bot.Edit(statusMsg, summary)
+}
+
+// telegramBotFileLimit is the Bot API upload cap; larger episodes are sent
+// as a direct stream link instead of a document
+const telegramBotFileLimit = 45 * 1024 * 1024
+
+// handleListEntryActionCallback runs a per-episode action from the /list view:
+// a=dl (send the audio or a direct link) or a=nt (enqueue a Notion конспект)
+func (t *TelegramBot) handleListEntryActionCallback(c *tb.Callback) {
+	if c == nil || c.Message == nil || !t.isAuthorized(c.Sender) {
+		return
+	}
+	action := ""
+	if strings.HasPrefix(c.Data, "a=dl|") {
+		action = "dl"
+		c.Data = strings.TrimPrefix(c.Data, "a=dl|")
+	} else if strings.HasPrefix(c.Data, "a=nt|") {
+		action = "nt"
+		c.Data = strings.TrimPrefix(c.Data, "a=nt|")
+	}
+	_, _, _, videoID := t.unpackCallbackData(c.Data)
+	if action == "" || videoID == "" {
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Bad data"})
+		return
+	}
+
+	entries, err := t.Store.Load(t.FeedName, t.MaxItems)
+	if err != nil {
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Error loading entries"})
+		return
+	}
+	var entry *ytfeed.Entry
+	for i := range entries {
+		if entries[i].VideoID == videoID {
+			entry = &entries[i]
+			break
+		}
+	}
+	if entry == nil {
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Эпизод не найден"})
+		return
+	}
+
+	switch action {
+	case "dl":
+		fi, statErr := os.Stat(entry.File)
+		if statErr != nil {
+			_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Файл не найден на диске"})
+			return
+		}
+		if fi.Size() <= telegramBotFileLimit {
+			audio := &tb.Audio{
+				File:     tb.FromDisk(entry.File),
+				FileName: sanitizeFileName(entry.Title) + ".mp3",
+				Title:    entry.Title,
+			}
+			if _, serr := t.Bot.Send(c.Message.Chat, audio); serr != nil {
+				log.Printf("[WARN] failed to send audio %s: %v", entry.File, serr)
+				_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Не удалось отправить файл"})
+				return
+			}
+			_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Отправил аудио"})
+			return
+		}
+		// over the Bot API cap: hand out the direct stream link
+		link := t.BaseURL + "/yt/media/" + filepath.Base(entry.File)
+		_, _ = t.Bot.Send(c.Message.Chat, fmt.Sprintf("⬇️ %s\n%s\n(файл %d МБ — больше лимита Telegram, качай по ссылке)",
+			entry.Title, link, fi.Size()/1024/1024))
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Прислал ссылку"})
+	case "nt":
+		if t.NotesSvc == nil {
+			_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Конспекты не настроены"})
+			return
+		}
+		if entry.Link.Href == "" {
+			_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "У эпизода нет ссылки на источник"})
+			return
+		}
+		statusMsg, _ := t.Bot.Send(c.Message.Chat, "⏳ В очереди...")
+		t.enqueueNotesJob(statusMsg, nil, entry.Link.Href, "notes")
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Поставил в очередь"})
+	}
 }
 
 func (t *TelegramBot) handleListPageCallback(c *tb.Callback) {
