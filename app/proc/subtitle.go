@@ -40,6 +40,63 @@ func (s *SubtitleService) DownloadSubtitles(ctx context.Context, videoURL string
 	return file, lang, err
 }
 
+// DownloadManualSubtitles fetches only author-uploaded subtitles (no
+// auto-generated ones): those beat Whisper on proper names, so the notes
+// pipeline tries them first. Errors just mean "none available".
+func (s *SubtitleService) DownloadManualSubtitles(ctx context.Context, videoURL string) (string, string, error) {
+	file, lang, err := s.downloadManualSubtitles(ctx, videoURL, true)
+	if err != nil && s.CookiesFile != "" && ytfeed.IsCookieError(err.Error()) {
+		log.Printf("[WARN] cookies expired, retrying DownloadManualSubtitles without cookies")
+		return s.downloadManualSubtitles(ctx, videoURL, false)
+	}
+	return file, lang, err
+}
+
+func (s *SubtitleService) downloadManualSubtitles(ctx context.Context, videoURL string, useCookies bool) (string, string, error) {
+	videoID := extractVideoID(normalizeYouTubeURL(videoURL))
+	if videoID == "" {
+		return "", "", fmt.Errorf("could not extract video ID")
+	}
+
+	outputTemplate := filepath.Join(s.OutputDir, fmt.Sprintf("msub_%s_%d", videoID, time.Now().Unix()))
+	args := []string{
+		"--write-sub", // no --write-auto-sub: manual subtitles only
+		"--sub-lang", "ru,en,en-US,en-GB",
+		"--sub-format", "vtt/srt/best",
+		"--skip-download",
+		"--no-playlist",
+		"--output", outputTemplate,
+	}
+	if useCookies && s.CookiesFile != "" {
+		args = append([]string{"--cookies", s.CookiesFile}, args...)
+	}
+	args = append(args, videoURL)
+
+	cmdCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(cmdCtx, "yt-dlp", args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", "", fmt.Errorf("yt-dlp manual subtitles failed: %w\nstderr: %s", err, stderr.String())
+	}
+
+	matches, _ := filepath.Glob(outputTemplate + "*.vtt")
+	if len(matches) == 0 {
+		matches, _ = filepath.Glob(outputTemplate + "*.srt")
+	}
+	if len(matches) == 0 {
+		return "", "", fmt.Errorf("no manual subtitles")
+	}
+	lang := "en"
+	if strings.Contains(matches[0], ".ru.") {
+		lang = "ru"
+	}
+	log.Printf("[INFO] downloaded manual subtitles: %s (lang: %s)", matches[0], lang)
+	return matches[0], lang, nil
+}
+
 func (s *SubtitleService) downloadSubtitles(ctx context.Context, videoURL string, useCookies bool) (string, string, error) {
 	// Create temp filename based on video URL hash
 	videoID := extractVideoID(normalizeYouTubeURL(videoURL))
@@ -140,8 +197,8 @@ func parseVTT(content string) string {
 
 		// Skip empty lines, WEBVTT header, NOTE lines, and style blocks
 		if line == "" || line == "WEBVTT" || strings.HasPrefix(line, "NOTE") ||
-		   strings.HasPrefix(line, "STYLE") || strings.HasPrefix(line, "Kind:") ||
-		   strings.HasPrefix(line, "Language:") {
+			strings.HasPrefix(line, "STYLE") || strings.HasPrefix(line, "Kind:") ||
+			strings.HasPrefix(line, "Language:") {
 			inCue = false
 			continue
 		}

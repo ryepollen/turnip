@@ -3,6 +3,7 @@ package proc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -129,6 +130,93 @@ func TestAppleResolverResolveShow(t *testing.T) {
 	assert.Equal(t, "Episode 1", eps[0].Title, "oldest first")
 	assert.Equal(t, "Episode 2", eps[1].Title)
 	assert.Equal(t, "https://podcasts.apple.com/podcast/id99?i=1", eps[0].EpisodeLink())
+}
+
+func TestFetchEpisodeExtrasAndOfficialTranscript(t *testing.T) {
+	var baseURL string // set after the server starts, handlers close over it
+	mux := http.NewServeMux()
+	mux.HandleFunc("/feed.xml", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `<?xml version="1.0"?>
+<rss xmlns:podcast="https://podcastindex.org/namespace/1.0">
+<channel>
+  <item>
+    <guid>guid-other</guid>
+    <title>Other</title>
+    <enclosure url="https://cdn.example.com/other.mp3"/>
+  </item>
+  <item>
+    <guid>guid-555</guid>
+    <title>Правильный эпизод</title>
+    <description>Полные show notes, длиннее каталожного огрызка</description>
+    <enclosure url="https://cdn.example.com/555.mp3"/>
+    <podcast:transcript url="%s/t.html" type="text/html"/>
+    <podcast:transcript url="%s/t.srt" type="application/srt"/>
+    <podcast:chapters url="%s/ch.json" type="application/json+chapters"/>
+  </item>
+</channel>
+</rss>`, baseURL, baseURL, baseURL)
+	})
+	mux.HandleFunc("/t.srt", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("1\n00:00:01,000 --> 00:00:03,000\nОфициальный текст\n"))
+	})
+	mux.HandleFunc("/ch.json", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"chapters":[{"startTime":0,"title":"Intro"},{"startTime":754,"title":"Основная часть"}]}`))
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	baseURL = ts.URL
+
+	r := NewAppleResolver()
+	r.BaseURL = ts.URL
+
+	ep := &ApplePodcastEpisode{
+		PodcastID: "99", EpisodeID: "555", GUID: "guid-555",
+		Title: "Правильный эпизод", AudioURL: "https://cdn.example.com/555.mp3",
+		FeedURL: ts.URL + "/feed.xml",
+	}
+
+	extras, err := r.FetchEpisodeExtras(context.Background(), ep)
+	require.NoError(t, err)
+	assert.Contains(t, extras.Description, "Полные show notes")
+	assert.Equal(t, ts.URL+"/t.srt", extras.TranscriptURL, "timed format preferred over html")
+	assert.Equal(t, "application/srt", extras.TranscriptType)
+
+	tr, plain := r.OfficialTranscript(context.Background(), ep)
+	require.NotNil(t, tr)
+	assert.Empty(t, plain)
+	require.Len(t, tr.Segments, 1)
+	assert.Equal(t, "Официальный текст", tr.Segments[0].Text)
+	assert.Equal(t, 1.0, tr.Segments[0].Start)
+
+	chapters := r.FetchChapters(context.Background(), ts.URL+"/ch.json")
+	assert.Equal(t, "00:00 Intro\n12:34 Основная часть", chapters)
+
+	// missing episode in feed
+	epMissing := &ApplePodcastEpisode{GUID: "nope", Title: "nope", FeedURL: ts.URL + "/feed.xml"}
+	_, err = r.FetchEpisodeExtras(context.Background(), epMissing)
+	require.Error(t, err)
+
+	// no feed url at all
+	_, err = r.FetchEpisodeExtras(context.Background(), &ApplePodcastEpisode{})
+	require.Error(t, err)
+}
+
+func TestPickTranscript(t *testing.T) {
+	item := &podcastRSSItem{}
+	url, _ := pickTranscript(item)
+	assert.Equal(t, "", url, "no transcripts")
+
+	item.Transcripts = []struct {
+		URL  string `xml:"url,attr"`
+		Type string `xml:"type,attr"`
+	}{
+		{URL: "a.html", Type: "text/html"},
+		{URL: "a.txt", Type: "text/plain"},
+		{URL: "a.vtt", Type: "text/vtt"},
+	}
+	url, typ := pickTranscript(item)
+	assert.Equal(t, "a.vtt", url, "timed format wins")
+	assert.Equal(t, "text/vtt", typ)
 }
 
 func TestNoteSourceIDPodcast(t *testing.T) {

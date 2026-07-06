@@ -525,9 +525,32 @@ func (n *NotesService) ensureL1(ctx context.Context, job ytstore.NotesJobRecord,
 	return meta, body, false, nil
 }
 
-// transcribeYouTube produces the cleaned transcript body for a YouTube video,
-// via Whisper with a subtitles fallback. Returns an optional fidelity note.
+// transcribeYouTube produces the cleaned transcript body for a YouTube video.
+// Source priority: author-uploaded subtitles (beat Whisper on proper names),
+// Whisper over the audio, auto-generated subtitles as the last resort.
+// Returns an optional fidelity note for the low-quality path.
 func (n *NotesService) transcribeYouTube(ctx context.Context, job ytstore.NotesJobRecord) (body, fidelityNote string, err error) {
+	if n.SubtitleSvc != nil {
+		videoURL := "https://www.youtube.com/watch?v=" + job.SourceID
+		if subFile, _, serr := n.SubtitleSvc.DownloadManualSubtitles(ctx, videoURL); serr == nil {
+			defer n.SubtitleSvc.Cleanup(subFile)
+			if data, rerr := os.ReadFile(subFile); rerr == nil { //nolint:gosec
+				if tr := segmentsToTranscript(ParseSubtitleSegments(string(data))); tr != nil {
+					n.progress(job, "📜 авторские субтитры, чищу текст")
+					body, err = n.Enricher.CleanTranscript(ctx, tr, func(done, total int) {
+						if total > 1 {
+							n.progress(job, fmt.Sprintf("🧹 чищу текст %d/%d", done, total))
+						}
+					})
+					if err == nil {
+						return body, "", nil
+					}
+					log.Printf("[WARN] cleanup of manual subs failed for %s, trying whisper: %v", job.URL, err)
+				}
+			}
+		}
+	}
+
 	audioPath, cleanup, err := n.audioFor(ctx, job)
 	if err == nil {
 		defer cleanup()
@@ -604,9 +627,30 @@ func (n *NotesService) audioFor(ctx context.Context, job ytstore.NotesJobRecord)
 }
 
 // transcribePodcast produces the cleaned transcript body for an Apple Podcasts
-// episode. No subtitle fallback exists for podcasts: Whisper or nothing.
+// episode. Source priority: the publisher's official transcript from the show
+// RSS (free, exact) — then Whisper over the audio.
 func (n *NotesService) transcribePodcast(ctx context.Context, job ytstore.NotesJobRecord) (string, error) {
-	audioPath, cleanup, err := n.podcastAudioFor(ctx, job)
+	if n.Apple == nil {
+		return "", fmt.Errorf("apple podcasts resolver not configured")
+	}
+	ep, err := n.Apple.Resolve(ctx, job.URL)
+	if err != nil {
+		return "", err
+	}
+
+	if tr, plain := n.Apple.OfficialTranscript(ctx, ep); tr != nil || plain != "" {
+		n.progress(job, "📜 официальный транскрипт, чищу текст")
+		if tr != nil {
+			return n.Enricher.CleanTranscript(ctx, tr, func(done, total int) {
+				if total > 1 {
+					n.progress(job, fmt.Sprintf("🧹 чищу текст %d/%d", done, total))
+				}
+			})
+		}
+		return n.Enricher.CleanPlainText(ctx, plain, nil)
+	}
+
+	audioPath, cleanup, err := n.podcastAudioFor(ctx, job, ep)
 	if err != nil {
 		return "", err
 	}
@@ -633,19 +677,12 @@ func (n *NotesService) transcribePodcast(ctx context.Context, job ytstore.NotesJ
 
 // podcastAudioFor returns a local mp3 for a podcast job: the feed's file when
 // the episode was added for listening, otherwise a temp enclosure download
-func (n *NotesService) podcastAudioFor(ctx context.Context, job ytstore.NotesJobRecord) (path string, cleanup func(), err error) {
+func (n *NotesService) podcastAudioFor(ctx context.Context, job ytstore.NotesJobRecord, ep *ApplePodcastEpisode) (path string, cleanup func(), err error) {
 	noop := func() {}
 	if job.ReuseAudio != "" {
 		if fi, statErr := os.Stat(job.ReuseAudio); statErr == nil && fi.Size() > 0 {
 			return job.ReuseAudio, noop, nil
 		}
-	}
-	if n.Apple == nil {
-		return "", noop, fmt.Errorf("apple podcasts resolver not configured")
-	}
-	ep, err := n.Apple.Resolve(ctx, job.URL)
-	if err != nil {
-		return "", noop, err
 	}
 	n.progress(job, "⬇️ скачиваю аудио")
 	dest := filepath.Join(n.MDLocation, "tmp", job.SourceID+".mp3")

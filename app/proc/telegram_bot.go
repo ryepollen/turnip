@@ -2042,6 +2042,18 @@ func sanitizeFileName(name string) string {
 	return name
 }
 
+// joinTranscriptText flattens transcript segments to plain text (for translation)
+func joinTranscriptText(tr *Transcript) string {
+	var sb strings.Builder
+	for _, seg := range tr.Segments {
+		if text := strings.TrimSpace(seg.Text); text != "" {
+			sb.WriteString(text)
+			sb.WriteString(" ")
+		}
+	}
+	return strings.TrimSpace(sb.String())
+}
+
 // createPodcastEntry builds a feed entry for an Apple Podcasts episode.
 // Published is the time of addition (see createEntry for reasoning).
 func (t *TelegramBot) createPodcastEntry(ep *ApplePodcastEpisode, rawURL, file string, duration int) ytfeed.Entry {
@@ -2084,6 +2096,20 @@ func (t *TelegramBot) addPodcastEpisode(ctx context.Context, ep *ApplePodcastEpi
 	tempEntry := ytfeed.Entry{ChannelID: t.FeedName, VideoID: ep.SourceID()}
 	if found, _, _ := t.Store.CheckProcessed(tempEntry); found {
 		return 0, true, nil
+	}
+
+	// the catalog only carries a stub description — take the full show notes
+	// and chapters from the show's own RSS when available (best-effort)
+	if extras, xerr := t.Apple.FetchEpisodeExtras(ctx, ep); xerr == nil {
+		if len(extras.Description) > len(ep.Description) {
+			ep.Description = extras.Description
+		}
+		if chapters := t.Apple.FetchChapters(ctx, extras.ChaptersURL); chapters != "" {
+			ep.Description += "\n\nГлавы:\n" + chapters
+		}
+		if runes := []rune(ep.Description); len(runes) > 4000 {
+			ep.Description = string(runes[:4000]) + "…"
+		}
 	}
 
 	file := filepath.Join(t.FilesLocation, t.makeFileName(ep.SourceID())+".mp3")
@@ -2294,41 +2320,46 @@ func (t *TelegramBot) processPodcastShowVoiceoverBatch(ctx context.Context, chat
 }
 
 // podcastVoiceoverViaWhisper builds a Russian voiceover for arbitrary audio:
-// download enclosure -> Whisper transcript -> Yandex Translate -> Edge TTS
+// official transcript (when the show ships one) or Whisper over the enclosure,
+// then Yandex Translate -> Edge TTS
 func (t *TelegramBot) podcastVoiceoverViaWhisper(ctx context.Context, statusMsg *tb.Message, ep *ApplePodcastEpisode) (string, error) {
-	if t.NotesSvc == nil || t.NotesSvc.Transcriber == nil {
-		return "", fmt.Errorf("перевод недоступен: нужен GROQ_API_KEY (notes.enabled)")
-	}
 	if t.TTS == nil {
 		return "", fmt.Errorf("перевод недоступен: включи tts_enabled")
 	}
 
-	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⬇️ Скачиваю аудио: %s...", ep.Title))
-	tempAudio := filepath.Join(os.TempDir(), "vo_src_"+ep.SourceID()+".mp3")
-	if err := t.Apple.DownloadEnclosure(ctx, ep.AudioURL, tempAudio); err != nil {
-		return "", err
-	}
-	defer func() {
-		if rmErr := os.Remove(tempAudio); rmErr != nil && !os.IsNotExist(rmErr) {
-			log.Printf("[WARN] failed to remove temp audio %s: %v", tempAudio, rmErr)
-		}
-	}()
-
-	tr, err := t.NotesSvc.Transcriber.Transcribe(ctx, tempAudio, func(done, total int) {
-		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🎧 Транскрибирую %d/%d: %s...", done, total, ep.Title))
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to transcribe: %w", err)
-	}
-
-	var sb strings.Builder
-	for _, seg := range tr.Segments {
-		if text := strings.TrimSpace(seg.Text); text != "" {
-			sb.WriteString(text)
-			sb.WriteString(" ")
+	text := ""
+	if otr, plain := t.Apple.OfficialTranscript(ctx, ep); otr != nil || plain != "" {
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("📜 Официальный транскрипт: %s...", ep.Title))
+		if otr != nil {
+			text = joinTranscriptText(otr)
+		} else {
+			text = plain
 		}
 	}
-	text := strings.TrimSpace(sb.String())
+
+	if text == "" {
+		if t.NotesSvc == nil || t.NotesSvc.Transcriber == nil {
+			return "", fmt.Errorf("перевод недоступен: нужен GROQ_API_KEY (notes.enabled)")
+		}
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⬇️ Скачиваю аудио: %s...", ep.Title))
+		tempAudio := filepath.Join(os.TempDir(), "vo_src_"+ep.SourceID()+".mp3")
+		if err := t.Apple.DownloadEnclosure(ctx, ep.AudioURL, tempAudio); err != nil {
+			return "", err
+		}
+		defer func() {
+			if rmErr := os.Remove(tempAudio); rmErr != nil && !os.IsNotExist(rmErr) {
+				log.Printf("[WARN] failed to remove temp audio %s: %v", tempAudio, rmErr)
+			}
+		}()
+
+		tr, err := t.NotesSvc.Transcriber.Transcribe(ctx, tempAudio, func(done, total int) {
+			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🎧 Транскрибирую %d/%d: %s...", done, total, ep.Title))
+		})
+		if err != nil {
+			return "", fmt.Errorf("failed to transcribe: %w", err)
+		}
+		text = joinTranscriptText(tr)
+	}
 	const maxVoiceoverLen = 150000 // ~2.5 hours of audio, same cap as subtitles/articles
 	if runes := []rune(text); len(runes) > maxVoiceoverLen {
 		text = string(runes[:maxVoiceoverLen])
