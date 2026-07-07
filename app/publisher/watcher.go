@@ -24,6 +24,10 @@ type seenFile struct {
 	scans int
 }
 
+// failureCooldown is how long a failed file is left alone before a retry —
+// otherwise a permission problem would spam Telegram every other scan
+const failureCooldown = 30 * time.Minute
+
 // Watch scans originals/ on an interval and publishes new stable files.
 // notify (nil-safe) receives human-readable progress messages for Telegram.
 func (p *Service) Watch(ctx context.Context, interval time.Duration, notify func(string)) {
@@ -32,6 +36,7 @@ func (p *Service) Watch(ctx context.Context, interval time.Duration, notify func
 	}
 	log.Printf("[INFO] audio watcher started: %s every %s", filepath.Join(p.AudioDir, "originals"), interval)
 	seen := map[string]*seenFile{}
+	cooldown := map[string]time.Time{}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -39,13 +44,13 @@ func (p *Service) Watch(ctx context.Context, interval time.Duration, notify func
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.scanOnce(ctx, seen, notify)
+			p.scanOnce(ctx, seen, cooldown, notify)
 		}
 	}
 }
 
 // scanOnce walks all category dirs and publishes files that became stable
-func (p *Service) scanOnce(ctx context.Context, seen map[string]*seenFile, notify func(string)) {
+func (p *Service) scanOnce(ctx context.Context, seen map[string]*seenFile, cooldown map[string]time.Time, notify func(string)) {
 	root := filepath.Join(p.AudioDir, "originals")
 	categories, err := os.ReadDir(root)
 	if err != nil {
@@ -79,24 +84,37 @@ func (p *Service) scanOnce(ctx context.Context, seen map[string]*seenFile, notif
 			}
 
 			s := seen[path]
-			if s == nil || s.size != fi.Size() || !s.mtime.Equal(fi.ModTime()) {
+			if s == nil {
 				seen[path] = &seenFile{size: fi.Size(), mtime: fi.ModTime(), scans: 1}
-				continue // still changing (or first sight) — wait for stability
+				continue // first sight — wait for stability
 			}
-			s.scans++
-			if s.scans < 2 {
+			if s.size != fi.Size() || !s.mtime.Equal(fi.ModTime()) {
+				*s = seenFile{size: fi.Size(), mtime: fi.ModTime(), scans: 1}
+				delete(cooldown, path) // genuinely changed — a failed file gets a fresh chance
+				continue               // still changing — wait for stability
+			}
+			if until, coolingDown := cooldown[path]; coolingDown {
+				if time.Now().Before(until) {
+					continue // recently failed, leave it alone for a while
+				}
+				delete(cooldown, path)
+			}
+			if s.scans++; s.scans < 2 {
 				continue
 			}
-			delete(seen, path)
 
-			p.processAndPublish(ctx, path, category, notify)
+			if err := p.processAndPublish(ctx, path, category, notify); err != nil {
+				cooldown[path] = time.Now().Add(failureCooldown)
+				continue // keep the seen entry: the file must not look "new" next scan
+			}
+			delete(seen, path)
 		}
 	}
 }
 
 // processAndPublish runs the pipeline for one stable file: loudnorm (when
-// enabled and mp3) then publish; errors go to the notify channel, not panic
-func (p *Service) processAndPublish(ctx context.Context, path, category string, notify func(string)) {
+// enabled and mp3) then publish. A returned error puts the file on cooldown.
+func (p *Service) processAndPublish(ctx context.Context, path, category string, notify func(string)) error {
 	base := filepath.Base(path)
 	say := func(format string, args ...any) {
 		msg := fmt.Sprintf(format, args...)
@@ -108,16 +126,17 @@ func (p *Service) processAndPublish(ctx context.Context, path, category string, 
 
 	srcPath, err := p.prepare(ctx, path, category)
 	if err != nil {
-		say("❌ %s/%s: обработка не удалась: %v", category, base, err)
-		return
+		say("❌ %s/%s: обработка не удалась (повтор через %s): %v", category, base, failureCooldown, err)
+		return err
 	}
 
 	ep, err := p.PublishFile(ctx, srcPath, category)
 	if err != nil {
-		say("❌ %s/%s: публикация не удалась: %v", category, base, err)
-		return
+		say("❌ %s/%s: публикация не удалась (повтор через %s): %v", category, base, failureCooldown, err)
+		return err
 	}
 	say("📚 Опубликовано: %s → «%s»\nЛента: %s", category, ep.Title, p.FeedURL(category))
+	return nil
 }
 
 // publishedSet returns the basenames already in the category registry
