@@ -56,6 +56,10 @@ type Conf struct {
 		TTSVoice        string `yaml:"tts_voice"`
 	} `yaml:"telegram_bot"`
 
+	Audio struct {
+		Location string `yaml:"location"` // root of the publishing library, default "var/audio"
+	} `yaml:"audio"`
+
 	Notes struct {
 		Enabled          bool   `yaml:"enabled"`
 		MDLocation       string `yaml:"md_location"`
@@ -251,5 +255,9 @@ func (c *Conf) setDefaults() {
 	}
 	if c.Notes.ChunkSeconds == 0 {
 		c.Notes.ChunkSeconds = 600
+	}
+
+	if c.Audio.Location == "" {
+		c.Audio.Location = "var/audio"
 	}
 }

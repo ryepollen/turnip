@@ -40,6 +40,8 @@ type Server struct {
 	YoutubeSvc    YoutubeSvc
 	TemplLocation string
 	AdminPasswd   string
+	PodSecret     string // secret path segment for personal audio feeds
+	PodFeedsDir   string // directory with generated {category}.xml
 
 	httpServer *http.Server
 	cache      lcw.LoadingCache[[]byte]
@@ -146,6 +148,16 @@ func (s *Server) router() http.Handler {
 		rcfg.HandleFunc("GET /config", func(w http.ResponseWriter, _ *http.Request) { rest.RenderJSON(w, s.Conf) })
 	})
 
+	// personal audio feeds (part 2): kilobyte XML from the VM, audio from R2.
+	// Players can't authenticate, so the whole privacy story is the secret in
+	// the path — no logging of the URL here.
+	if s.PodSecret != "" && s.PodFeedsDir != "" {
+		router.Group().Route(func(rpod *routegroup.Bundle) {
+			rpod.Use(timeout(60 * time.Second))
+			rpod.HandleFunc("GET /pod/{secret}/{category}", s.getPodFeedCtrl)
+		})
+	}
+
 	router.Mount("/yt").Route(func(r *routegroup.Bundle) {
 		r.Use(timeout(60 * time.Second))
 		auth := rest.BasicAuth(func(user, passwd string) bool {
@@ -187,6 +199,26 @@ func (s *Server) router() http.Handler {
 		log.Printf("[WARN] can't start static file server, %v", err)
 	}
 	return router
+}
+
+// GET /pod/{secret}/{category}.xml - personal audio feed for a category
+func (s *Server) getPodFeedCtrl(w http.ResponseWriter, r *http.Request) {
+	if subtle.ConstantTimeCompare([]byte(r.PathValue("secret")), []byte(s.PodSecret)) != 1 {
+		http.NotFound(w, r)
+		return
+	}
+	category := strings.TrimSuffix(r.PathValue("category"), ".xml")
+	if category == "" || strings.ContainsAny(category, "/\\.") {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(s.PodFeedsDir, category+".xml")) //nolint:gosec // category sanitized above
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
+	_, _ = w.Write(data)
 }
 
 // GET /rss/{name} - returns rss for given feeds set

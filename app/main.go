@@ -25,6 +25,7 @@ import (
 	"github.com/umputun/feed-master/app/duration"
 	rssfeed "github.com/umputun/feed-master/app/feed"
 	"github.com/umputun/feed-master/app/proc"
+	"github.com/umputun/feed-master/app/publisher"
 	"github.com/umputun/feed-master/app/youtube"
 	ytfeed "github.com/umputun/feed-master/app/youtube/feed"
 	"github.com/umputun/feed-master/app/youtube/store"
@@ -51,6 +52,11 @@ type options struct {
 
 	AdminPasswd string `long:"admin-passwd" env:"ADMIN_PASSWD" description:"admin password for protected endpoints"`
 
+	// one-shot publishing mode: upload a file into a category feed and exit
+	// (does not open bolt, safe to run next to the live container)
+	Publish         string `long:"publish" description:"publish an audio file to R2 and exit"`
+	PublishCategory string `long:"publish-category" description:"category for --publish"`
+
 	Dbg bool `long:"dbg" env:"DEBUG" description:"debug mode"`
 }
 
@@ -75,6 +81,25 @@ func main() {
 		if err != nil {
 			log.Fatalf("[ERROR] can't load config %s, %v", opts.Conf, err)
 		}
+	}
+
+	pubSvc := makePublisher(conf)
+
+	// one-shot publish: runs before bolt is opened, so it works next to the
+	// live container (bolt holds an exclusive file lock)
+	if opts.Publish != "" {
+		if pubSvc == nil {
+			log.Fatalf("[ERROR] publishing not configured: need R2_* env and FEED_SECRET")
+		}
+		if opts.PublishCategory == "" {
+			log.Fatalf("[ERROR] --publish requires --publish-category")
+		}
+		ep, pubErr := pubSvc.PublishFile(context.Background(), opts.Publish, opts.PublishCategory)
+		if pubErr != nil {
+			log.Fatalf("[ERROR] publish failed: %v", pubErr)
+		}
+		fmt.Printf("published: %s\naudio:     %s\nfeed:      %s\n", ep.Title, ep.PublicURL, pubSvc.FeedURL(opts.PublishCategory))
+		return
 	}
 
 	db, err := makeBoltDB(opts.DB)
@@ -215,7 +240,44 @@ func main() {
 		YoutubeSvc:   &ytSvc,
 		AdminPasswd:  opts.AdminPasswd,
 	}
+	if pubSvc != nil {
+		server.PodSecret = pubSvc.Secret
+		server.PodFeedsDir = filepath.Join(conf.Audio.Location, "feeds")
+	}
 	server.Run(context.Background(), opts.Port)
+}
+
+// makePublisher builds the R2-backed publishing service when R2_* env and
+// FEED_SECRET are present; nil otherwise (feature off)
+func makePublisher(conf *config.Conf) *publisher.Service {
+	r2cfg := publisher.R2Config{
+		AccountID:     os.Getenv("R2_ACCOUNT_ID"),
+		AccessKeyID:   os.Getenv("R2_ACCESS_KEY_ID"),
+		SecretKey:     os.Getenv("R2_SECRET_ACCESS_KEY"),
+		Bucket:        os.Getenv("R2_BUCKET"),
+		PublicBaseURL: os.Getenv("R2_PUBLIC_BASE_URL"),
+	}
+	if !r2cfg.Enabled() {
+		return nil
+	}
+	secret := os.Getenv("FEED_SECRET")
+	if secret == "" {
+		log.Printf("[WARN] R2 configured but FEED_SECRET not set, publishing disabled")
+		return nil
+	}
+	r2, err := publisher.NewR2Store(r2cfg)
+	if err != nil {
+		log.Printf("[ERROR] failed to init R2: %v", err)
+		return nil
+	}
+	log.Printf("[INFO] publisher enabled: bucket %s, audio dir %s", r2cfg.Bucket, conf.Audio.Location)
+	return &publisher.Service{
+		R2:       r2,
+		AudioDir: conf.Audio.Location,
+		Secret:   secret,
+		Duration: &duration.Service{},
+		BaseURL:  conf.System.BaseURL,
+	}
 }
 
 // makeNotesService builds the transcription/notes pipeline when enabled and
