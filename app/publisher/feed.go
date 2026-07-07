@@ -23,6 +23,12 @@ type FeedConfig struct {
 	Language    string `yaml:"language"` // default ru
 	Type        string `yaml:"type"`     // serial | episodic, default serial
 	Author      string `yaml:"author"`
+	Normalize   *bool  `yaml:"normalize"` // loudnorm to -16 LUFS, default true (mp3 only)
+}
+
+// NormalizeEnabled resolves the tri-state normalize flag (nil = on)
+func (c FeedConfig) NormalizeEnabled() bool {
+	return c.Normalize == nil || *c.Normalize
 }
 
 // LoadFeedConfig reads dir/feed.yaml; missing file yields defaults with the
@@ -51,9 +57,24 @@ type Episode struct {
 	Order       int       `json:"order"` // NN prefix for serial feeds, 0 if none
 	R2Key       string    `json:"r2_key"`
 	PublicURL   string    `json:"public_url"`
+	MimeType    string    `json:"mime_type,omitempty"` // default audio/mpeg
 	SizeBytes   int64     `json:"size_bytes"`
 	DurationSec int       `json:"duration_sec"`
 	PublishedAt time.Time `json:"published_at"`
+}
+
+// audioMimeByExt maps supported extensions to enclosure MIME types
+var audioMimeByExt = map[string]string{
+	".mp3": "audio/mpeg",
+	".m4a": "audio/mp4",
+	".m4b": "audio/mp4",
+	".aac": "audio/aac",
+	".ogg": "audio/ogg",
+}
+
+// mimeForFile returns the enclosure type for a filename ("" = not audio)
+func mimeForFile(name string) string {
+	return audioMimeByExt[strings.ToLower(filepath.Ext(name))]
 }
 
 // GUID is stable and derived from the R2 key: changing it would make players
@@ -157,6 +178,10 @@ func BuildFeedXML(cfg FeedConfig, episodes []Episode) ([]byte, error) {
 		if serial {
 			pubDate = serialEpoch.Add(time.Duration(i) * time.Minute)
 		}
+		mime := ep.MimeType
+		if mime == "" {
+			mime = "audio/mpeg"
+		}
 		item := rssItem{
 			Title:   ep.Title,
 			GUID:    rssGUID{Value: ep.GUID(), IsPermaLink: "false"},
@@ -164,7 +189,7 @@ func BuildFeedXML(cfg FeedConfig, episodes []Episode) ([]byte, error) {
 			Enclosure: rssEnclosure{
 				URL:    ep.PublicURL,
 				Length: ep.SizeBytes,
-				Type:   "audio/mpeg",
+				Type:   mime,
 			},
 		}
 		if ep.DurationSec > 0 {

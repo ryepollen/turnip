@@ -182,6 +182,9 @@ func main() {
 		}
 	}
 
+	// owner notifications for the audio watcher (set when the bot comes up)
+	var ownerNotify func(string)
+
 	// Initialize Telegram Bot for manual video additions
 	if conf.TelegramBot.Enabled && opts.TelegramToken != "" && conf.TelegramBot.AllowedUserID != 0 {
 		log.Printf("[INFO] starting telegram bot for user %d, feed: %s", conf.TelegramBot.AllowedUserID, conf.TelegramBot.FeedName)
@@ -216,6 +219,7 @@ func main() {
 				notesSvc.Notifier = tgBot                    // set before Run starts the workers
 				notesSvc.External = tgBot.RunQueuedVoiceover // podcast translations ride the same queue
 			}
+			ownerNotify = tgBot.NotifyOwner
 			go func() {
 				if err := tgBot.Run(context.Background()); err != nil {
 					log.Printf("[ERROR] telegram bot failed: %v", err)
@@ -225,6 +229,12 @@ func main() {
 		if notesSvc != nil {
 			go notesSvc.Run(context.Background())
 		}
+	}
+
+	// audio watcher: new files in originals/{category}/ get normalized,
+	// uploaded to R2 and added to the category feed automatically
+	if pubSvc != nil {
+		go pubSvc.Watch(context.Background(), time.Minute, ownerNotify)
 	}
 
 	if opts.AdminPasswd == "" {

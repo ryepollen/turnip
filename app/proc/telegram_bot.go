@@ -1751,6 +1751,17 @@ func (t *TelegramBot) enqueueNotesJob(statusMsg, originalMsg *tb.Message, rawURL
 	}
 }
 
+// NotifyOwner sends a plain message to the bot owner (used by the audio
+// watcher for "episode published" pings)
+func (t *TelegramBot) NotifyOwner(text string) {
+	if t.AllowedUserID == 0 {
+		return
+	}
+	if _, err := t.Bot.Send(&tb.Chat{ID: t.AllowedUserID}, text); err != nil {
+		log.Printf("[WARN] failed to notify owner: %v", err)
+	}
+}
+
 // notesChatMsg reconstructs the chat and status message references from a
 // persisted job record (telebot only needs ids for Edit/Send/Delete)
 func (t *TelegramBot) notesChatMsg(job ytstore.NotesJobRecord) (*tb.Chat, *tb.Message) {

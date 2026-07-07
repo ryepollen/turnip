@@ -109,10 +109,14 @@ func (p *Service) PublishFile(ctx context.Context, localPath, category string) (
 	}
 
 	order, title := parseTrackName(base)
+	contentType := mimeForFile(base)
+	if contentType == "" {
+		return Episode{}, fmt.Errorf("unsupported audio format: %s", base)
+	}
 	key := fmt.Sprintf("a/%s/%s/%s", p.Secret, category, base)
 
 	log.Printf("[INFO] publishing %s to %s (%d bytes)", base, key, fi.Size())
-	publicURL, err := p.R2.Upload(ctx, localPath, key, "")
+	publicURL, err := p.R2.Upload(ctx, localPath, key, contentType)
 	if err != nil {
 		return Episode{}, err
 	}
@@ -123,6 +127,7 @@ func (p *Service) PublishFile(ctx context.Context, localPath, category string) (
 		Order:       order,
 		R2Key:       key,
 		PublicURL:   publicURL,
+		MimeType:    mimeForFile(base),
 		SizeBytes:   fi.Size(),
 		DurationSec: p.durationOf(localPath),
 		PublishedAt: time.Now().UTC(),
