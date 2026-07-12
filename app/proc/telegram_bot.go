@@ -43,6 +43,10 @@ type TelegramBot struct {
 	Translator       *Translator
 	NotesSvc         *NotesService  // nil when notes feature is disabled
 	Apple            *AppleResolver // apple podcasts links resolution
+	Media            MediaOffloader // nil = episodes stay on local disk
+
+	r2WarnMu   sync.Mutex
+	lastR2Warn time.Time
 
 	pendingMu      sync.Mutex
 	pendingActions map[string]*pendingAction
@@ -84,6 +88,7 @@ type TelegramBotParams struct {
 	TTSVoice      string
 	CookiesFile   string
 	NotesSvc      *NotesService
+	Media         MediaOffloader
 }
 
 // NewTelegramBot creates a new bot for receiving YouTube URLs
@@ -120,6 +125,7 @@ func NewTelegramBot(params TelegramBotParams) (*TelegramBot, error) {
 		CookiesFile:    params.CookiesFile,
 		TTSEnabled:     params.TTSEnabled,
 		NotesSvc:       params.NotesSvc,
+		Media:          params.Media,
 		pendingActions: make(map[string]*pendingAction),
 	}
 
@@ -659,6 +665,7 @@ func (t *TelegramBot) processVideoItem(ctx context.Context, videoID string) (*vi
 	if err := t.Store.SetProcessed(entry); err != nil {
 		log.Printf("[WARN] failed to mark as processed: %v", err)
 	}
+	t.offloadMedia(entry)
 
 	// 8. Append to permanent history log (survives /del and auto-cleanup)
 	dur := time.Duration(duration) * time.Second
@@ -790,6 +797,7 @@ func (t *TelegramBot) removeOldEntries() {
 		} else {
 			log.Printf("[INFO] auto-removed old file %s", f)
 		}
+		t.deleteMediaObject(f)
 	}
 
 	for _, o := range overflow {
@@ -1415,13 +1423,14 @@ func (t *TelegramBot) handleListDeleteCallback(c *tb.Callback) {
 }
 
 func (t *TelegramBot) deleteEntry(entry ytfeed.Entry) error {
-	// delete audio file from disk
+	// delete audio file from disk and its offloaded R2 object
 	if entry.File != "" {
 		if err := os.Remove(entry.File); err != nil && !os.IsNotExist(err) {
 			log.Printf("[WARN] failed to delete file %s: %v", entry.File, err)
 		} else {
 			log.Printf("[INFO] deleted file %s", entry.File)
 		}
+		t.deleteMediaObject(entry.File)
 	}
 
 	// remove from database
@@ -1531,6 +1540,7 @@ func (t *TelegramBot) processArticle(ctx context.Context, chat *tb.Chat, statusM
 	if err := t.Store.SetProcessed(entry); err != nil {
 		log.Printf("[WARN] failed to mark as processed: %v", err)
 	}
+	t.offloadMedia(entry)
 
 	// 10. Append to permanent history log
 	articleDur := time.Duration(duration) * time.Second
@@ -2061,6 +2071,9 @@ func (t *TelegramBot) handleStatus(m *tb.Message) {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "📋 Очередь конспектов\n⏳ в очереди: %d\n⚙️ в работе: %d\n", queued, processing)
+	if line := t.r2UsageLine(); line != "" {
+		b.WriteString(line + "\n")
+	}
 	if len(recent) > 0 {
 		b.WriteString("\nПоследние задачи:\n")
 		icons := map[string]string{
@@ -2218,6 +2231,7 @@ func (t *TelegramBot) addPodcastEpisode(ctx context.Context, ep *ApplePodcastEpi
 	if err := t.Store.SetProcessed(entry); err != nil {
 		log.Printf("[WARN] failed to set processed for %s: %v", ep.SourceID(), err)
 	}
+	t.offloadMedia(entry)
 	t.logHistory(ytstore.HistoryEntry{
 		URL:      linkURL,
 		Title:    ep.Title,
@@ -2335,6 +2349,7 @@ func (t *TelegramBot) translatePodcastEpisode(ctx context.Context, statusMsg *tb
 	if err := t.Store.SetProcessed(entry); err != nil {
 		log.Printf("[WARN] failed to set processed for %s: %v", voID, err)
 	}
+	t.offloadMedia(entry)
 	t.logHistory(ytstore.HistoryEntry{
 		URL:      linkURL,
 		Title:    titleEmoji + " " + ep.Title,
@@ -2656,6 +2671,7 @@ func (t *TelegramBot) processVoiceover(ctx context.Context, chat *tb.Chat, statu
 	if err := t.Store.SetProcessed(entry); err != nil {
 		log.Printf("[WARN] failed to mark as processed: %v", err)
 	}
+	t.offloadMedia(entry)
 
 	// 10. Append to permanent history log
 	dur := time.Duration(duration) * time.Second

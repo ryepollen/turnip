@@ -11,19 +11,19 @@ import (
 
 // TelegramNotifMock is a mock implementation of proc.TelegramNotif.
 //
-// 	func TestSomethingThatUsesTelegramNotif(t *testing.T) {
+//	func TestSomethingThatUsesTelegramNotif(t *testing.T) {
 //
-// 		// make and configure a mocked proc.TelegramNotif
-// 		mockedTelegramNotif := &TelegramNotifMock{
-// 			SendFunc: func(chanID string, item feed.Item) error {
-// 				panic("mock out the Send method")
-// 			},
-// 		}
+//		// make and configure a mocked proc.TelegramNotif
+//		mockedTelegramNotif := &TelegramNotifMock{
+//			SendFunc: func(chanID string, item feed.Item) error {
+//				panic("mock out the Send method")
+//			},
+//		}
 //
-// 		// use mockedTelegramNotif in code that requires proc.TelegramNotif
-// 		// and then make assertions.
+//		// use mockedTelegramNotif in code that requires proc.TelegramNotif
+//		// and then make assertions.
 //
-// 	}
+//	}
 type TelegramNotifMock struct {
 	// SendFunc mocks the Send method.
 	SendFunc func(chanID string, item feed.Item) error
@@ -61,7 +61,8 @@ func (mock *TelegramNotifMock) Send(chanID string, item feed.Item) error {
 
 // SendCalls gets all the calls that were made to Send.
 // Check the length with:
-//     len(mockedTelegramNotif.SendCalls())
+//
+//	len(mockedTelegramNotif.SendCalls())
 func (mock *TelegramNotifMock) SendCalls() []struct {
 	ChanID string
 	Item   feed.Item

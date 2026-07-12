@@ -9,19 +9,19 @@ import (
 
 // DurationServiceMock is a mock implementation of proc.DurationService.
 //
-// 	func TestSomethingThatUsesDurationService(t *testing.T) {
+//	func TestSomethingThatUsesDurationService(t *testing.T) {
 //
-// 		// make and configure a mocked proc.DurationService
-// 		mockedDurationService := &DurationServiceMock{
-// 			FileFunc: func(fname string) int {
-// 				panic("mock out the File method")
-// 			},
-// 		}
+//		// make and configure a mocked proc.DurationService
+//		mockedDurationService := &DurationServiceMock{
+//			FileFunc: func(fname string) int {
+//				panic("mock out the File method")
+//			},
+//		}
 //
-// 		// use mockedDurationService in code that requires proc.DurationService
-// 		// and then make assertions.
+//		// use mockedDurationService in code that requires proc.DurationService
+//		// and then make assertions.
 //
-// 	}
+//	}
 type DurationServiceMock struct {
 	// FileFunc mocks the File method.
 	FileFunc func(fname string) int
@@ -55,7 +55,8 @@ func (mock *DurationServiceMock) File(fname string) int {
 
 // FileCalls gets all the calls that were made to File.
 // Check the length with:
-//     len(mockedDurationService.FileCalls())
+//
+//	len(mockedDurationService.FileCalls())
 func (mock *DurationServiceMock) FileCalls() []struct {
 	Fname string
 } {

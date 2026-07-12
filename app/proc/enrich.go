@@ -15,8 +15,11 @@ import (
 // sized to stay within Groq free-tier TPM limits (~3k tokens per chunk)
 const enrichChunkSize = 9000
 
-// summarizeSinglePassLimit is the max chars summarized in one call, above it map-reduce kicks in
-const summarizeSinglePassLimit = 24000
+// summarizeSinglePassLimit is the max chars summarized in one call, above it
+// map-reduce kicks in. Sized for the tightest Groq free-tier TPM (6000 on
+// llama-3.1-8b-instant): ~12k chars ≈ 3.5k tokens + prompt + output headroom.
+// A 413 "Request too large" is not retryable — the request must simply fit.
+const summarizeSinglePassLimit = 12000
 
 // EnrichService runs LLM passes over transcripts via Groq chat completions
 type EnrichService struct {

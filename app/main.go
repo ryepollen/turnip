@@ -195,6 +195,16 @@ func main() {
 
 		notesSvc := makeNotesService(conf, ytStore, outWr, errWr)
 
+		// feed media offload: new episodes go to R2, /yt/media redirects there
+		var feedMedia *publisher.FeedMedia
+		if pubSvc != nil {
+			feedMedia = &publisher.FeedMedia{Store: pubSvc.R2, Secret: pubSvc.Secret}
+		}
+		var mediaOffloader proc.MediaOffloader
+		if feedMedia != nil {
+			mediaOffloader = feedMedia
+		}
+
 		tgBot, err := proc.NewTelegramBot(proc.TelegramBotParams{
 			Token:         opts.TelegramToken,
 			APIURL:        opts.TelegramServer,
@@ -211,6 +221,7 @@ func main() {
 			TTSVoice:      conf.TelegramBot.TTSVoice,
 			CookiesFile:   conf.YouTube.CookiesFile,
 			NotesSvc:      notesSvc,
+			Media:         mediaOffloader,
 		})
 		if err != nil {
 			log.Printf("[ERROR] failed to create telegram bot: %v", err)
@@ -253,6 +264,8 @@ func main() {
 	if pubSvc != nil {
 		server.PodSecret = pubSvc.Secret
 		server.PodFeedsDir = filepath.Join(conf.Audio.Location, "feeds")
+		fm := publisher.FeedMedia{Store: pubSvc.R2, Secret: pubSvc.Secret}
+		server.MediaRedirectBase = fm.PublicBase()
 	}
 	server.Run(context.Background(), opts.Port)
 }

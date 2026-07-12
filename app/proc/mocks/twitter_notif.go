@@ -11,19 +11,19 @@ import (
 
 // TwitterNotifMock is a mock implementation of proc.TwitterNotif.
 //
-// 	func TestSomethingThatUsesTwitterNotif(t *testing.T) {
+//	func TestSomethingThatUsesTwitterNotif(t *testing.T) {
 //
-// 		// make and configure a mocked proc.TwitterNotif
-// 		mockedTwitterNotif := &TwitterNotifMock{
-// 			SendFunc: func(item feed.Item) error {
-// 				panic("mock out the Send method")
-// 			},
-// 		}
+//		// make and configure a mocked proc.TwitterNotif
+//		mockedTwitterNotif := &TwitterNotifMock{
+//			SendFunc: func(item feed.Item) error {
+//				panic("mock out the Send method")
+//			},
+//		}
 //
-// 		// use mockedTwitterNotif in code that requires proc.TwitterNotif
-// 		// and then make assertions.
+//		// use mockedTwitterNotif in code that requires proc.TwitterNotif
+//		// and then make assertions.
 //
-// 	}
+//	}
 type TwitterNotifMock struct {
 	// SendFunc mocks the Send method.
 	SendFunc func(item feed.Item) error
@@ -57,7 +57,8 @@ func (mock *TwitterNotifMock) Send(item feed.Item) error {
 
 // SendCalls gets all the calls that were made to Send.
 // Check the length with:
-//     len(mockedTwitterNotif.SendCalls())
+//
+//	len(mockedTwitterNotif.SendCalls())
 func (mock *TwitterNotifMock) SendCalls() []struct {
 	Item feed.Item
 } {

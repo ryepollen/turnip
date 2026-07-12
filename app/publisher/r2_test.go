@@ -33,6 +33,36 @@ func TestPublicURLEscaping(t *testing.T) {
 	assert.Equal(t, "https://pub.example/a/x/%D0%93%D0%BB%D0%B0%D0%B2%D0%B0%201.mp3", s.PublicURL("a/x/Глава 1.mp3"))
 }
 
+func TestFeedMediaKeysAndPublicBase(t *testing.T) {
+	fm := &FeedMedia{Store: &R2Store{publicBase: "https://pub.example"}, Secret: "sec"}
+	assert.Equal(t, "m/sec/ep.mp3", fm.key("/srv/var/yt/ep.mp3"))
+	assert.Equal(t, "https://pub.example/m/sec", fm.PublicBase())
+}
+
+func TestTotalSizeAgainstFakeS3(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult><Name>turnip</Name><IsTruncated>false</IsTruncated>
+<Contents><Key>a/x/one.mp3</Key><Size>1000</Size></Contents>
+<Contents><Key>m/x/two.mp3</Key><Size>2500</Size></Contents>
+</ListBucketResult>`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := R2Config{AccountID: "acc", AccessKeyID: "k", SecretKey: "s", Bucket: "turnip", PublicBaseURL: "https://pub.example"}
+	store, err := newR2StoreForEndpoint(strings.TrimPrefix(srv.URL, "http://"), cfg)
+	require.NoError(t, err)
+
+	total, err := store.TotalSize(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, int64(3500), total)
+}
+
 func TestUploadAgainstFakeS3(t *testing.T) {
 	var gotPath, gotContentType string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

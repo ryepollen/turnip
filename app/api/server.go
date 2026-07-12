@@ -42,6 +42,10 @@ type Server struct {
 	AdminPasswd   string
 	PodSecret     string // secret path segment for personal audio feeds
 	PodFeedsDir   string // directory with generated {category}.xml
+	// MediaRedirectBase, when set, turns /yt/media into a redirect for files
+	// that are no longer on local disk: episodes are offloaded to R2 and the
+	// VM stops streaming gigabytes through GCP egress
+	MediaRedirectBase string
 
 	httpServer *http.Server
 	cache      lcw.LoadingCache[[]byte]
@@ -184,11 +188,17 @@ func (s *Server) router() http.Handler {
 			log.Printf("[ERROR] failed to create directory %s, %v", s.Conf.YouTube.FilesLocation, mkdirErr)
 		}
 
-		ytfs, fsErr := rest.NewFileServer(baseYtURL.Path, s.Conf.YouTube.FilesLocation)
-		if fsErr == nil {
-			router.Handle(baseYtURL.Path+"/{file...}", cacheControl(ytfs, "public, max-age=604800"))
+		if s.MediaRedirectBase != "" {
+			// local file when present (transition period / failed offloads),
+			// otherwise redirect to R2 — players follow 302 with Range fine
+			router.HandleFunc("GET "+baseYtURL.Path+"/{file...}", s.getMediaCtrl)
 		} else {
-			log.Printf("[WARN] can't start static file server for yt, %v", fsErr)
+			ytfs, fsErr := rest.NewFileServer(baseYtURL.Path, s.Conf.YouTube.FilesLocation)
+			if fsErr == nil {
+				router.Handle(baseYtURL.Path+"/{file...}", cacheControl(ytfs, "public, max-age=604800"))
+			} else {
+				log.Printf("[WARN] can't start static file server for yt, %v", fsErr)
+			}
 		}
 	}
 
@@ -199,6 +209,22 @@ func (s *Server) router() http.Handler {
 		log.Printf("[WARN] can't start static file server, %v", err)
 	}
 	return router
+}
+
+// GET /yt/media/{file} - episode audio: local disk first, R2 redirect after offload
+func (s *Server) getMediaCtrl(w http.ResponseWriter, r *http.Request) {
+	file := r.PathValue("file")
+	if file == "" || strings.ContainsAny(file, "/\\") || strings.Contains(file, "..") {
+		http.NotFound(w, r)
+		return
+	}
+	local := filepath.Join(s.Conf.YouTube.FilesLocation, file)
+	if fi, err := os.Stat(local); err == nil && !fi.IsDir() {
+		w.Header().Set("Cache-Control", "public, max-age=604800")
+		http.ServeFile(w, r, local)
+		return
+	}
+	http.Redirect(w, r, s.MediaRedirectBase+"/"+url.PathEscape(file), http.StatusFound)
 }
 
 // GET /pod/{secret}/{category}.xml - personal audio feed for a category

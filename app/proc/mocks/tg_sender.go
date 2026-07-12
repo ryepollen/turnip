@@ -11,19 +11,19 @@ import (
 
 // TelegramSenderMock is a mock implementation of proc.TelegramSender.
 //
-// 	func TestSomethingThatUsesTelegramSender(t *testing.T) {
+//	func TestSomethingThatUsesTelegramSender(t *testing.T) {
 //
-// 		// make and configure a mocked proc.TelegramSender
-// 		mockedTelegramSender := &TelegramSenderMock{
-// 			SendFunc: func(audio tb.Audio, bot *tb.Bot, recipient tb.Recipient, sendOptions *tb.SendOptions) (*tb.Message, error) {
-// 				panic("mock out the Send method")
-// 			},
-// 		}
+//		// make and configure a mocked proc.TelegramSender
+//		mockedTelegramSender := &TelegramSenderMock{
+//			SendFunc: func(audio tb.Audio, bot *tb.Bot, recipient tb.Recipient, sendOptions *tb.SendOptions) (*tb.Message, error) {
+//				panic("mock out the Send method")
+//			},
+//		}
 //
-// 		// use mockedTelegramSender in code that requires proc.TelegramSender
-// 		// and then make assertions.
+//		// use mockedTelegramSender in code that requires proc.TelegramSender
+//		// and then make assertions.
 //
-// 	}
+//	}
 type TelegramSenderMock struct {
 	// SendFunc mocks the Send method.
 	SendFunc func(audio tb.Audio, bot *tb.Bot, recipient tb.Recipient, sendOptions *tb.SendOptions) (*tb.Message, error)
@@ -69,7 +69,8 @@ func (mock *TelegramSenderMock) Send(audio tb.Audio, bot *tb.Bot, recipient tb.R
 
 // SendCalls gets all the calls that were made to Send.
 // Check the length with:
-//     len(mockedTelegramSender.SendCalls())
+//
+//	len(mockedTelegramSender.SendCalls())
 func (mock *TelegramSenderMock) SendCalls() []struct {
 	Audio       tb.Audio
 	Bot         *tb.Bot

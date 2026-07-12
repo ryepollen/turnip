@@ -115,6 +115,19 @@ func (s *R2Store) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+// TotalSize sums the size of every object in the bucket (the R2 free tier is
+// 10GB for the whole bucket, so books and feed media count together)
+func (s *R2Store) TotalSize(ctx context.Context) (int64, error) {
+	var total int64
+	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Recursive: true}) {
+		if obj.Err != nil {
+			return 0, fmt.Errorf("failed to list bucket: %w", obj.Err)
+		}
+		total += obj.Size
+	}
+	return total, nil
+}
+
 // Exists checks whether a key is present (size > 0)
 func (s *R2Store) Exists(ctx context.Context, key string) (bool, error) {
 	info, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
