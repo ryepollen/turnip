@@ -222,6 +222,7 @@ func main() {
 			CookiesFile:   conf.YouTube.CookiesFile,
 			NotesSvc:      notesSvc,
 			Media:         mediaOffloader,
+			Pub:           pubSvc,
 		})
 		if err != nil {
 			log.Printf("[ERROR] failed to create telegram bot: %v", err)

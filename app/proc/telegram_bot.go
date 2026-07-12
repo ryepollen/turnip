@@ -18,6 +18,7 @@ import (
 	log "github.com/go-pkgz/lgr"
 	tb "gopkg.in/tucnak/telebot.v2"
 
+	"github.com/umputun/feed-master/app/publisher"
 	ytfeed "github.com/umputun/feed-master/app/youtube/feed"
 	ytstore "github.com/umputun/feed-master/app/youtube/store"
 )
@@ -41,9 +42,10 @@ type TelegramBot struct {
 	VoiceoverSvc     *VoiceoverService
 	SubtitleSvc      *SubtitleService
 	Translator       *Translator
-	NotesSvc         *NotesService  // nil when notes feature is disabled
-	Apple            *AppleResolver // apple podcasts links resolution
-	Media            MediaOffloader // nil = episodes stay on local disk
+	NotesSvc         *NotesService      // nil when notes feature is disabled
+	Apple            *AppleResolver     // apple podcasts links resolution
+	Media            MediaOffloader     // nil = episodes stay on local disk
+	Pub              *publisher.Service // nil = publishing platform off
 
 	r2WarnMu   sync.Mutex
 	lastR2Warn time.Time
@@ -89,6 +91,7 @@ type TelegramBotParams struct {
 	CookiesFile   string
 	NotesSvc      *NotesService
 	Media         MediaOffloader
+	Pub           *publisher.Service
 }
 
 // NewTelegramBot creates a new bot for receiving YouTube URLs
@@ -126,6 +129,7 @@ func NewTelegramBot(params TelegramBotParams) (*TelegramBot, error) {
 		TTSEnabled:     params.TTSEnabled,
 		NotesSvc:       params.NotesSvc,
 		Media:          params.Media,
+		Pub:            params.Pub,
 		pendingActions: make(map[string]*pendingAction),
 	}
 
@@ -162,6 +166,8 @@ func (t *TelegramBot) Run(ctx context.Context) error {
 	t.Bot.Handle("/notes", t.handleNotes)
 	t.Bot.Handle("/status", t.handleStatus)
 	t.Bot.Handle("/digest", t.handleDigest)
+	t.Bot.Handle("/feeds", t.handleFeeds)
+	t.Bot.Handle("/archive", t.handleArchive)
 	t.Bot.Handle("/help", t.handleHelp)
 	t.Bot.Handle("/start", t.handleHelp)
 
@@ -455,7 +461,11 @@ func (t *TelegramBot) handleHelp(m *tb.Message) {
 /md — список транскриптов (скачать / в Notion / удалить)
 /notes <url> — транскрипт + саммари + отсылки в Notion
 /digest — теги; /digest <тег> — сводный конспект по теме
-/status — очередь задач (переживает рестарты)
+/status — очередь задач, R2, лимиты LLM
+
+Платформа (книги/курсы):
+/feeds — ленты с URL подписки
+/archive <категория> — 🗄 в архив / 🔁 переобработать
 
 Прочее:
 /history — вечный лог всех отправлений
@@ -1096,6 +1106,12 @@ func (t *TelegramBot) handleCallback(c *tb.Callback) {
 	case strings.HasPrefix(c.Data, "\fmdl_act|"):
 		c.Data = strings.TrimPrefix(c.Data, "\fmdl_act|")
 		t.handleMDListActionCallback(c)
+	case strings.HasPrefix(c.Data, "\fpub_pg|"):
+		c.Data = strings.TrimPrefix(c.Data, "\fpub_pg|")
+		t.handlePubPageCallback(c)
+	case strings.HasPrefix(c.Data, "\fpub_act|"):
+		c.Data = strings.TrimPrefix(c.Data, "\fpub_act|")
+		t.handlePubActionCallback(c)
 	default:
 		log.Printf("[WARN] unknown callback: %q", c.Data)
 		_ = t.Bot.Respond(c)
