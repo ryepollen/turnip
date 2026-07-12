@@ -2074,6 +2074,9 @@ func (t *TelegramBot) handleStatus(m *tb.Message) {
 	if line := t.r2UsageLine(); line != "" {
 		b.WriteString(line + "\n")
 	}
+	if line := llmRateLine(); line != "" {
+		b.WriteString(line + "\n")
+	}
 	if len(recent) > 0 {
 		b.WriteString("\nПоследние задачи:\n")
 		icons := map[string]string{

@@ -66,3 +66,24 @@ func TestR2UsageLine(t *testing.T) {
 	bot.Media = &mockOffloader{total: 3 << 30}
 	assert.Equal(t, "☁️ R2: 3.0 GB / 10 GB", bot.r2UsageLine())
 }
+
+func TestLLMRateLine(t *testing.T) {
+	// reset shared state
+	llmRate.mu.Lock()
+	llmRate.remaining, llmRate.limit = "", ""
+	llmRate.mu.Unlock()
+
+	assert.Equal(t, "", llmRateLine(), "empty before the first LLM call")
+
+	h := make(map[string][]string)
+	h["X-Ratelimit-Remaining-Tokens"] = []string{"34000"}
+	h["X-Ratelimit-Limit-Tokens"] = []string{"100000"}
+	captureRateHeaders(h)
+	line := llmRateLine()
+	assert.Contains(t, line, "34000")
+	assert.Contains(t, line, "100000")
+	assert.Contains(t, line, "только что")
+
+	captureRateHeaders(map[string][]string{"Content-Type": {"application/json"}})
+	assert.Contains(t, llmRateLine(), "34000", "headers without rate info don't wipe the snapshot")
+}

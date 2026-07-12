@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -196,6 +197,40 @@ func (s *TranscribeService) transcribeChunk(ctx context.Context, chunkPath strin
 	return &result, nil
 }
 
+// llmRate keeps the latest rate-limit snapshot from Groq response headers,
+// surfaced in /status so quota exhaustion is visible, not mysterious
+var llmRate struct {
+	mu               sync.Mutex
+	remaining, limit string
+	at               time.Time
+}
+
+// captureRateHeaders records x-ratelimit-* when present (Groq sends them on
+// every response; Notion doesn't, so this is a no-op there)
+func captureRateHeaders(h http.Header) {
+	remaining := h.Get("x-ratelimit-remaining-tokens")
+	if remaining == "" {
+		return
+	}
+	llmRate.mu.Lock()
+	llmRate.remaining, llmRate.limit, llmRate.at = remaining, h.Get("x-ratelimit-limit-tokens"), time.Now()
+	llmRate.mu.Unlock()
+}
+
+// llmRateLine renders the /status line ("" until the first LLM call)
+func llmRateLine() string {
+	llmRate.mu.Lock()
+	defer llmRate.mu.Unlock()
+	if llmRate.remaining == "" {
+		return ""
+	}
+	age := "только что"
+	if d := time.Since(llmRate.at); d > time.Minute {
+		age = fmt.Sprintf("%d мин назад", int(d.Minutes()))
+	}
+	return fmt.Sprintf("🧠 LLM: осталось %s из %s токенов (%s)", llmRate.remaining, llmRate.limit, age)
+}
+
 // doWithRetry executes an HTTP request built by build, retrying on 429 and 5xx.
 // Honors Retry-After header when present, otherwise exponential backoff 2s..32s.
 // On success the caller must close the response body.
@@ -214,8 +249,10 @@ func doWithRetry(ctx context.Context, client *http.Client, build func() (*http.R
 		if err != nil {
 			lastErr = fmt.Errorf("request failed: %w", err)
 		} else if resp.StatusCode == http.StatusOK {
+			captureRateHeaders(resp.Header)
 			return resp, nil
 		} else {
+			captureRateHeaders(resp.Header)
 			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			_ = resp.Body.Close()
 			lastErr = fmt.Errorf("api error (status %d): %s", resp.StatusCode, string(bodyBytes))
