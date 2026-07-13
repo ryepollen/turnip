@@ -853,7 +853,7 @@ func (t *TelegramBot) createEntry(info *ytfeed.VideoInfo, file string, duration 
 	return ytfeed.Entry{
 		ChannelID: t.FeedName,
 		VideoID:   info.ID,
-		Title:     info.Title,
+		Title:     "📼 " + info.Title,
 		Link: struct {
 			Href string `xml:"href,attr"`
 		}{Href: info.WebpageURL},
