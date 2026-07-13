@@ -28,6 +28,12 @@ func normalizeTag(tag string) string {
 	return strings.ToLower(strings.TrimSpace(tag))
 }
 
+// slugifyTopic turns a freeform topic into a file/marker-safe slug
+// («Нефтедобыча и переработка» → «нефтедобыча-и-переработка»)
+func slugifyTopic(topic string) string {
+	return strings.Join(strings.Fields(normalizeTag(topic)), "-")
+}
+
 // digestProcessedMark is the frontmatter marker for "included in digest of tag"
 func digestProcessedMark(tag string) string { return "digest:" + tag }
 
@@ -102,23 +108,34 @@ func (n *NotesService) ExistingDigestURL(tag string) string {
 	return n.Notion.ExistingDigestURL(tag)
 }
 
-// processDigest rebuilds the thematic digest for job.URL (the tag).
-// Incremental: only new (not yet included) L1 files are summarized; the
-// previous digest text is fed to the LLM alongside, so a rebuild costs
+// processDigest rebuilds the thematic digest for job.URL (a tag or a freeform
+// topic). Incremental: only new (not yet included) L1 files are summarized;
+// the previous digest text is fed to the LLM alongside, so a rebuild costs
 // tokens proportional to the new material, not the whole corpus.
+// When no file carries the exact tag, the LLM picks relevant sources by
+// title+tags — LLM-assigned tags drift («oil-and-gas» vs «petroleum»), and
+// the topic-based selection bridges that gap.
 func (n *NotesService) processDigest(ctx context.Context, job ytstore.NotesJobRecord) (NotesResult, error) {
 	if n.Notion == nil {
 		return NotesResult{}, fmt.Errorf("для /digest нужен Notion (NOTION_TOKEN + notion_parent_page)")
 	}
-	tag := normalizeTag(job.URL)
-	title := "Дайджест: " + tag
+	topic := normalizeTag(job.URL)
+	tag := slugifyTopic(topic)
+	title := "Дайджест: " + topic
 
 	newOnes, included, err := n.collectDigestSources(tag)
 	if err != nil {
 		return NotesResult{}, err
 	}
 	if len(newOnes) == 0 && len(included) == 0 {
-		return NotesResult{}, fmt.Errorf("нет транскриптов с тегом «%s»", tag)
+		n.progress(job, "🔎 подбираю источники по смыслу")
+		newOnes, included, err = n.smartSelectSources(ctx, topic, tag)
+		if err != nil {
+			return NotesResult{}, err
+		}
+	}
+	if len(newOnes) == 0 && len(included) == 0 {
+		return NotesResult{}, fmt.Errorf("не нашёл транскриптов по теме «%s» — ни по тегу, ни по смыслу", topic)
 	}
 	if len(newOnes) == 0 {
 		return NotesResult{
@@ -182,6 +199,54 @@ func (n *NotesService) processDigest(ctx context.Context, job ytstore.NotesJobRe
 	return res, nil
 }
 
+// smartSelectSources asks the LLM to pick relevant L1 files for a freeform
+// topic and splits them by the digest inclusion marker
+func (n *NotesService) smartSelectSources(ctx context.Context, topic, tag string) (newOnes, included []digestSource, err error) {
+	files, err := filepath.Glob(filepath.Join(n.MDLocation, "*.md"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to list md files: %w", err)
+	}
+	byID := map[string]digestSource{}
+	var catalog []string
+	for _, path := range files {
+		meta, body, rerr := readNoteFile(path)
+		if rerr != nil {
+			continue
+		}
+		src := digestSource{
+			SourceID: strings.TrimSuffix(filepath.Base(path), ".md"),
+			Path:     path,
+			Meta:     meta,
+			Body:     body,
+		}
+		byID[src.SourceID] = src
+		catalog = append(catalog, fmt.Sprintf("%s\t%s\t%s", src.SourceID, meta.Title, strings.Join(meta.Tags, ",")))
+	}
+	if len(catalog) == 0 {
+		return nil, nil, nil
+	}
+
+	ids, err := n.Enricher.SelectRelevant(ctx, topic, catalog)
+	if err != nil {
+		return nil, nil, err
+	}
+	mark := digestProcessedMark(tag)
+	for _, id := range ids {
+		src, ok := byID[id]
+		if !ok {
+			continue // the LLM hallucinated an id — skip
+		}
+		if src.Meta.hasProcessed(mark) {
+			included = append(included, src)
+		} else {
+			newOnes = append(newOnes, src)
+		}
+	}
+	sort.Slice(newOnes, func(i, j int) bool { return newOnes[i].Meta.Date < newOnes[j].Meta.Date })
+	sort.Slice(included, func(i, j int) bool { return included[i].Meta.Date < included[j].Meta.Date })
+	return newOnes, included, nil
+}
+
 // episodePageIDs maps digest sources to their Notion episode pages (when the
 // episode went through /notes); sources without a page are simply not linked
 func (n *NotesService) episodePageIDs(sources []digestSource) []string {
@@ -198,9 +263,10 @@ func (n *NotesService) episodePageIDs(sources []digestSource) []string {
 	return ids
 }
 
-// DigestStatus reports how many sources a tag has and how many are new
-func (n *NotesService) DigestStatus(tag string) (total, fresh int, err error) {
-	newOnes, included, err := n.collectDigestSources(normalizeTag(tag))
+// DigestStatus reports how many sources carry the exact tag and how many are
+// new; total==0 for a freeform topic just means the smart selection will run
+func (n *NotesService) DigestStatus(topic string) (total, fresh int, err error) {
+	newOnes, included, err := n.collectDigestSources(slugifyTopic(topic))
 	if err != nil {
 		return 0, 0, err
 	}

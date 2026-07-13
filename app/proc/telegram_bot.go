@@ -2043,23 +2043,24 @@ func (t *TelegramBot) handleDigest(m *tb.Message) {
 		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Error: %v", err))
 		return
 	}
-	if total == 0 {
-		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Нет транскриптов с тегом «%s». Посмотри /digest без аргументов.", tag))
-		return
-	}
-	if fresh == 0 {
+	if total > 0 && fresh == 0 {
 		msg := fmt.Sprintf("Дайджест «%s» актуален: новых материалов нет (%d в составе).", tag, total)
-		if url := t.NotesSvc.ExistingDigestURL(tag); url != "" {
+		if url := t.NotesSvc.ExistingDigestURL(slugifyTopic(tag)); url != "" {
 			msg += "\n📓 " + url
 		}
 		_, _ = t.Bot.Send(m.Chat, msg)
 		return
 	}
 
-	statusMsg, _ := t.Bot.Send(m.Chat, fmt.Sprintf("⏳ В очереди: дайджест «%s» (%d новых из %d)...", tag, fresh, total))
+	statusText := fmt.Sprintf("⏳ В очереди: дайджест «%s» (%d новых из %d)...", tag, fresh, total)
+	if total == 0 {
+		// no exact tag anywhere: the worker will pick sources by meaning
+		statusText = fmt.Sprintf("⏳ В очереди: дайджест «%s» — точного тега нет, подберу источники по смыслу...", tag)
+	}
+	statusMsg, _ := t.Bot.Send(m.Chat, statusText)
 	rec := ytstore.NotesJobRecord{
 		URL:         tag,
-		SourceID:    "digest_" + tag,
+		SourceID:    "digest_" + slugifyTopic(tag),
 		Source:      "digest",
 		Level:       "digest",
 		ChatID:      statusMsg.Chat.ID,

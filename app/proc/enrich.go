@@ -174,6 +174,22 @@ func (e *EnrichService) ExtractReferences(ctx context.Context, cleaned string) (
 	return refs, nil
 }
 
+// SelectRelevant picks catalog entries relevant to a freeform topic (JSON
+// mode). catalog lines are "id\ttitle\ttags"; returns the chosen ids.
+func (e *EnrichService) SelectRelevant(ctx context.Context, topic string, catalog []string) ([]string, error) {
+	resp, err := e.chat(ctx, selectRelevantPrompt(topic), strings.Join(catalog, "\n"), true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to select relevant sources: %w", err)
+	}
+	var parsed struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.Unmarshal([]byte(resp), &parsed); err != nil {
+		return nil, fmt.Errorf("failed to parse selection json: %w", err)
+	}
+	return parsed.IDs, nil
+}
+
 // SynthesizeDigest builds one thematic digest from per-episode summaries and
 // the previous digest text. Oversized input goes through map-reduce.
 func (e *EnrichService) SynthesizeDigest(ctx context.Context, tag, combined string) (string, error) {
@@ -354,6 +370,12 @@ func partialSummaryPrompt() string {
 func combineSummaryPrompt() string {
 	return `Ниже конспекты последовательных фрагментов одного выпуска, разделённые "---".
 Собери из них единый конспект на русском: 5-10 предложений общего саммари, затем список ключевых мыслей буллетами. Убери повторы.`
+}
+
+func selectRelevantPrompt(topic string) string {
+	return fmt.Sprintf(`Ниже каталог транскриптов, по одному на строку: id, название, теги (через таб).
+Выбери те, что относятся к теме «%s». Отбирай по смыслу, а не по буквальному совпадению слов.
+Ответь строго JSON-объектом: {"ids": ["id1", "id2"]}. Если ничего не подходит — {"ids": []}.`, topic)
 }
 
 func digestPrompt(tag string) string {
