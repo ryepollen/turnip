@@ -25,7 +25,7 @@ type DurationProvider interface {
 //
 //	originals/{category}/   source files + feed.yaml (never modified)
 //	state/{category}.json   published episodes registry
-//	feeds/{category}.xml    generated feeds (served via /pod/{secret}/...)
+//	feeds/{category}.xml    generated feeds (public path /holzweg/{secret}/..., Caddy → /pod/...)
 type Service struct {
 	R2       *R2Store
 	AudioDir string
@@ -49,9 +49,11 @@ func (p *Service) feedFile(category string) string {
 	return filepath.Join(p.AudioDir, "feeds", category+".xml")
 }
 
-// FeedURL is the subscription link for a category
+// FeedURL is the subscription link for a category. The public path is the
+// wayfinding alias /holzweg — Caddy rewrites /holzweg/* → the app's /pod/*
+// route, so the app never learns the alias and shoulder-surfers can't read it.
 func (p *Service) FeedURL(category string) string {
-	return fmt.Sprintf("%s/pod/%s/%s.xml", strings.TrimRight(p.BaseURL, "/"), p.Secret, category)
+	return fmt.Sprintf("%s/holzweg/%s/%s.xml", strings.TrimRight(p.BaseURL, "/"), p.Secret, category)
 }
 
 // loadEpisodes reads the category registry (missing file = empty)
