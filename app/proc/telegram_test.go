@@ -411,3 +411,25 @@ func TestParseSummaryLength(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractPlaylistURL(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"bare playlist", "https://www.youtube.com/playlist?list=PLabc123",
+			"https://www.youtube.com/playlist?list=PLabc123"},
+		{"watch with list still yields playlist url", "https://www.youtube.com/watch?v=xxx&list=PLabc123",
+			"https://www.youtube.com/playlist?list=PLabc123"},
+		{"radio mix ignored", "https://www.youtube.com/watch?v=xxx&list=RDabc123", ""},
+		{"no list param", "https://youtu.be/abc", ""},
+		{"list in query with extra params", "https://m.youtube.com/playlist?list=PL_x-9&si=zzz",
+			"https://www.youtube.com/playlist?list=PL_x-9"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, extractPlaylistURL(tt.in))
+		})
+	}
+}

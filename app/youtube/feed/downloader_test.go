@@ -82,3 +82,24 @@ func TestIsCookieError(t *testing.T) {
 		})
 	}
 }
+
+func TestParseFlatPlaylistIDs(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{"empty", "", nil},
+		{"single", "dQw4w9WgXcQ\n", []string{"dQw4w9WgXcQ"}},
+		{"order preserved, deduped", "aaaaaaaaaaa\nbbbbbbbbbbb\naaaaaaaaaaa\n",
+			[]string{"aaaaaaaaaaa", "bbbbbbbbbbb"}},
+		{"stray non-11-char lines skipped", "short\naaaaaaaaaaa\nway_too_long_id_here\n  bbbbbbbbbbb  \n",
+			[]string{"aaaaaaaaaaa", "bbbbbbbbbbb"}},
+		{"surrounding blank lines", "\n\naaaaaaaaaaa\n\n", []string{"aaaaaaaaaaa"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, parseFlatPlaylistIDs(tt.raw))
+		})
+	}
+}

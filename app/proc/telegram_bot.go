@@ -72,6 +72,7 @@ const (
 	maxPageSize            = 50
 	pendingActionTTL       = 10 * time.Minute
 	maxShowEpisodes        = 50 // cap for "add the whole show" batches
+	maxPlaylistItems       = 50 // cap for "expand a youtube playlist" batches
 )
 
 // TelegramBotParams contains all parameters for creating a new TelegramBot
@@ -255,6 +256,14 @@ func (t *TelegramBot) handleText(m *tb.Message) {
 			prompt = fmt.Sprintf("🤔 Что сделать с %d ссылками?", len(videoIDs))
 		}
 		_, _ = t.Bot.Send(m.Chat, prompt, t.buildActionMenu(token, "yt"))
+		return
+	}
+
+	// bare playlist link (no specific video). A watch?v=..&list=.. link already
+	// matched above as a single video and is intentionally left alone
+	// (--no-playlist), so we only reach here for pure playlist URLs.
+	if plURL := extractPlaylistURL(m.Text); plURL != "" {
+		go t.handlePlaylistLink(context.Background(), m, plURL)
 		return
 	}
 
@@ -643,6 +652,54 @@ func (t *TelegramBot) extractAllYouTubeVideoIDs(text string) []string {
 		}
 	}
 	return ids
+}
+
+var playlistIDRe = regexp.MustCompile(`[?&]list=([a-zA-Z0-9_-]+)`)
+
+// extractPlaylistURL returns a canonical playlist URL if text contains a
+// youtube playlist id, else "". Auto-generated radio/mix lists (RD…) are
+// ignored — they are effectively infinite.
+func extractPlaylistURL(text string) string {
+	m := playlistIDRe.FindStringSubmatch(text)
+	if m == nil {
+		return ""
+	}
+	id := m[1]
+	if strings.HasPrefix(id, "RD") {
+		return ""
+	}
+	return "https://www.youtube.com/playlist?list=" + id
+}
+
+// handlePlaylistLink expands a playlist into video IDs and offers the same
+// action menu as a batch of links. Runs off the main handler (yt-dlp can take
+// a couple of seconds), so it owns its own status message.
+func (t *TelegramBot) handlePlaylistLink(ctx context.Context, m *tb.Message, plURL string) {
+	status, _ := t.Bot.Send(m.Chat, "⏳ Читаю плейлист...")
+	ids, err := t.Downloader.ExpandPlaylist(ctx, plURL)
+	if err != nil {
+		if ytfeed.IsCookieError(err.Error()) {
+			_, _ = t.Bot.Edit(status, "❌ YouTube cookies expired. Run update-cookies.sh to fix.")
+			return
+		}
+		log.Printf("[ERROR] failed to expand playlist %s: %v", plURL, err)
+		_, _ = t.Bot.Edit(status, "❌ Не смог прочитать плейлист (пустой, приватный или недоступен)")
+		return
+	}
+
+	total := len(ids)
+	capped := false
+	if len(ids) > maxPlaylistItems {
+		ids = ids[:maxPlaylistItems]
+		capped = true
+	}
+
+	token := t.storePendingAction(&pendingAction{kind: "yt", videoIDs: ids, originalMsg: m})
+	prompt := fmt.Sprintf("🎬 Плейлист: %d видео. Что сделать?", total)
+	if capped {
+		prompt = fmt.Sprintf("🎬 Плейлист: %d видео, обработаю первые %d. Что сделать?", total, maxPlaylistItems)
+	}
+	_, _ = t.Bot.Edit(status, prompt, t.buildActionMenu(token, "yt"))
 }
 
 // processVideoItem contains the core video processing logic without any Telegram UI calls.

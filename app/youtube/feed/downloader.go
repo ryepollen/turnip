@@ -181,6 +181,64 @@ func (d *Downloader) getInfo(ctx context.Context, videoURL string, useCookies bo
 	return &info, nil
 }
 
+// ExpandPlaylist returns the ordered, de-duplicated video IDs of a YouTube
+// playlist without downloading anything. On cookie errors, retries without
+// cookies as a fallback.
+func (d *Downloader) ExpandPlaylist(ctx context.Context, playlistURL string) ([]string, error) {
+	ids, err := d.expandPlaylist(ctx, playlistURL, true)
+	if err != nil && d.cookiesFile != "" && IsCookieError(err.Error()) {
+		log.Printf("[WARN] cookies expired, retrying ExpandPlaylist without cookies")
+		return d.expandPlaylist(ctx, playlistURL, false)
+	}
+	return ids, err
+}
+
+func (d *Downloader) expandPlaylist(ctx context.Context, playlistURL string, useCookies bool) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	// build args by hand: unlike ytdlpArgs we must NOT pass --no-playlist here,
+	// that would collapse the playlist to a single entry
+	var args []string
+	if useCookies && d.cookiesFile != "" {
+		args = append(args, "--cookies", d.cookiesFile)
+	}
+	args = append(args, "--flat-playlist", "--no-download", "--print", "id", playlistURL)
+
+	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = io.MultiWriter(d.logErrWriter, &stderrBuf)
+
+	output, err := cmd.Output()
+	if err != nil {
+		if stderrStr := stderrBuf.String(); stderrStr != "" {
+			return nil, fmt.Errorf("failed to expand playlist: %w\n%s", err, stderrStr)
+		}
+		return nil, fmt.Errorf("failed to expand playlist: %w", err)
+	}
+
+	ids := parseFlatPlaylistIDs(string(output))
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("no videos found in playlist")
+	}
+	return ids, nil
+}
+
+// parseFlatPlaylistIDs turns "yt-dlp --flat-playlist --print id" output (one id
+// per line) into an ordered, de-duplicated list, keeping only 11-char video ids.
+func parseFlatPlaylistIDs(raw string) []string {
+	seen := map[string]bool{}
+	var ids []string
+	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+		id := strings.TrimSpace(line)
+		if len(id) == 11 && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // ytdlpArgsWithoutCookies removes --cookies and its value from args slice
 func ytdlpArgsWithoutCookies(args []string) []string {
 	var result []string
