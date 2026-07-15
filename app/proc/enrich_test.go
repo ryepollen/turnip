@@ -181,6 +181,23 @@ func TestExtractReferencesMergeAndMalformed(t *testing.T) {
 	assert.Equal(t, "Figma", refs[2].Name)
 }
 
+func TestSummaryPromptLength(t *testing.T) {
+	// each preset must yield a distinct shape; normal is the "" default
+	normal := summaryPrompt("")
+	short := summaryPrompt(SummaryShort)
+	long := summaryPrompt(SummaryLong)
+	assert.Contains(t, short, "3-5")
+	assert.Contains(t, long, "по разделам")
+	assert.Contains(t, normal, "5-10")
+	assert.NotEqual(t, normal, short)
+	assert.NotEqual(t, normal, long)
+
+	// unknown length falls back to normal
+	assert.Equal(t, normal, summaryPrompt("bogus"))
+	// combine prompt tracks the same shape
+	assert.Contains(t, combineSummaryPrompt(SummaryShort), "3-5")
+}
+
 func TestSummarizeMapReduce(t *testing.T) {
 	var calls int32
 	ts := mockGroqChat(t, func(userMsg string, jsonMode bool) string {
@@ -195,12 +212,12 @@ func TestSummarizeMapReduce(t *testing.T) {
 	svc := NewEnrichService("test-key", "")
 	svc.BaseURL = ts.URL
 
-	short, err := svc.Summarize(context.Background(), "короткий текст")
+	short, err := svc.Summarize(context.Background(), "короткий текст", "")
 	require.NoError(t, err)
 	assert.Equal(t, "partial 1", short, "single pass for short text")
 
 	long := strings.Repeat(strings.Repeat("x", 1000)+"\n", 60) // 60k chars → map-reduce
-	combined, err := svc.Summarize(context.Background(), long)
+	combined, err := svc.Summarize(context.Background(), long, "")
 	require.NoError(t, err)
 	assert.Equal(t, "combined summary", combined)
 	assert.GreaterOrEqual(t, atomic.LoadInt32(&calls), int32(4), "partials + combine")

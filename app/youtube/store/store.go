@@ -36,8 +36,9 @@ type NotesJobRecord struct {
 	ID          string    `json:"id"` // {unix_nanos padded}-{sourceID}, key order = FIFO
 	URL         string    `json:"url"`
 	SourceID    string    `json:"source_id"`
-	Source      string    `json:"source"` // "youtube" | "article"
-	Level       string    `json:"level"`  // "md" | "notes"
+	Source      string    `json:"source"`                   // "youtube" | "article"
+	Level       string    `json:"level"`                    // "md" | "notes"
+	SumLength   string    `json:"summary_length,omitempty"` // "" (normal) | "short" | "long", L2 only
 	ReuseAudio  string    `json:"reuse_audio,omitempty"`
 	Status      string    `json:"status"`
 	Error       string    `json:"error,omitempty"`

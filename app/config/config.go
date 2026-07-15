@@ -71,6 +71,12 @@ type Conf struct {
 		Concurrency      int    `yaml:"concurrency"`
 		ChunkSeconds     int    `yaml:"chunk_seconds"`
 	} `yaml:"notes"`
+
+	Read struct {
+		Enabled  bool   `yaml:"enabled"`
+		Location string `yaml:"location"` // where read/{id}.md+.html live, default "var/read"
+		Alias    string `yaml:"alias"`    // reserved wayfinding alias for a future reading feed
+	} `yaml:"read"`
 }
 
 // Source defines config section for source
@@ -259,5 +265,10 @@ func (c *Conf) setDefaults() {
 
 	if c.Audio.Location == "" {
 		c.Audio.Location = "var/audio"
+	}
+
+	// set read (reading layer) defaults
+	if c.Read.Location == "" {
+		c.Read.Location = "var/read"
 	}
 }

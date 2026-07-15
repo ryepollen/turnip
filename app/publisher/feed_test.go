@@ -140,7 +140,7 @@ func TestServicePublishAndRegenerate(t *testing.T) {
 	assert.Contains(t, string(feedData), "https://pub.example/a/s3cr3t/books/01%20-%20%D0%93")
 
 	// subscription URL
-	assert.Equal(t, "http://vm:8080/pod/s3cr3t/books.xml", svc.FeedURL("books"))
+	assert.Equal(t, "http://vm:8080/holzweg/s3cr3t/books.xml", svc.FeedURL("books"))
 
 	cats, err := svc.Categories()
 	require.NoError(t, err)

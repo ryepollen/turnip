@@ -56,7 +56,7 @@ func TestWatcherStabilityAndPublish(t *testing.T) {
 	assert.Equal(t, 1, *puts, "stable file published")
 	require.Len(t, notices, 1)
 	assert.Contains(t, notices[0], "Опубликовано")
-	assert.Contains(t, notices[0], "/pod/sec/books.xml")
+	assert.Contains(t, notices[0], "/holzweg/sec/books.xml")
 
 	// scan 3: already in state → no re-publish
 	svc.scanOnce(t.Context(), seen, cooldown, notify)

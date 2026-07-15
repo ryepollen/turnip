@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/ChimeraCoder/anaconda v2.0.0+incompatible
+	github.com/JohannesKaufmann/html-to-markdown v1.6.0
 	github.com/bogem/id3v2/v2 v2.1.4
 	github.com/denisbrodbeck/striphtmltags v6.6.6+incompatible
 	github.com/dustin/go-humanize v1.0.1
@@ -18,6 +19,7 @@ require (
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/jessevdk/go-flags v1.6.1
 	github.com/microcosm-cc/bluemonday v1.0.27
+	github.com/minio/minio-go/v7 v7.2.1
 	github.com/stretchr/testify v1.11.1
 	github.com/tcolgate/mp3 v0.0.0-20170426193717-e79c5a46d300
 	github.com/wujunwei928/edge-tts-go v0.0.0-20250315123430-d4675babeb96
@@ -29,6 +31,7 @@ require (
 
 require (
 	github.com/ChimeraCoder/tokenbucket v0.0.0-20131201223612-c5a927568de7 // indirect
+	github.com/PuerkitoBio/goquery v1.9.2 // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
@@ -52,7 +55,6 @@ require (
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
-	github.com/minio/minio-go/v7 v7.2.1 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect

@@ -154,7 +154,7 @@ func (n *NotesService) processDigest(ctx context.Context, job ytstore.NotesJobRe
 
 	for i, src := range newOnes {
 		n.progress(job, fmt.Sprintf("📚 саммари эпизодов %d/%d", i+1, len(newOnes)))
-		summary, serr := n.Enricher.Summarize(ctx, src.Body)
+		summary, serr := n.Enricher.Summarize(ctx, src.Body, "")
 		if serr != nil {
 			return NotesResult{}, fmt.Errorf("failed to summarize %s: %w", src.SourceID, serr)
 		}

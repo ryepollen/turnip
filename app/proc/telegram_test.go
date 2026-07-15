@@ -388,3 +388,26 @@ func mockTelegramServer(h http.HandlerFunc) *httptest.Server {
 
 	return httptest.NewServer(mux)
 }
+
+func TestParseSummaryLength(t *testing.T) {
+	tests := []struct {
+		name       string
+		in         string
+		wantLength string
+		wantRest   string
+	}{
+		{"no length", "https://youtu.be/abc", "", "https://youtu.be/abc"},
+		{"trailing short", "https://youtu.be/abc short", "short", "https://youtu.be/abc"},
+		{"leading long", "long https://youtu.be/abc", "long", "https://youtu.be/abc"},
+		{"uppercase", "https://youtu.be/abc LONG", "long", "https://youtu.be/abc"},
+		{"between two links", "https://a.com short https://b.com", "short", "https://a.com   https://b.com"},
+		{"word inside token not matched", "https://ex.com/longread", "", "https://ex.com/longread"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotLength, gotRest := parseSummaryLength(tt.in)
+			assert.Equal(t, tt.wantLength, gotLength)
+			assert.Equal(t, tt.wantRest, gotRest)
+		})
+	}
+}

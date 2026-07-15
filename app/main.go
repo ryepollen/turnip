@@ -194,6 +194,7 @@ func main() {
 		botDownloader := ytfeed.NewDownloader(conf.YouTube.DlTemplate, outWr, errWr, conf.YouTube.FilesLocation, conf.YouTube.CookiesFile)
 
 		notesSvc := makeNotesService(conf, ytStore, outWr, errWr)
+		readSvc := makeReadService(conf)
 
 		// feed media offload: new episodes go to R2, /yt/media redirects there
 		var feedMedia *publisher.FeedMedia
@@ -221,6 +222,7 @@ func main() {
 			TTSVoice:      conf.TelegramBot.TTSVoice,
 			CookiesFile:   conf.YouTube.CookiesFile,
 			NotesSvc:      notesSvc,
+			ReadSvc:       readSvc,
 			Media:         mediaOffloader,
 			Pub:           pubSvc,
 		})
@@ -368,6 +370,30 @@ func makeNotesService(conf *config.Conf, ytStore *store.BoltDB, outWr, errWr io.
 		Concurrency: conf.Notes.Concurrency,
 		JobStore:    ytStore,
 	})
+}
+
+// makeReadService builds the reading layer (structural article MD) when
+// enabled. LLM tagging is optional: without a Groq/LLM key the article is
+// still saved, just without tags — the layer needs no transcription at all.
+func makeReadService(conf *config.Conf) *proc.ReadService {
+	if !conf.Read.Enabled {
+		return nil
+	}
+	var enricher *proc.EnrichService
+	llmKey := os.Getenv("LLM_API_KEY")
+	if llmKey == "" {
+		llmKey = os.Getenv("GROQ_API_KEY")
+	}
+	if llmKey != "" {
+		enricher = proc.NewEnrichService(llmKey, conf.Notes.LLMModel)
+		if conf.Notes.LLMBaseURL != "" {
+			enricher.BaseURL = conf.Notes.LLMBaseURL
+		}
+	} else {
+		log.Printf("[INFO] read enabled but no LLM key, articles saved without tags")
+	}
+	log.Printf("[INFO] reading layer enabled: location %s, tags: %v", conf.Read.Location, enricher != nil)
+	return proc.NewReadService(conf.Read.Location, proc.NewArticleExtractor(), enricher)
 }
 
 func makeBoltDB(dbFile string) (*bolt.DB, error) {

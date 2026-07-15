@@ -197,7 +197,7 @@ func (t *TelegramBot) handleMDListActionCallback(c *tb.Callback) {
 			return
 		}
 		statusMsg, _ := t.Bot.Send(c.Message.Chat, "⏳ В очереди...")
-		t.enqueueNotesJob(statusMsg, nil, meta.URL, "notes")
+		t.enqueueNotesJob(statusMsg, nil, meta.URL, "notes", "")
 		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Поставил в очередь"})
 	case "rm":
 		if err := os.Remove(path); err != nil {

@@ -430,7 +430,7 @@ func (n *NotesService) process(ctx context.Context, job ytstore.NotesJobRecord) 
 	}
 
 	n.progress(job, "📚 конспектирую (саммари)")
-	summary, err := n.Enricher.Summarize(ctx, body)
+	summary, err := n.Enricher.Summarize(ctx, body, job.SumLength)
 	if err != nil {
 		return res, fmt.Errorf("failed to summarize: %w", err)
 	}

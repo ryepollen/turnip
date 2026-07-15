@@ -68,7 +68,7 @@ func TestIntegrationEnrich(t *testing.T) {
 	require.NoError(t, err)
 	t.Logf("references: %+v", refs)
 
-	summary, err := svc.Summarize(ctx, cleaned)
+	summary, err := svc.Summarize(ctx, cleaned, "")
 	require.NoError(t, err)
 	t.Logf("summary:\n%s", summary)
 	assert.NotEmpty(t, summary)

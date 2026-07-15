@@ -43,6 +43,7 @@ type TelegramBot struct {
 	SubtitleSvc      *SubtitleService
 	Translator       *Translator
 	NotesSvc         *NotesService      // nil when notes feature is disabled
+	ReadSvc          *ReadService       // nil when the reading layer is disabled
 	Apple            *AppleResolver     // apple podcasts links resolution
 	Media            MediaOffloader     // nil = episodes stay on local disk
 	Pub              *publisher.Service // nil = publishing platform off
@@ -90,6 +91,7 @@ type TelegramBotParams struct {
 	TTSVoice      string
 	CookiesFile   string
 	NotesSvc      *NotesService
+	ReadSvc       *ReadService
 	Media         MediaOffloader
 	Pub           *publisher.Service
 }
@@ -128,6 +130,7 @@ func NewTelegramBot(params TelegramBotParams) (*TelegramBot, error) {
 		CookiesFile:    params.CookiesFile,
 		TTSEnabled:     params.TTSEnabled,
 		NotesSvc:       params.NotesSvc,
+		ReadSvc:        params.ReadSvc,
 		Media:          params.Media,
 		Pub:            params.Pub,
 		pendingActions: make(map[string]*pendingAction),
@@ -165,6 +168,7 @@ func (t *TelegramBot) Run(ctx context.Context) error {
 	t.Bot.Handle("/md", t.handleMD)
 	t.Bot.Handle("/notes", t.handleNotes)
 	t.Bot.Handle("/status", t.handleStatus)
+	t.Bot.Handle("/read", t.handleRead)
 	t.Bot.Handle("/digest", t.handleDigest)
 	t.Bot.Handle("/feeds", t.handleFeeds)
 	t.Bot.Handle("/archive", t.handleArchive)
@@ -276,14 +280,14 @@ func (t *TelegramBot) handleText(m *tb.Message) {
 	}
 
 	articleURL := t.extractURL(m.Text)
-	if articleURL != "" && t.TTSEnabled && IsArticleURL(articleURL) {
+	if articleURL != "" && (t.TTSEnabled || t.ReadSvc != nil) && IsArticleURL(articleURL) {
 		token := t.storePendingAction(&pendingAction{kind: "article", url: articleURL, originalMsg: m})
 		_, _ = t.Bot.Send(m.Chat, "🤔 Что сделать со ссылкой?", t.buildActionMenu(token, "article"))
 		return
 	}
 
 	helpMsg := "No valid URL found. Send a link:\n• YouTube: https://youtube.com/watch?v=VIDEO_ID"
-	if t.TTSEnabled {
+	if t.TTSEnabled || t.ReadSvc != nil {
 		helpMsg += "\n• Article: any web page URL"
 	}
 	_, _ = t.Bot.Send(m.Chat, helpMsg)
@@ -320,8 +324,18 @@ func (t *TelegramBot) buildActionMenu(token, kind string) *tb.ReplyMarkup {
 		btnVOAll := markup.Data("🎙 Перевод всех RU", "act", token+"|vo")
 		rows = append(rows, []tb.InlineButton{*btnAll.Inline(), *btnVOAll.Inline()})
 	case "article":
-		btnTTS := markup.Data("📝 Озвучить", "act", token+"|tts")
-		rows = append(rows, []tb.InlineButton{*btnTTS.Inline()})
+		var top []tb.InlineButton
+		if t.TTSEnabled {
+			btnTTS := markup.Data("📝 Озвучить", "act", token+"|tts")
+			top = append(top, *btnTTS.Inline())
+		}
+		if t.ReadSvc != nil {
+			btnRead := markup.Data("📖 В читалку", "act", token+"|read")
+			top = append(top, *btnRead.Inline())
+		}
+		if len(top) > 0 {
+			rows = append(rows, top)
+		}
 		if t.NotesSvc != nil {
 			btnMD := markup.Data("📄 MD-файл", "act", token+"|md")
 			btnNotes := markup.Data("📓 Notion", "act", token+"|notes")
@@ -459,9 +473,13 @@ func (t *TelegramBot) handleHelp(m *tb.Message) {
 Конспекты:
 /md <url> — транскрипт в MD-файл
 /md — список транскриптов (скачать / в Notion / удалить)
-/notes <url> — транскрипт + саммари + отсылки в Notion
+/notes <url> [short|long] — транскрипт + саммари + отсылки в Notion
 /digest — теги; /digest <тег> — сводный конспект по теме
 /status — очередь задач, R2, лимиты LLM
+
+Читать:
+/read <url> — статья в структурный MD (читалка)
+/read — список статей (скачать / открыть / удалить)
 
 Платформа (книги/курсы):
 /feeds — ленты с URL подписки
@@ -1106,6 +1124,12 @@ func (t *TelegramBot) handleCallback(c *tb.Callback) {
 	case strings.HasPrefix(c.Data, "\fmdl_act|"):
 		c.Data = strings.TrimPrefix(c.Data, "\fmdl_act|")
 		t.handleMDListActionCallback(c)
+	case strings.HasPrefix(c.Data, "\frd_page|"):
+		c.Data = strings.TrimPrefix(c.Data, "\frd_page|")
+		t.handleReadListPageCallback(c)
+	case strings.HasPrefix(c.Data, "\frd_act|"):
+		c.Data = strings.TrimPrefix(c.Data, "\frd_act|")
+		t.handleReadListActionCallback(c)
 	case strings.HasPrefix(c.Data, "\fpub_pg|"):
 		c.Data = strings.TrimPrefix(c.Data, "\fpub_pg|")
 		t.handlePubPageCallback(c)
@@ -1164,7 +1188,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 				if i == 0 {
 					origMsg = pa.originalMsg
 				}
-				t.enqueueNotesJob(st, origMsg, "https://www.youtube.com/watch?v="+videoID, action)
+				t.enqueueNotesJob(st, origMsg, "https://www.youtube.com/watch?v="+videoID, action, "")
 			}
 		case "audio_notes":
 			t.startAudioProcessing(chat, statusMsg, pa)
@@ -1172,7 +1196,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 			// statusMsg and the original message deletion
 			for _, videoID := range pa.videoIDs {
 				st, _ := t.Bot.Send(chat, "⏳ Конспект в очереди...")
-				t.enqueueNotesJob(st, nil, "https://www.youtube.com/watch?v="+videoID, "notes")
+				t.enqueueNotesJob(st, nil, "https://www.youtube.com/watch?v="+videoID, "notes", "")
 			}
 		case "vo":
 			if !IsVotCliAvailable() {
@@ -1214,7 +1238,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 		case "vo":
 			t.enqueueVoiceoverJob(chat, statusMsg, pa.originalMsg, pa.url)
 		case "md", "notes":
-			t.enqueueNotesJob(statusMsg, pa.originalMsg, pa.url, action)
+			t.enqueueNotesJob(statusMsg, pa.originalMsg, pa.url, action, "")
 		default:
 			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
 		}
@@ -1244,8 +1268,11 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 					_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Error: %v", err))
 				}
 			}()
+		case "read":
+			_, _ = t.Bot.Edit(statusMsg, "⏳ Добавляю в читалку...")
+			go t.processRead(context.Background(), chat, statusMsg, pa.originalMsg, pa.url)
 		case "md", "notes":
-			t.enqueueNotesJob(statusMsg, pa.originalMsg, pa.url, action)
+			t.enqueueNotesJob(statusMsg, pa.originalMsg, pa.url, action, "")
 		default:
 			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
 		}
@@ -1360,7 +1387,7 @@ func (t *TelegramBot) handleListEntryActionCallback(c *tb.Callback) {
 			return
 		}
 		statusMsg, _ := t.Bot.Send(c.Message.Chat, "⏳ В очереди...")
-		t.enqueueNotesJob(statusMsg, nil, entry.Link.Href, "notes")
+		t.enqueueNotesJob(statusMsg, nil, entry.Link.Href, "notes", "")
 		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Поставил в очередь"})
 	}
 }
@@ -1715,39 +1742,56 @@ func (t *TelegramBot) handleNotesCommand(m *tb.Message, level string) {
 			t.handleMDList(m) // bare /md shows the stored transcripts
 			return
 		}
-		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Usage: /%s <url> [url2 ...]", level))
+		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Usage: /%s <url> [url2 ...] [short|long]", level))
 		return
 	}
 
+	// pull an optional short|long token; the rest is the link text. length only
+	// affects the /notes summary (L2), /md has no summary so it's ignored there.
+	length, rest := parseSummaryLength(args[1])
+
 	// batch: all YouTube links from the message, each with its own status
 	// message — results arrive as each job finishes
-	if videoIDs := t.extractAllYouTubeVideoIDs(args[1]); len(videoIDs) > 0 {
+	if videoIDs := t.extractAllYouTubeVideoIDs(rest); len(videoIDs) > 0 {
 		for i, videoID := range videoIDs {
 			statusMsg, _ := t.Bot.Send(m.Chat, "⏳ В очереди...")
 			var origMsg *tb.Message
 			if i == 0 {
 				origMsg = m
 			}
-			t.enqueueNotesJob(statusMsg, origMsg, "https://www.youtube.com/watch?v="+videoID, level)
+			t.enqueueNotesJob(statusMsg, origMsg, "https://www.youtube.com/watch?v="+videoID, level, length)
 		}
 		return
 	}
 
-	rawURL := t.extractURL(args[1])
+	rawURL := t.extractURL(rest)
 	if rawURL == "" {
 		_, _ = t.Bot.Send(m.Chat, "❌ Не нашёл ссылку в сообщении")
 		return
 	}
 
 	statusMsg, _ := t.Bot.Send(m.Chat, "⏳ В очереди...")
-	t.enqueueNotesJob(statusMsg, m, rawURL, level)
+	t.enqueueNotesJob(statusMsg, m, rawURL, level, length)
+}
+
+// parseSummaryLength extracts a standalone short|long word (any case) from the
+// text, returning the matched length ("" if none) and the text with that word
+// removed so URL extraction sees only the links.
+func parseSummaryLength(text string) (length, rest string) {
+	re := regexp.MustCompile(`(?i)\b(short|long)\b`)
+	if m := re.FindStringSubmatch(text); m != nil {
+		length = strings.ToLower(m[1])
+		rest = strings.TrimSpace(re.ReplaceAllString(text, " "))
+		return length, rest
+	}
+	return "", text
 }
 
 // enqueueNotesJob persists one link as a notes job. The queue lives in bolt,
 // so the telegram context (chat + status message ids) rides along in the
 // record and survives restarts. Unlike the audio flow, notes never touch the
 // RSS feed bucket.
-func (t *TelegramBot) enqueueNotesJob(statusMsg, originalMsg *tb.Message, rawURL, level string) {
+func (t *TelegramBot) enqueueNotesJob(statusMsg, originalMsg *tb.Message, rawURL, level, length string) {
 	if t.NotesSvc == nil || statusMsg == nil {
 		return
 	}
@@ -1758,6 +1802,7 @@ func (t *TelegramBot) enqueueNotesJob(statusMsg, originalMsg *tb.Message, rawURL
 		SourceID:    sourceID,
 		Source:      source,
 		Level:       level,
+		SumLength:   length,
 		ChatID:      statusMsg.Chat.ID,
 		StatusMsgID: statusMsg.ID,
 	}

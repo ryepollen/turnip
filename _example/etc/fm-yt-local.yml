@@ -44,3 +44,11 @@ notes:
   notion_parent_page: ""           # Notion page ID to create databases under
   concurrency: 1                   # notes worker pool size (max 2, Groq rate limits)
   chunk_seconds: 600               # audio chunk length for transcription
+
+# reading layer: an article URL → structural markdown (headings/lists/links
+# kept) + archived raw HTML, listed via /read. Independent of notes: works
+# without Groq (LLM tags are optional and degrade gracefully).
+read:
+  enabled: true
+  location: ./var/read             # where {id}.md and {id}.html live
+  alias: ""                        # reserved wayfinding alias for a future reading feed

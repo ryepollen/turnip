@@ -125,10 +125,18 @@ func (e *EnrichService) ExtractMeta(ctx context.Context, title, channel, cleaned
 	return &meta, nil
 }
 
-// Summarize produces a summary; texts above summarizeSinglePassLimit go through map-reduce
-func (e *EnrichService) Summarize(ctx context.Context, cleaned string) (string, error) {
+// summary length presets; "" means normal
+const (
+	SummaryShort = "short"
+	SummaryLong  = "long"
+)
+
+// Summarize produces a summary; texts above summarizeSinglePassLimit go through
+// map-reduce. length ("" normal | SummaryShort | SummaryLong) tunes the final
+// summary's depth without changing the intermediate map step.
+func (e *EnrichService) Summarize(ctx context.Context, cleaned, length string) (string, error) {
 	if len(cleaned) <= summarizeSinglePassLimit {
-		return e.chat(ctx, summaryPrompt(), cleaned, false)
+		return e.chat(ctx, summaryPrompt(length), cleaned, false)
 	}
 
 	chunks := packLines(strings.Split(cleaned, "\n"), summarizeSinglePassLimit)
@@ -140,7 +148,7 @@ func (e *EnrichService) Summarize(ctx context.Context, cleaned string) (string, 
 		}
 		partials = append(partials, part)
 	}
-	return e.chat(ctx, combineSummaryPrompt(), strings.Join(partials, "\n\n---\n\n"), false)
+	return e.chat(ctx, combineSummaryPrompt(length), strings.Join(partials, "\n\n---\n\n"), false)
 }
 
 // ExtractReferences extracts mentions chunk by chunk (JSON mode), merging and
@@ -357,19 +365,32 @@ func metaPrompt() string {
 Ответь строго JSON-объектом: {"tags": ["tag-one", "tag-two"], "lang": "ru"}`
 }
 
-func summaryPrompt() string {
-	return `Сделай конспект текста на русском языке: 5-10 предложений общего саммари, затем список ключевых мыслей буллетами.
+// summaryShape describes the target size/structure for a given length preset,
+// shared by the single-pass and map-reduce combine prompts.
+func summaryShape(length string) string {
+	switch length {
+	case SummaryShort:
+		return `сжатый конспект: 3-5 предложений общего саммари, затем 3-5 ключевых мыслей буллетами`
+	case SummaryLong:
+		return `подробный конспект: развёрнутое саммари, структурированное по разделам/подтемам (с подзаголовками), под каждым — ключевые мысли буллетами с важными деталями, примерами и цифрами`
+	default:
+		return `конспект: 5-10 предложений общего саммари, затем список ключевых мыслей буллетами`
+	}
+}
+
+func summaryPrompt(length string) string {
+	return fmt.Sprintf(`Сделай %s на русском языке.
 Если в тексте есть таймкоды [MM:SS] — начинай каждый буллет с таймкода соответствующего блока.
-Пиши по существу, без вводных фраз про "этот текст" и "автор рассказывает".`
+Пиши по существу, без вводных фраз про "этот текст" и "автор рассказывает".`, summaryShape(length))
 }
 
 func partialSummaryPrompt() string {
 	return `Сделай краткий конспект фрагмента текста на русском языке: главные мысли и факты, 5-8 предложений. Без вводных фраз.`
 }
 
-func combineSummaryPrompt() string {
-	return `Ниже конспекты последовательных фрагментов одного выпуска, разделённые "---".
-Собери из них единый конспект на русском: 5-10 предложений общего саммари, затем список ключевых мыслей буллетами. Убери повторы.`
+func combineSummaryPrompt(length string) string {
+	return fmt.Sprintf(`Ниже конспекты последовательных фрагментов одного выпуска, разделённые "---".
+Собери из них единый %s на русском. Убери повторы.`, summaryShape(length))
 }
 
 func selectRelevantPrompt(topic string) string {
