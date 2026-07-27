@@ -433,3 +433,25 @@ func TestExtractPlaylistURL(t *testing.T) {
 		})
 	}
 }
+
+func TestCookieStale(t *testing.T) {
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name     string
+		modTime  time.Time
+		wantWarn bool
+		wantDays int
+	}{
+		{"fresh", now.Add(-24 * time.Hour), false, 0},
+		{"just under threshold", now.Add(-59 * 24 * time.Hour), false, 0},
+		{"exactly at threshold", now.Add(-60 * 24 * time.Hour), true, 60},
+		{"well stale", now.Add(-95 * 24 * time.Hour), true, 95},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			warn, days := cookieStale(tt.modTime, now)
+			assert.Equal(t, tt.wantWarn, warn)
+			assert.Equal(t, tt.wantDays, days)
+		})
+	}
+}

@@ -608,3 +608,58 @@ func TestStore_NotesJobs(t *testing.T) {
 	require.Len(t, jobs, 1)
 	assert.Equal(t, "bbb", jobs[0].SourceID)
 }
+
+func TestStore_PendingActions(t *testing.T) {
+	tmpfile := filepath.Join(os.TempDir(), "test-pending-actions.db")
+	defer os.Remove(tmpfile)
+
+	db, err := bolt.Open(tmpfile, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	require.NoError(t, err)
+
+	s := BoltDB{DB: db}
+
+	// empty bucket: unknown token, no error
+	_, ok, err := s.TakePendingAction("nope")
+	require.NoError(t, err)
+	assert.False(t, ok, "unknown token before any save")
+
+	require.NoError(t, s.SavePendingAction(PendingActionRecord{
+		Token: "tok1", Kind: "yt", VideoIDs: []string{"aaaaaaaaaaa", "bbbbbbbbbbb"},
+		ChatID: 42, OrigMsgID: 7, CreatedAt: time.Now(),
+	}))
+	require.NoError(t, s.SavePendingAction(PendingActionRecord{
+		Token: "tok2", Kind: "article", URL: "https://example.com", ChatID: 42, CreatedAt: time.Now(),
+	}))
+
+	rec, ok, err := s.TakePendingAction("tok1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "yt", rec.Kind)
+	assert.Equal(t, []string{"aaaaaaaaaaa", "bbbbbbbbbbb"}, rec.VideoIDs)
+	assert.EqualValues(t, 42, rec.ChatID)
+	assert.Equal(t, 7, rec.OrigMsgID)
+
+	// take is one-shot: second take of the same token misses (double-tap guard)
+	_, ok, err = s.TakePendingAction("tok1")
+	require.NoError(t, err)
+	assert.False(t, ok, "token consumed on first take")
+
+	// empty token rejected
+	require.Error(t, s.SavePendingAction(PendingActionRecord{Token: ""}))
+
+	// GC removes only records older than cutoff
+	require.NoError(t, s.SavePendingAction(PendingActionRecord{
+		Token: "old", Kind: "yt", CreatedAt: time.Now().Add(-time.Hour),
+	}))
+	n, err := s.DeleteOldPendingActions(time.Now().Add(-30 * time.Minute))
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "only the hour-old record is gc'd")
+
+	_, ok, err = s.TakePendingAction("old")
+	require.NoError(t, err)
+	assert.False(t, ok, "gc'd token gone")
+
+	_, ok, err = s.TakePendingAction("tok2")
+	require.NoError(t, err)
+	assert.True(t, ok, "fresh record survives gc")
+}

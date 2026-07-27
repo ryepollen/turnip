@@ -51,8 +51,8 @@ type TelegramBot struct {
 	r2WarnMu   sync.Mutex
 	lastR2Warn time.Time
 
-	pendingMu      sync.Mutex
-	pendingActions map[string]*pendingAction
+	cookieWarnMu   sync.Mutex
+	lastCookieWarn time.Time
 }
 
 // pendingAction stores the URL(s) extracted from a user message while the user
@@ -73,6 +73,12 @@ const (
 	pendingActionTTL       = 10 * time.Minute
 	maxShowEpisodes        = 50 // cap for "add the whole show" batches
 	maxPlaylistItems       = 50 // cap for "expand a youtube playlist" batches
+
+	// cookieStaleAge: YouTube cookies live ~2–3 months; nudge the owner once the
+	// file (mtime = last refresh) crosses this, before private/age-gated video
+	// downloads start failing. cookieRewarnInterval throttles repeat nudges.
+	cookieStaleAge       = 60 * 24 * time.Hour
+	cookieRewarnInterval = 7 * 24 * time.Hour
 )
 
 // TelegramBotParams contains all parameters for creating a new TelegramBot
@@ -118,23 +124,22 @@ func NewTelegramBot(params TelegramBotParams) (*TelegramBot, error) {
 	}
 
 	tb := &TelegramBot{
-		Bot:            bot,
-		AllowedUserID:  params.AllowedUserID,
-		FeedName:       params.FeedName,
-		FeedTitle:      params.FeedTitle,
-		MaxItems:       params.MaxItems,
-		Downloader:     params.Downloader,
-		Store:          params.Store,
-		DurationSvc:    params.DurationSvc,
-		FilesLocation:  params.FilesLocation,
-		BaseURL:        params.BaseURL,
-		CookiesFile:    params.CookiesFile,
-		TTSEnabled:     params.TTSEnabled,
-		NotesSvc:       params.NotesSvc,
-		ReadSvc:        params.ReadSvc,
-		Media:          params.Media,
-		Pub:            params.Pub,
-		pendingActions: make(map[string]*pendingAction),
+		Bot:           bot,
+		AllowedUserID: params.AllowedUserID,
+		FeedName:      params.FeedName,
+		FeedTitle:     params.FeedTitle,
+		MaxItems:      params.MaxItems,
+		Downloader:    params.Downloader,
+		Store:         params.Store,
+		DurationSvc:   params.DurationSvc,
+		FilesLocation: params.FilesLocation,
+		BaseURL:       params.BaseURL,
+		CookiesFile:   params.CookiesFile,
+		TTSEnabled:    params.TTSEnabled,
+		NotesSvc:      params.NotesSvc,
+		ReadSvc:       params.ReadSvc,
+		Media:         params.Media,
+		Pub:           params.Pub,
 	}
 
 	// Initialize TTS if enabled
@@ -188,11 +193,70 @@ func (t *TelegramBot) Run(ctx context.Context) error {
 	// Periodically drop stale pending menu entries
 	go t.gcPendingActions(ctx)
 
+	// Proactively nudge before YouTube cookies expire
+	go t.watchCookies(ctx)
+
 	// Wait for context cancellation
 	<-ctx.Done()
 	t.Bot.Stop()
 	log.Printf("[INFO] telegram bot stopped")
 	return ctx.Err()
+}
+
+// watchCookies periodically checks the cookies file age and nudges the owner
+// before YouTube cookies expire. First check runs a minute after startup (so a
+// deploy on an already-stale file re-nudges once), then daily.
+func (t *TelegramBot) watchCookies(ctx context.Context) {
+	if t.CookiesFile == "" {
+		return
+	}
+	timer := time.NewTimer(time.Minute)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			t.checkCookiesOnce()
+			timer.Reset(24 * time.Hour)
+		}
+	}
+}
+
+func (t *TelegramBot) checkCookiesOnce() {
+	fi, err := os.Stat(t.CookiesFile)
+	if err != nil {
+		// missing/unreadable: the reactive fallback already handles this on real
+		// downloads, no proactive nag (would spam on fresh dev machines)
+		log.Printf("[DEBUG] cookies check skipped: %v", err)
+		return
+	}
+	warn, days := cookieStale(fi.ModTime(), time.Now())
+	if !warn {
+		return
+	}
+	t.cookieWarnMu.Lock()
+	throttled := !t.lastCookieWarn.IsZero() && time.Since(t.lastCookieWarn) < cookieRewarnInterval
+	if !throttled {
+		t.lastCookieWarn = time.Now()
+	}
+	t.cookieWarnMu.Unlock()
+	if throttled {
+		return
+	}
+	t.NotifyOwner(fmt.Sprintf("🍪 YouTube-cookies обновлялись %d дн. назад — живут 2–3 мес, "+
+		"скоро протухнут. Пришли свежий cookies.txt (или запусти update-cookies.sh), "+
+		"чтобы приватные/18+ видео не отваливались.", days))
+}
+
+// cookieStale reports whether the cookies file (modTime = last refresh) is old
+// enough to warn about. Pure, for unit tests.
+func cookieStale(modTime, now time.Time) (warn bool, days int) {
+	age := now.Sub(modTime)
+	if age >= cookieStaleAge {
+		return true, int(age.Hours() / 24)
+	}
+	return false, 0
 }
 
 func (t *TelegramBot) gcPendingActions(ctx context.Context) {
@@ -203,36 +267,63 @@ func (t *TelegramBot) gcPendingActions(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			t.pendingMu.Lock()
-			for k, pa := range t.pendingActions {
-				if now.Sub(pa.created) > pendingActionTTL {
-					delete(t.pendingActions, k)
-				}
+			if n, err := t.Store.DeleteOldPendingActions(now.Add(-pendingActionTTL)); err != nil {
+				log.Printf("[WARN] gc pending actions: %v", err)
+			} else if n > 0 {
+				log.Printf("[DEBUG] gc'd %d stale pending actions", n)
 			}
-			t.pendingMu.Unlock()
 		}
 	}
 }
 
+// storePendingAction persists a menu choice in bolt (survives deploys) keyed by
+// a short random token, and returns the token for the callback data.
 func (t *TelegramBot) storePendingAction(pa *pendingAction) string {
-	pa.created = time.Now()
 	var buf [6]byte
 	_, _ = rand.Read(buf[:])
 	token := hex.EncodeToString(buf[:])
-	t.pendingMu.Lock()
-	t.pendingActions[token] = pa
-	t.pendingMu.Unlock()
+
+	rec := ytstore.PendingActionRecord{
+		Token:     token,
+		Kind:      pa.kind,
+		VideoIDs:  pa.videoIDs,
+		URL:       pa.url,
+		CreatedAt: time.Now().UTC(),
+	}
+	if pa.originalMsg != nil {
+		rec.OrigMsgID = pa.originalMsg.ID
+		if pa.originalMsg.Chat != nil {
+			rec.ChatID = pa.originalMsg.Chat.ID
+		}
+	}
+	if err := t.Store.SavePendingAction(rec); err != nil {
+		log.Printf("[WARN] save pending action %s: %v", token, err)
+	}
 	return token
 }
 
+// takePendingAction loads and deletes the action for token (atomic in bolt), and
+// rebuilds the original telebot message from the stored chat/message ids —
+// deleteMessageAfterDelay only needs ID+Chat. Returns nil when the token is
+// unknown (expired, already used, or a rare pre-persistence leftover).
 func (t *TelegramBot) takePendingAction(token string) *pendingAction {
-	t.pendingMu.Lock()
-	defer t.pendingMu.Unlock()
-	pa, ok := t.pendingActions[token]
+	rec, ok, err := t.Store.TakePendingAction(token)
+	if err != nil {
+		log.Printf("[WARN] take pending action %s: %v", token, err)
+		return nil
+	}
 	if !ok {
 		return nil
 	}
-	delete(t.pendingActions, token)
+	pa := &pendingAction{
+		kind:     rec.Kind,
+		videoIDs: rec.VideoIDs,
+		url:      rec.URL,
+		created:  rec.CreatedAt,
+	}
+	if rec.OrigMsgID != 0 {
+		pa.originalMsg = &tb.Message{ID: rec.OrigMsgID, Chat: &tb.Chat{ID: rec.ChatID}}
+	}
 	return pa
 }
 
@@ -471,8 +562,8 @@ func (t *TelegramBot) handleHelp(m *tb.Message) {
 
 	help := fmt.Sprintf(`🎧 Turnip Bot
 
-Пришли ссылку (YouTube, эпизод или подкаст Apple Podcasts, статья) —
-появится меню: слушать, перевод RU, MD-файл, Notion.
+Пришли ссылку (YouTube-видео или плейлист, эпизод/подкаст Apple
+Podcasts, статья) — появится меню: слушать, перевод RU, MD-файл, Notion.
 
 Слушать:
 /list — что сейчас в ленте
@@ -499,7 +590,7 @@ func (t *TelegramBot) handleHelp(m *tb.Message) {
 /help — эта справка
 Файл cookies.txt вложением — обновить YouTube-куки
 
-RSS: %s/yt/rss/%s`, t.BaseURL, t.FeedName)
+RSS: %s/irrweg`, t.BaseURL)
 
 	_, _ = t.Bot.Send(m.Chat, help)
 }
@@ -1216,7 +1307,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 	pa := t.takePendingAction(token)
 	if pa == nil {
 		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Просрочено"})
-		_, _ = t.Bot.Edit(c.Message, "⏱ Меню просрочено или уже использовано")
+		_, _ = t.Bot.Edit(c.Message, "⏱ Меню просрочено или уже использовано — пришли ссылку заново")
 		return
 	}
 

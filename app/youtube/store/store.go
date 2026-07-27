@@ -20,6 +20,7 @@ var processedBkt = []byte("processed")
 var historyLogBkt = []byte("history_log")
 var notionMetaBkt = []byte("notion_meta")
 var notesJobsBkt = []byte("notes_jobs")
+var pendingActionsBkt = []byte("pending_actions")
 
 // notes job statuses
 const (
@@ -679,6 +680,96 @@ func (s *BoltDB) DeleteOldNotesJobs(cutoff time.Time) (count int, err error) {
 		for _, k := range old {
 			if derr := bucket.Delete(k); derr != nil {
 				return fmt.Errorf("delete notes job %s: %w", string(k), derr)
+			}
+			count++
+		}
+		return nil
+	})
+	return count, err
+}
+
+// PendingActionRecord is one inline-menu choice waiting for the user to tap a
+// button. It lives in bolt (not in memory) so the menu survives container
+// restarts — Watchtower recreates the container on every deploy, which used to
+// drop every open menu ("⏱ Меню просрочено"). Only primitives are stored: the
+// telebot message is reconstructed from ChatID/OrigMsgID on take.
+type PendingActionRecord struct {
+	Token     string    `json:"token"`
+	Kind      string    `json:"kind"` // "yt" | "article" | "podcast" | "podcast_show"
+	VideoIDs  []string  `json:"video_ids,omitempty"`
+	URL       string    `json:"url,omitempty"`
+	ChatID    int64     `json:"chat_id"`
+	OrigMsgID int       `json:"orig_msg_id,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// SavePendingAction stores a pending inline-menu action keyed by its token
+func (s *BoltDB) SavePendingAction(rec PendingActionRecord) error {
+	if rec.Token == "" {
+		return errors.New("pending action token is empty")
+	}
+	return s.Update(func(tx *bolt.Tx) error {
+		bucket, e := tx.CreateBucketIfNotExists(pendingActionsBkt)
+		if e != nil {
+			return fmt.Errorf("create bucket %s: %w", pendingActionsBkt, e)
+		}
+		jdata, jerr := json.Marshal(&rec)
+		if jerr != nil {
+			return fmt.Errorf("marshal pending action %s: %w", rec.Token, jerr)
+		}
+		return bucket.Put([]byte(rec.Token), jdata)
+	})
+}
+
+// TakePendingAction atomically loads and deletes the action for token in one
+// transaction, so a double-tap can't run the same action twice. ok is false
+// when the token is unknown (expired, already used, or lost on an old deploy).
+func (s *BoltDB) TakePendingAction(token string) (rec PendingActionRecord, ok bool, err error) {
+	err = s.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(pendingActionsBkt)
+		if bucket == nil {
+			return nil
+		}
+		v := bucket.Get([]byte(token))
+		if v == nil {
+			return nil
+		}
+		if jerr := json.Unmarshal(v, &rec); jerr != nil {
+			// broken record: drop it so it can't wedge the button forever
+			return bucket.Delete([]byte(token))
+		}
+		ok = true
+		return bucket.Delete([]byte(token))
+	})
+	return rec, ok, err
+}
+
+// DeleteOldPendingActions removes menus older than cutoff (the user never tapped
+// a button), keeping the bucket from growing forever
+func (s *BoltDB) DeleteOldPendingActions(cutoff time.Time) (count int, err error) {
+	err = s.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(pendingActionsBkt)
+		if bucket == nil {
+			return nil
+		}
+		// collect first: deleting while iterating a cursor skips entries
+		var old [][]byte
+		if ferr := bucket.ForEach(func(k, v []byte) error {
+			var item PendingActionRecord
+			if jerr := json.Unmarshal(v, &item); jerr != nil {
+				old = append(old, append([]byte(nil), k...)) // broken record: prune it too
+				return nil                                   //nolint:nilerr
+			}
+			if !item.CreatedAt.After(cutoff) {
+				old = append(old, append([]byte(nil), k...))
+			}
+			return nil
+		}); ferr != nil {
+			return ferr
+		}
+		for _, k := range old {
+			if derr := bucket.Delete(k); derr != nil {
+				return fmt.Errorf("delete pending action %s: %w", string(k), derr)
 			}
 			count++
 		}
