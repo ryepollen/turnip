@@ -103,3 +103,32 @@ func TestParseFlatPlaylistIDs(t *testing.T) {
 		})
 	}
 }
+
+func TestParseFlatPlaylistItems(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want []PlaylistItem
+	}{
+		{"empty", "", nil},
+		{"id and title", "dQw4w9WgXcQ\tNever Gonna Give You Up\n",
+			[]PlaylistItem{{ID: "dQw4w9WgXcQ", Title: "Never Gonna Give You Up"}}},
+		{"title with spaces and tabs kept as one", "aaaaaaaaaaa\tHello   World\n",
+			[]PlaylistItem{{ID: "aaaaaaaaaaa", Title: "Hello   World"}}},
+		{"missing title falls back to id", "aaaaaaaaaaa\t\nbbbbbbbbbbb\tNA\n",
+			[]PlaylistItem{{ID: "aaaaaaaaaaa", Title: "aaaaaaaaaaa"}, {ID: "bbbbbbbbbbb", Title: "bbbbbbbbbbb"}}},
+		{"no tab at all (id only)", "aaaaaaaaaaa\n",
+			[]PlaylistItem{{ID: "aaaaaaaaaaa", Title: "aaaaaaaaaaa"}}},
+		{"dedup keeps first title", "aaaaaaaaaaa\tFirst\naaaaaaaaaaa\tSecond\n",
+			[]PlaylistItem{{ID: "aaaaaaaaaaa", Title: "First"}}},
+		{"bad id lines skipped", "short\tx\naaaaaaaaaaa\tOK\n",
+			[]PlaylistItem{{ID: "aaaaaaaaaaa", Title: "OK"}}},
+		{"CRLF trimmed", "aaaaaaaaaaa\tTitle\r\n",
+			[]PlaylistItem{{ID: "aaaaaaaaaaa", Title: "Title"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, parseFlatPlaylistItems(tt.raw))
+		})
+	}
+}

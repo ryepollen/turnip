@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 const (
@@ -23,10 +24,28 @@ const (
 // notionBootstrapKey is the notion_meta key holding created database IDs
 const notionBootstrapKey = "bootstrap"
 
-// referenceTypes are the allowed values of the "Тип" select
+// currentNotionSchema is bumped when the database layout changes. Schema 1 was
+// three databases (Эпизоды/Отсылки/Объекты); schema 2 collapses them into a
+// single «Glossn» database with references living inside each episode page.
+// A stored bootstrap at a lower schema is migrated in place (the episodes db is
+// renamed to Glossn) so existing episode pages are preserved.
+const currentNotionSchema = 2
+
+// glossnDBTitle is the display name of the single episodes database
+const glossnDBTitle = "Glossn"
+
+// referenceTypes are the reference categories, in the order they are grouped in
+// the «📎 Отсылки» toggle. Also the allowed values normalizeRefType maps to.
 var referenceTypes = []string{
 	"книга", "фильм", "сериал", "человек", "инструмент",
 	"статья", "компания", "подкаст", "концепция", "другое",
+}
+
+// refTypeEmoji is the bullet-group marker per reference type
+var refTypeEmoji = map[string]string{
+	"книга": "📚", "фильм": "🎬", "сериал": "📺", "человек": "👤",
+	"инструмент": "🛠", "статья": "📄", "компания": "🏢",
+	"подкаст": "🎙", "концепция": "💡", "другое": "📌",
 }
 
 // NotionMetaStore persists opaque Notion metadata (implemented by ytstore.BoltDB)
@@ -36,13 +55,14 @@ type NotionMetaStore interface {
 	DeleteNotionMetaPrefix(prefix string) (int, error)
 }
 
-// notionDBIDs is the persisted bootstrap state
+// notionDBIDs is the persisted bootstrap state. Since schema 2 there is a single
+// episodes database (Episodes, titled «Glossn»); the legacy References/Objects
+// ids are gone. Schema records the layout version for in-place migration.
 type notionDBIDs struct {
 	ParentPage string    `json:"parent_page_id"`
-	Episodes   string    `json:"episodes_db"`
-	References string    `json:"references_db"`
-	Objects    string    `json:"objects_db"`
+	Episodes   string    `json:"episodes_db"`          // the «Glossn» database
 	Digests    string    `json:"digests_db,omitempty"` // created lazily on first /digest
+	Schema     int       `json:"schema,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 }
 
@@ -65,8 +85,9 @@ type EpisodeInput struct {
 	Refs        []Reference
 }
 
-// NotionWriter publishes episode notes into three Notion databases
-// (Эпизоды, Отсылки, Объекты) created under a configured parent page.
+// NotionWriter publishes episode notes into a single Notion database («Glossn»)
+// created under a configured parent page. References live inside each episode
+// page under a «📎 Отсылки» toggle, not as separate database rows.
 type NotionWriter struct {
 	Token      string
 	ParentPage string
@@ -92,13 +113,16 @@ func NewNotionWriter(token, parentPage string, meta NotionMetaStore) *NotionWrit
 	}
 }
 
-// EnsureDatabases creates the three databases under ParentPage if they do not
-// exist yet. Idempotent: IDs are persisted via Meta and revalidated on load.
+// EnsureDatabases creates the single «Glossn» database under ParentPage if it
+// does not exist yet. Idempotent: the id is persisted via Meta and revalidated
+// on load. A stored bootstrap from an older schema is migrated in place (the
+// legacy «Эпизоды» database is renamed to «Glossn») so existing episode pages
+// survive the redesign.
 func (w *NotionWriter) EnsureDatabases(ctx context.Context) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.ids.Episodes != "" && w.ids.ParentPage == w.ParentPage {
+	if w.ids.Episodes != "" && w.ids.ParentPage == w.ParentPage && w.ids.Schema >= currentNotionSchema {
 		return nil
 	}
 
@@ -106,13 +130,18 @@ func (w *NotionWriter) EnsureDatabases(ctx context.Context) error {
 		var stored notionDBIDs
 		if jerr := json.Unmarshal(data, &stored); jerr == nil &&
 			stored.ParentPage == w.ParentPage && w.databaseExists(ctx, stored.Episodes) {
+			if stored.Schema < currentNotionSchema {
+				if merr := w.migrateToGlossn(ctx, &stored); merr != nil {
+					return merr
+				}
+			}
 			w.ids = stored
 			return nil
 		}
 		log.Printf("[INFO] stored notion databases stale or parent changed, re-bootstrapping")
 	}
 
-	log.Printf("[INFO] creating notion databases under page %s", w.ParentPage)
+	log.Printf("[INFO] creating notion database %q under page %s", glossnDBTitle, w.ParentPage)
 	// old page mappings point into deleted/stale databases — drop them so
 	// repeated /notes re-creates pages instead of returning dead links
 	if n, derr := w.Meta.DeleteNotionMetaPrefix("page:"); derr != nil {
@@ -120,9 +149,9 @@ func (w *NotionWriter) EnsureDatabases(ctx context.Context) error {
 	} else if n > 0 {
 		log.Printf("[INFO] dropped %d stale notion page mappings", n)
 	}
-	ids := notionDBIDs{ParentPage: w.ParentPage, CreatedAt: time.Now()}
+	ids := notionDBIDs{ParentPage: w.ParentPage, Schema: currentNotionSchema, CreatedAt: time.Now()}
 
-	episodesID, err := w.createDatabase(ctx, "Эпизоды", map[string]any{
+	episodesID, err := w.createDatabase(ctx, glossnDBTitle, map[string]any{
 		"Name":               map[string]any{"title": map[string]any{}},
 		"URL":                map[string]any{"url": map[string]any{}},
 		"Канал":              map[string]any{"rich_text": map[string]any{}},
@@ -131,35 +160,9 @@ func (w *NotionWriter) EnsureDatabases(ctx context.Context) error {
 		"Теги":               map[string]any{"multi_select": map[string]any{}},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create episodes db: %w", err)
+		return fmt.Errorf("failed to create %s db: %w", glossnDBTitle, err)
 	}
 	ids.Episodes = episodesID
-
-	objectsID, err := w.createDatabase(ctx, "Объекты", map[string]any{
-		"Название": map[string]any{"title": map[string]any{}},
-		"Тип":      map[string]any{"select": selectOptions()},
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create objects db: %w", err)
-	}
-	ids.Objects = objectsID
-
-	// two-way relations: the episode page shows its «Отсылки» right in the
-	// properties, the object page shows all its mentions
-	referencesID, err := w.createDatabase(ctx, "Отсылки", map[string]any{
-		"Название": map[string]any{"title": map[string]any{}},
-		"Тип":      map[string]any{"select": selectOptions()},
-		"Таймкод":  map[string]any{"rich_text": map[string]any{}},
-		"Цитата":   map[string]any{"rich_text": map[string]any{}},
-		"Эпизод": map[string]any{"relation": map[string]any{"database_id": episodesID,
-			"dual_property": map[string]any{"synced_property_name": "Отсылки"}}},
-		"Объект": map[string]any{"relation": map[string]any{"database_id": objectsID,
-			"dual_property": map[string]any{"synced_property_name": "Упоминания"}}},
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create references db: %w", err)
-	}
-	ids.References = referencesID
 
 	data, err := json.Marshal(ids)
 	if err != nil {
@@ -169,6 +172,28 @@ func (w *NotionWriter) EnsureDatabases(ctx context.Context) error {
 		return fmt.Errorf("failed to persist db ids: %w", err)
 	}
 	w.ids = ids
+	return nil
+}
+
+// migrateToGlossn upgrades a pre-schema-2 bootstrap: the legacy «Эпизоды»
+// database is renamed to «Glossn» in place (episode pages are untouched), the
+// orphaned References/Objects databases are simply left behind, and the schema
+// version is bumped and persisted. Must be called with w.mu held.
+func (w *NotionWriter) migrateToGlossn(ctx context.Context, ids *notionDBIDs) error {
+	log.Printf("[INFO] migrating notion schema %d→%d: renaming episodes db to %q",
+		ids.Schema, currentNotionSchema, glossnDBTitle)
+	if err := w.doNotion(ctx, "PATCH", "/databases/"+ids.Episodes,
+		map[string]any{"title": richText(glossnDBTitle)}, nil); err != nil {
+		return fmt.Errorf("failed to rename episodes db to %s: %w", glossnDBTitle, err)
+	}
+	ids.Schema = currentNotionSchema
+	data, err := json.Marshal(ids)
+	if err != nil {
+		return fmt.Errorf("failed to marshal migrated db ids: %w", err)
+	}
+	if err := w.Meta.SaveNotionMeta(notionBootstrapKey, data); err != nil {
+		return fmt.Errorf("failed to persist migrated db ids: %w", err)
+	}
 	return nil
 }
 
@@ -205,8 +230,10 @@ func (w *NotionWriter) WriteEpisode(ctx context.Context, sourceID string, in Epi
 		return pageURL, true, fmt.Errorf("failed to append transcript: %w", err)
 	}
 
-	if err := w.writeReferences(ctx, pageID, in.Refs); err != nil {
-		return pageURL, true, fmt.Errorf("failed to write references: %w", err)
+	if len(in.Refs) > 0 {
+		if err := w.writeReferencesInPage(ctx, pageID, in.Refs); err != nil {
+			return pageURL, true, fmt.Errorf("failed to write references: %w", err)
+		}
 	}
 
 	if data, jerr := json.Marshal(notionPageRef{ID: pageID, URL: pageURL}); jerr == nil {
@@ -338,8 +365,9 @@ func (w *NotionWriter) WriteDigest(ctx context.Context, tag, title, body string,
 	return resp.URL, nil
 }
 
-// createEpisodePage creates the page with properties, summary and an empty
-// transcript toggle (filled separately due to the 100-blocks-per-request limit)
+// createEpisodePage creates the page with properties, summary and two empty
+// toggles — «📎 Отсылки (N)» (only when refs exist) and «Транскрипт» — that are
+// filled separately due to the 100-blocks-per-request limit.
 func (w *NotionWriter) createEpisodePage(ctx context.Context, in EpisodeInput) (pageID, pageURL string, err error) {
 	props := map[string]any{
 		"Name": map[string]any{"title": richText(in.Title)},
@@ -359,16 +387,20 @@ func (w *NotionWriter) createEpisodePage(ctx context.Context, in EpisodeInput) (
 	}
 
 	children := []map[string]any{heading2Block("Саммари")}
+	// leave room for the heading plus up to two toggles when capping the summary
+	reserve := 2
+	if len(in.Refs) > 0 {
+		reserve = 3
+	}
 	summaryBlocks := mdToParagraphBlocks(in.Summary)
-	if len(summaryBlocks) > notionBlockBatch-2 { // heading + toggle must fit too
-		summaryBlocks = summaryBlocks[:notionBlockBatch-2]
+	if len(summaryBlocks) > notionBlockBatch-reserve {
+		summaryBlocks = summaryBlocks[:notionBlockBatch-reserve]
 	}
 	children = append(children, summaryBlocks...)
-	children = append(children, map[string]any{
-		"object": "block",
-		"type":   "toggle",
-		"toggle": map[string]any{"rich_text": richText("Транскрипт")},
-	})
+	if len(in.Refs) > 0 {
+		children = append(children, toggleBlock(refsToggleLabel(len(in.Refs))))
+	}
+	children = append(children, toggleBlock("Транскрипт"))
 
 	var resp struct {
 		ID  string `json:"id"`
@@ -385,28 +417,22 @@ func (w *NotionWriter) createEpisodePage(ctx context.Context, in EpisodeInput) (
 	return resp.ID, resp.URL, nil
 }
 
-// appendTranscript finds the transcript toggle on the page and fills it in
+// refsToggleLabel is the display label of the references toggle, distinct enough
+// (prefix «📎 Отсылки») for findToggleID to tell it from the transcript toggle.
+func refsToggleLabel(n int) string {
+	return fmt.Sprintf("📎 Отсылки (%d)", n)
+}
+
+// appendTranscript finds the «Транскрипт» toggle on the page and fills it in
 // batches of at most 100 blocks
 func (w *NotionWriter) appendTranscript(ctx context.Context, pageID, transcript string) error {
-	var list struct {
-		Results []struct {
-			ID   string `json:"id"`
-			Type string `json:"type"`
-		} `json:"results"`
-	}
-	if err := w.doNotion(ctx, "GET", "/blocks/"+pageID+"/children?page_size=100", nil, &list); err != nil {
-		return fmt.Errorf("failed to list page children: %w", err)
-	}
-	toggleID := ""
-	for _, b := range list.Results {
-		if b.Type == "toggle" {
-			toggleID = b.ID // the page has a single toggle, created by us
-		}
+	toggleID, err := w.findToggleID(ctx, pageID, "Транскрипт")
+	if err != nil {
+		return err
 	}
 	if toggleID == "" {
 		return fmt.Errorf("transcript toggle not found on page %s", pageID)
 	}
-
 	for _, batch := range batchBlocks(mdToParagraphBlocks(transcript), notionBlockBatch) {
 		if err := w.doNotion(ctx, "PATCH", "/blocks/"+toggleID+"/children",
 			map[string]any{"children": batch}, nil); err != nil {
@@ -416,79 +442,110 @@ func (w *NotionWriter) appendTranscript(ctx context.Context, pageID, transcript 
 	return nil
 }
 
-// writeReferences creates deduplicated object pages and one reference row per mention
-func (w *NotionWriter) writeReferences(ctx context.Context, episodePageID string, refs []Reference) error {
-	objectCache := map[string]string{} // lowercased name -> page id
-	for _, ref := range refs {
-		name := strings.TrimSpace(ref.Name)
-		if name == "" {
-			continue
-		}
-		objID, err := w.ensureObject(ctx, name, normalizeRefType(ref.Type), objectCache)
-		if err != nil {
-			return fmt.Errorf("failed to ensure object %q: %w", name, err)
-		}
-
-		props := map[string]any{
-			"Название": map[string]any{"title": richText(name)},
-			"Тип":      map[string]any{"select": map[string]any{"name": normalizeRefType(ref.Type)}},
-			"Эпизод":   map[string]any{"relation": []map[string]any{{"id": episodePageID}}},
-			"Объект":   map[string]any{"relation": []map[string]any{{"id": objID}}},
-		}
-		if ref.Timecode != "" {
-			props["Таймкод"] = map[string]any{"rich_text": richText(ref.Timecode)}
-		}
-		if ref.Quote != "" {
-			props["Цитата"] = map[string]any{"rich_text": richText(ref.Quote)}
-		}
-		if err := w.doNotion(ctx, "POST", "/pages", map[string]any{
-			"parent":     map[string]any{"database_id": w.ids.References},
-			"properties": props,
-		}, nil); err != nil {
-			return fmt.Errorf("failed to create reference %q: %w", name, err)
+// writeReferencesInPage fills the «📎 Отсылки» toggle with references grouped by
+// type (a heading per group + one bullet per mention). No separate database rows
+// or object dedup — everything lives inside the episode page.
+func (w *NotionWriter) writeReferencesInPage(ctx context.Context, pageID string, refs []Reference) error {
+	toggleID, err := w.findToggleID(ctx, pageID, "📎 Отсылки")
+	if err != nil {
+		return err
+	}
+	if toggleID == "" {
+		return fmt.Errorf("references toggle not found on page %s", pageID)
+	}
+	blocks := referenceBlocks(refs)
+	if len(blocks) == 0 {
+		return nil
+	}
+	for _, batch := range batchBlocks(blocks, notionBlockBatch) {
+		if err := w.doNotion(ctx, "PATCH", "/blocks/"+toggleID+"/children",
+			map[string]any{"children": batch}, nil); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// ensureObject returns the page id for an entity, creating it if absent
-func (w *NotionWriter) ensureObject(ctx context.Context, name, refType string, cache map[string]string) (string, error) {
-	key := strings.ToLower(name)
-	if id, ok := cache[key]; ok {
-		return id, nil
-	}
-
-	var query struct {
+// findToggleID returns the id of the first toggle on the page whose label starts
+// with prefix (the page carries at most two toggles: «📎 Отсылки» and «Транскрипт»)
+func (w *NotionWriter) findToggleID(ctx context.Context, pageID, prefix string) (string, error) {
+	var list struct {
 		Results []struct {
-			ID string `json:"id"`
+			ID     string `json:"id"`
+			Type   string `json:"type"`
+			Toggle struct {
+				RichText []struct {
+					PlainText string `json:"plain_text"`
+				} `json:"rich_text"`
+			} `json:"toggle"`
 		} `json:"results"`
 	}
-	err := w.doNotion(ctx, "POST", "/databases/"+w.ids.Objects+"/query", map[string]any{
-		"filter": map[string]any{"property": "Название", "title": map[string]any{"equals": name}},
-	}, &query)
-	if err != nil {
-		return "", err
+	if err := w.doNotion(ctx, "GET", "/blocks/"+pageID+"/children?page_size=100", nil, &list); err != nil {
+		return "", fmt.Errorf("failed to list page children: %w", err)
 	}
-	if len(query.Results) > 0 {
-		cache[key] = query.Results[0].ID
-		return query.Results[0].ID, nil
+	for _, b := range list.Results {
+		if b.Type != "toggle" {
+			continue
+		}
+		var label strings.Builder
+		for _, rt := range b.Toggle.RichText {
+			label.WriteString(rt.PlainText)
+		}
+		if strings.HasPrefix(label.String(), prefix) {
+			return b.ID, nil
+		}
 	}
+	return "", nil
+}
 
-	var created struct {
-		ID string `json:"id"`
+// referenceBlocks renders references as grouped bullets: for each non-empty type
+// (in referenceTypes order) a heading «{emoji} {Тип}» followed by one bullet per
+// mention, formatted «Name» [timecode] — «quote».
+func referenceBlocks(refs []Reference) []map[string]any {
+	byType := map[string][]Reference{}
+	for _, ref := range refs {
+		if strings.TrimSpace(ref.Name) == "" {
+			continue
+		}
+		t := normalizeRefType(ref.Type)
+		byType[t] = append(byType[t], ref)
 	}
-	err = w.doNotion(ctx, "POST", "/pages", map[string]any{
-		"parent": map[string]any{"database_id": w.ids.Objects},
-		"properties": map[string]any{
-			"Название": map[string]any{"title": richText(name)},
-			"Тип":      map[string]any{"select": map[string]any{"name": refType}},
-		},
-	}, &created)
-	if err != nil {
-		return "", err
+	var blocks []map[string]any
+	for _, t := range referenceTypes {
+		group := byType[t]
+		if len(group) == 0 {
+			continue
+		}
+		emoji := refTypeEmoji[t]
+		blocks = append(blocks, heading3Block(strings.TrimSpace(emoji+" "+capitalizeFirst(t))))
+		for _, ref := range group {
+			blocks = append(blocks, bulletBlock(formatReference(ref)))
+		}
 	}
-	cache[key] = created.ID
-	return created.ID, nil
+	return blocks
+}
+
+// capitalizeFirst upper-cases the first rune (byte-slicing would split cyrillic)
+func capitalizeFirst(s string) string {
+	r := []rune(s)
+	if len(r) == 0 {
+		return s
+	}
+	return string(unicode.ToUpper(r[0])) + string(r[1:])
+}
+
+// formatReference renders one mention: «Name» [timecode] — «quote» (parts absent
+// when empty)
+func formatReference(ref Reference) string {
+	var b strings.Builder
+	b.WriteString("«" + strings.TrimSpace(ref.Name) + "»")
+	if tc := strings.TrimSpace(ref.Timecode); tc != "" {
+		b.WriteString(" [" + tc + "]")
+	}
+	if q := strings.TrimSpace(ref.Quote); q != "" {
+		b.WriteString(" — «" + q + "»")
+	}
+	return b.String()
 }
 
 // createDatabase creates one database under the parent page and returns its id
@@ -614,15 +671,6 @@ func normalizeRefType(t string) string {
 	return "другое"
 }
 
-// selectOptions builds the select schema shared by Отсылки and Объекты
-func selectOptions() map[string]any {
-	opts := make([]map[string]any, 0, len(referenceTypes))
-	for _, t := range referenceTypes {
-		opts = append(opts, map[string]any{"name": t})
-	}
-	return map[string]any{"options": opts}
-}
-
 // richText builds a rich_text array, splitting content at the 2000-char limit
 func richText(s string) []map[string]any {
 	parts := splitRichText(s, notionRichTextLimit)
@@ -727,6 +775,31 @@ func heading2Block(text string) map[string]any {
 		"object":    "block",
 		"type":      "heading_2",
 		"heading_2": map[string]any{"rich_text": richText(text)},
+	}
+}
+
+func heading3Block(text string) map[string]any {
+	return map[string]any{
+		"object":    "block",
+		"type":      "heading_3",
+		"heading_3": map[string]any{"rich_text": richText(text)},
+	}
+}
+
+func bulletBlock(text string) map[string]any {
+	return map[string]any{
+		"object":             "block",
+		"type":               "bulleted_list_item",
+		"bulleted_list_item": map[string]any{"rich_text": richText(text)},
+	}
+}
+
+// toggleBlock builds an empty toggle with the given label
+func toggleBlock(label string) map[string]any {
+	return map[string]any{
+		"object": "block",
+		"type":   "toggle",
+		"toggle": map[string]any{"rich_text": richText(label)},
 	}
 }
 

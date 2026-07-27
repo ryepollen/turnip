@@ -61,6 +61,7 @@ type TelegramBot struct {
 type pendingAction struct {
 	kind        string // "yt" or "article"
 	videoIDs    []string
+	titles      []string // parallel to videoIDs, only set for triage lists
 	url         string
 	originalMsg *tb.Message
 	created     time.Time
@@ -287,6 +288,7 @@ func (t *TelegramBot) storePendingAction(pa *pendingAction) string {
 		Token:     token,
 		Kind:      pa.kind,
 		VideoIDs:  pa.videoIDs,
+		Titles:    pa.titles,
 		URL:       pa.url,
 		CreatedAt: time.Now().UTC(),
 	}
@@ -338,13 +340,22 @@ func (t *TelegramBot) handleText(m *tb.Message) {
 	}
 
 	videoIDs := t.extractAllYouTubeVideoIDs(m.Text)
+	if len(videoIDs) > triageThreshold {
+		// many pasted links → triage list (no titles here, rows show the id)
+		token := t.storePendingAction(&pendingAction{kind: "triage", videoIDs: videoIDs, originalMsg: m})
+		if rec, ok := t.loadTriage(token); ok {
+			msg, markup := t.buildTriageMessage(rec, 0)
+			_, _ = t.Bot.Send(m.Chat, msg, markup)
+			return
+		}
+	}
 	if len(videoIDs) > 0 {
 		token := t.storePendingAction(&pendingAction{kind: "yt", videoIDs: videoIDs, originalMsg: m})
 		var prompt string
 		if len(videoIDs) == 1 {
-			prompt = "🤔 Что сделать со ссылкой?"
+			prompt = "🤔 What to do?"
 		} else {
-			prompt = fmt.Sprintf("🤔 Что сделать с %d ссылками?", len(videoIDs))
+			prompt = fmt.Sprintf("🤔 What to do with %d links?", len(videoIDs))
 		}
 		_, _ = t.Bot.Send(m.Chat, prompt, t.buildActionMenu(token, "yt"))
 		return
@@ -367,22 +378,22 @@ func (t *TelegramBot) handleText(m *tb.Message) {
 				return
 			}
 			token := t.storePendingAction(&pendingAction{kind: "podcast_show", url: podcastURL, originalMsg: m})
-			prompt := fmt.Sprintf("🎙 «%s» — %d эпизодов в каталоге. Добавить все в ленту?", show, len(eps))
+			prompt := fmt.Sprintf("🎙 «%s» — %d episodes in catalog. Add all to feed?", show, len(eps))
 			if len(eps) > maxShowEpisodes {
-				prompt = fmt.Sprintf("🎙 «%s» — %d эпизодов в каталоге. Добавлю последние %d. Продолжить?", show, len(eps), maxShowEpisodes)
+				prompt = fmt.Sprintf("🎙 «%s» — %d episodes in catalog. I'll add the latest %d. Continue?", show, len(eps), maxShowEpisodes)
 			}
 			_, _ = t.Bot.Send(m.Chat, prompt, t.buildActionMenu(token, "podcast_show"))
 			return
 		}
 		token := t.storePendingAction(&pendingAction{kind: "podcast", url: podcastURL, originalMsg: m})
-		_, _ = t.Bot.Send(m.Chat, "🤔 Что сделать с эпизодом?", t.buildActionMenu(token, "podcast"))
+		_, _ = t.Bot.Send(m.Chat, "🤔 What to do with this episode?", t.buildActionMenu(token, "podcast"))
 		return
 	}
 
 	articleURL := t.extractURL(m.Text)
 	if articleURL != "" && (t.TTSEnabled || t.ReadSvc != nil) && IsArticleURL(articleURL) {
 		token := t.storePendingAction(&pendingAction{kind: "article", url: articleURL, originalMsg: m})
-		_, _ = t.Bot.Send(m.Chat, "🤔 Что сделать со ссылкой?", t.buildActionMenu(token, "article"))
+		_, _ = t.Bot.Send(m.Chat, "🤔 What to do?", t.buildActionMenu(token, "article"))
 		return
 	}
 
@@ -399,50 +410,50 @@ func (t *TelegramBot) buildActionMenu(token, kind string) *tb.ReplyMarkup {
 	var rows [][]tb.InlineButton
 	switch kind {
 	case "yt":
-		btnAudio := markup.Data("🎵 Аудио", "act", token+"|audio")
-		btnVO := markup.Data("🎙 Перевод RU", "act", token+"|vo")
+		btnAudio := markup.Data("🎵 Audio", "act", token+"|audio")
+		btnVO := markup.Data("🎙 RU dub", "act", token+"|vo")
 		rows = append(rows, []tb.InlineButton{*btnAudio.Inline(), *btnVO.Inline()})
 		if t.NotesSvc != nil {
-			btnMD := markup.Data("📄 MD-файл", "act", token+"|md")
+			btnMD := markup.Data("📄 MD file", "act", token+"|md")
 			btnNotes := markup.Data("📓 Notion", "act", token+"|notes")
-			btnBoth := markup.Data("🎵+📓 Аудио и Notion", "act", token+"|audio_notes")
+			btnBoth := markup.Data("🎵+📓 Audio + Notion", "act", token+"|audio_notes")
 			rows = append(rows,
 				[]tb.InlineButton{*btnMD.Inline(), *btnNotes.Inline()},
 				[]tb.InlineButton{*btnBoth.Inline()})
 		}
 	case "podcast":
-		btnAudio := markup.Data("🎧 В ленту", "act", token+"|audio")
-		btnVO := markup.Data("🎙 Перевод RU", "act", token+"|vo")
+		btnAudio := markup.Data("🎧 To feed", "act", token+"|audio")
+		btnVO := markup.Data("🎙 RU dub", "act", token+"|vo")
 		rows = append(rows, []tb.InlineButton{*btnAudio.Inline(), *btnVO.Inline()})
 		if t.NotesSvc != nil {
-			btnMD := markup.Data("📄 MD-файл", "act", token+"|md")
+			btnMD := markup.Data("📄 MD file", "act", token+"|md")
 			btnNotes := markup.Data("📓 Notion", "act", token+"|notes")
 			rows = append(rows, []tb.InlineButton{*btnMD.Inline(), *btnNotes.Inline()})
 		}
 	case "podcast_show":
-		btnAll := markup.Data("🎧 Добавить все", "act", token+"|audio")
-		btnVOAll := markup.Data("🎙 Перевод всех RU", "act", token+"|vo")
+		btnAll := markup.Data("🎧 Add all", "act", token+"|audio")
+		btnVOAll := markup.Data("🎙 RU dub all", "act", token+"|vo")
 		rows = append(rows, []tb.InlineButton{*btnAll.Inline(), *btnVOAll.Inline()})
 	case "article":
 		var top []tb.InlineButton
 		if t.TTSEnabled {
-			btnTTS := markup.Data("📝 Озвучить", "act", token+"|tts")
+			btnTTS := markup.Data("🔊 Listen", "act", token+"|tts")
 			top = append(top, *btnTTS.Inline())
 		}
 		if t.ReadSvc != nil {
-			btnRead := markup.Data("📖 В читалку", "act", token+"|read")
+			btnRead := markup.Data("📖 Reader", "act", token+"|read")
 			top = append(top, *btnRead.Inline())
 		}
 		if len(top) > 0 {
 			rows = append(rows, top)
 		}
 		if t.NotesSvc != nil {
-			btnMD := markup.Data("📄 MD-файл", "act", token+"|md")
+			btnMD := markup.Data("📄 MD file", "act", token+"|md")
 			btnNotes := markup.Data("📓 Notion", "act", token+"|notes")
 			rows = append(rows, []tb.InlineButton{*btnMD.Inline(), *btnNotes.Inline()})
 		}
 	}
-	btnCancel := markup.Data("🚫 Отмена", "act", token+"|cancel")
+	btnCancel := markup.Data("🚫 Cancel", "act", token+"|cancel")
 	rows = append(rows, []tb.InlineButton{*btnCancel.Inline()})
 	markup.InlineKeyboard = rows
 	return markup
@@ -767,7 +778,7 @@ func extractPlaylistURL(text string) string {
 // a couple of seconds), so it owns its own status message.
 func (t *TelegramBot) handlePlaylistLink(ctx context.Context, m *tb.Message, plURL string) {
 	status, _ := t.Bot.Send(m.Chat, "⏳ Читаю плейлист...")
-	ids, err := t.Downloader.ExpandPlaylist(ctx, plURL)
+	items, err := t.Downloader.ExpandPlaylistItems(ctx, plURL)
 	if err != nil {
 		if ytfeed.IsCookieError(err.Error()) {
 			_, _ = t.Bot.Edit(status, "❌ YouTube cookies expired. Run update-cookies.sh to fix.")
@@ -778,11 +789,33 @@ func (t *TelegramBot) handlePlaylistLink(ctx context.Context, m *tb.Message, plU
 		return
 	}
 
-	total := len(ids)
+	total := len(items)
 	capped := false
-	if len(ids) > maxPlaylistItems {
-		ids = ids[:maxPlaylistItems]
+	if len(items) > maxPlaylistItems {
+		items = items[:maxPlaylistItems]
 		capped = true
+	}
+	ids := make([]string, len(items))
+	titles := make([]string, len(items))
+	for i, it := range items {
+		ids[i], titles[i] = it.ID, it.Title
+	}
+
+	// big playlists open a triage list (pick per video) instead of the blunt
+	// 4-button menu, which would fan one action out to every video at once
+	if len(ids) > triageThreshold {
+		token := t.storePendingAction(&pendingAction{kind: "triage", videoIDs: ids, titles: titles, originalMsg: m})
+		rec, ok := t.loadTriage(token)
+		if !ok {
+			_, _ = t.Bot.Edit(status, "❌ Не смог открыть список")
+			return
+		}
+		msg, markup := t.buildTriageMessage(rec, 0)
+		if capped {
+			msg = fmt.Sprintf("🎬 Плейлист: %d видео, показываю первые %d.\n\n", total, maxPlaylistItems) + msg
+		}
+		_, _ = t.Bot.Edit(status, msg, markup)
+		return
 	}
 
 	token := t.storePendingAction(&pendingAction{kind: "yt", videoIDs: ids, originalMsg: m})
@@ -1284,6 +1317,12 @@ func (t *TelegramBot) handleCallback(c *tb.Callback) {
 	case strings.HasPrefix(c.Data, "\fpub_act|"):
 		c.Data = strings.TrimPrefix(c.Data, "\fpub_act|")
 		t.handlePubActionCallback(c)
+	case strings.HasPrefix(c.Data, "\ftri_page|"):
+		c.Data = strings.TrimPrefix(c.Data, "\ftri_page|")
+		t.handleTriagePageCallback(c)
+	case strings.HasPrefix(c.Data, "\ftri_act|"):
+		c.Data = strings.TrimPrefix(c.Data, "\ftri_act|")
+		t.handleTriageActionCallback(c)
 	default:
 		log.Printf("[WARN] unknown callback: %q", c.Data)
 		_ = t.Bot.Respond(c)
@@ -1306,15 +1345,15 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 
 	pa := t.takePendingAction(token)
 	if pa == nil {
-		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Просрочено"})
-		_, _ = t.Bot.Edit(c.Message, "⏱ Меню просрочено или уже использовано — пришли ссылку заново")
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Expired"})
+		_, _ = t.Bot.Edit(c.Message, "⏱ Menu expired or already used — send the link again")
 		return
 	}
 
 	_ = t.Bot.Respond(c)
 
 	if action == "cancel" {
-		_, _ = t.Bot.Edit(c.Message, "🚫 Отменено")
+		_, _ = t.Bot.Edit(c.Message, "🚫 Cancelled")
 		return
 	}
 
@@ -1352,7 +1391,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 				return
 			}
 			if len(pa.videoIDs) == 1 {
-				_, _ = t.Bot.Edit(statusMsg, "⏳ Получаю озвучку...")
+				_, _ = t.Bot.Edit(statusMsg, "⏳ Getting dub…")
 				videoID := pa.videoIDs[0]
 				videoURL := "https://www.youtube.com/watch?v=" + videoID
 				go func() {
@@ -1367,7 +1406,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 					}
 				}()
 			} else {
-				_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⏳ Озвучиваю %d видео...", len(pa.videoIDs)))
+				_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⏳ Dubbing %d videos…", len(pa.videoIDs)))
 				go t.processVoiceoverBatch(context.Background(), chat, statusMsg, pa.originalMsg, pa.videoIDs)
 			}
 		default:
@@ -1376,7 +1415,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 	case "podcast":
 		switch action {
 		case "audio":
-			_, _ = t.Bot.Edit(statusMsg, "⏳ Скачиваю эпизод...")
+			_, _ = t.Bot.Edit(statusMsg, "⏳ Downloading episode…")
 			go func() {
 				if err := t.processPodcastAudio(context.Background(), chat, statusMsg, pa.originalMsg, pa.url); err != nil {
 					log.Printf("[ERROR] failed to process podcast %s: %v", pa.url, err)
@@ -1393,15 +1432,15 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 	case "podcast_show":
 		switch action {
 		case "audio":
-			_, _ = t.Bot.Edit(statusMsg, "⏳ Добавляю эпизоды...")
+			_, _ = t.Bot.Edit(statusMsg, "⏳ Adding episodes…")
 			go t.processPodcastShowBatch(context.Background(), chat, statusMsg, pa.originalMsg, pa.url)
 		case "vo":
 			if t.NotesSvc == nil {
-				_, _ = t.Bot.Edit(statusMsg, "⏳ Перевожу эпизоды...")
+				_, _ = t.Bot.Edit(statusMsg, "⏳ Dubbing episodes…")
 				go t.processPodcastShowVoiceoverBatch(context.Background(), chat, statusMsg, pa.originalMsg, pa.url)
 				return
 			}
-			_, _ = t.Bot.Edit(statusMsg, "⏳ Ставлю переводы в очередь...")
+			_, _ = t.Bot.Edit(statusMsg, "⏳ Queueing dubs…")
 			go t.enqueueShowVoiceovers(context.Background(), chat, statusMsg, pa.originalMsg, pa.url)
 		default:
 			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
@@ -1409,7 +1448,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 	case "article":
 		switch action {
 		case "tts":
-			_, _ = t.Bot.Edit(statusMsg, "⏳ Озвучиваю статью...")
+			_, _ = t.Bot.Edit(statusMsg, "⏳ Voicing article…")
 			go func() {
 				if err := t.processArticle(context.Background(), chat, statusMsg, pa.originalMsg, pa.url); err != nil {
 					log.Printf("[ERROR] failed to process article %s: %v", pa.url, err)
@@ -1417,7 +1456,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 				}
 			}()
 		case "read":
-			_, _ = t.Bot.Edit(statusMsg, "⏳ Добавляю в читалку...")
+			_, _ = t.Bot.Edit(statusMsg, "⏳ Adding to reader…")
 			go t.processRead(context.Background(), chat, statusMsg, pa.originalMsg, pa.url)
 		case "md", "notes":
 			t.enqueueNotesJob(statusMsg, pa.originalMsg, pa.url, action, "")
@@ -1943,6 +1982,11 @@ func (t *TelegramBot) enqueueNotesJob(statusMsg, originalMsg *tb.Message, rawURL
 	if t.NotesSvc == nil || statusMsg == nil {
 		return
 	}
+
+	// acknowledge the tap instantly: the worker only edits this message once it
+	// claims the job (queue poll + GetInfo take a few seconds), so without this
+	// the menu just hangs and the tap feels unregistered
+	_, _ = t.Bot.Edit(statusMsg, "⏳ Queued…")
 
 	sourceID, source := noteSourceID(rawURL)
 	rec := ytstore.NotesJobRecord{

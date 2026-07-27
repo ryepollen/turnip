@@ -14,6 +14,51 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestFormatReference(t *testing.T) {
+	tests := []struct {
+		name string
+		ref  Reference
+		want string
+	}{
+		{"full", Reference{Name: "Дюна", Timecode: "01:23", Quote: "цитата"}, "«Дюна» [01:23] — «цитата»"},
+		{"no quote", Reference{Name: "Дюна", Timecode: "01:23"}, "«Дюна» [01:23]"},
+		{"name only", Reference{Name: "Дюна"}, "«Дюна»"},
+		{"trims spaces", Reference{Name: "  Дюна  ", Quote: " q "}, "«Дюна» — «q»"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, formatReference(tt.ref))
+		})
+	}
+}
+
+func TestReferenceBlocks(t *testing.T) {
+	refs := []Reference{
+		{Type: "человек", Name: "Кант"},
+		{Type: "книга", Name: "Дюна", Timecode: "01:00"},
+		{Type: "weird", Name: "Штука"},    // → другое
+		{Type: "книга", Name: "Гиперион"}, // second книга, same group
+		{Type: "человек", Name: ""},       // empty name dropped
+	}
+	blocks := referenceBlocks(refs)
+
+	// groups are emitted in referenceTypes order: книга (heading + 2 bullets),
+	// человек (heading + 1 bullet), другое (heading + 1 bullet)
+	types := make([]string, 0, len(blocks))
+	for _, b := range blocks {
+		types = append(types, b["type"].(string))
+	}
+	assert.Equal(t, []string{
+		"heading_3", "bulleted_list_item", "bulleted_list_item",
+		"heading_3", "bulleted_list_item",
+		"heading_3", "bulleted_list_item",
+	}, types)
+
+	// first heading is the книга group
+	h := blocks[0]["heading_3"].(map[string]any)["rich_text"].([]map[string]any)
+	assert.Equal(t, "📚 Книга", h[0]["text"].(map[string]any)["content"])
+}
+
 func TestSplitRichText(t *testing.T) {
 	tests := []struct {
 		name string
@@ -107,14 +152,14 @@ func (m *memMetaStore) DeleteNotionMetaPrefix(prefix string) (int, error) {
 
 // newNotionMock builds a Notion API mock covering bootstrap and episode writing
 func newNotionMock(t *testing.T) (*httptest.Server, *struct {
-	dbCreates, pageCreates, patches int
-	maxBatch                        int
-	mu                              sync.Mutex
+	dbCreates, pageCreates, patches, dbRenames int
+	maxBatch                                   int
+	mu                                         sync.Mutex
 }) {
 	state := &struct {
-		dbCreates, pageCreates, patches int
-		maxBatch                        int
-		mu                              sync.Mutex
+		dbCreates, pageCreates, patches, dbRenames int
+		maxBatch                                   int
+		mu                                         sync.Mutex
 	}{}
 
 	mux := http.NewServeMux()
@@ -129,6 +174,14 @@ func newNotionMock(t *testing.T) (*httptest.Server, *struct {
 	mux.HandleFunc("/databases/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/query") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
+			return
+		}
+		// PATCH /databases/{id} — the schema migration renames the db to Glossn
+		if r.Method == http.MethodPatch {
+			state.mu.Lock()
+			state.dbRenames++
+			state.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "db-1"})
 			return
 		}
 		// databaseExists check for stale ids
@@ -165,9 +218,13 @@ func newNotionMock(t *testing.T) (*httptest.Server, *struct {
 	})
 	mux.HandleFunc("/blocks/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
-			_ = json.NewEncoder(w).Encode(map[string]any{"results": []map[string]string{
+			// the page carries two labelled toggles now; findToggleID matches by label
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []map[string]any{
 				{"id": "block-heading", "type": "heading_2"},
-				{"id": "block-toggle", "type": "toggle"},
+				{"id": "toggle-refs", "type": "toggle", "toggle": map[string]any{
+					"rich_text": []map[string]any{{"plain_text": "📎 Отсылки (2)"}}}},
+				{"id": "toggle-transcript", "type": "toggle", "toggle": map[string]any{
+					"rich_text": []map[string]any{{"plain_text": "Транскрипт"}}}},
 			}})
 			return
 		}
@@ -202,13 +259,40 @@ func TestNotionEnsureDatabasesBootstrapAndReuse(t *testing.T) {
 	w := newTestNotionWriter(ts.URL, store)
 
 	require.NoError(t, w.EnsureDatabases(context.Background()))
-	assert.Equal(t, 3, state.dbCreates, "three databases created")
+	assert.Equal(t, 1, state.dbCreates, "single Glossn database created")
 	assert.NotEmpty(t, store.data[notionBootstrapKey])
 
 	// a fresh writer with the same store must reuse persisted ids
 	w2 := newTestNotionWriter(ts.URL, store)
 	require.NoError(t, w2.EnsureDatabases(context.Background()))
-	assert.Equal(t, 3, state.dbCreates, "no re-creation on second run")
+	assert.Equal(t, 1, state.dbCreates, "no re-creation on second run")
+	assert.Equal(t, 0, state.dbRenames, "current-schema bootstrap needs no migration")
+}
+
+func TestNotionEnsureDatabasesMigratesLegacyToGlossn(t *testing.T) {
+	ts, state := newNotionMock(t)
+	defer ts.Close()
+
+	store := newMemMetaStore()
+	// a schema-1 bootstrap (three databases, no Schema field) must be migrated
+	// in place: the episodes db is renamed, no new db is created
+	legacy, _ := json.Marshal(map[string]any{
+		"parent_page_id": "parent-page-id",
+		"episodes_db":    "legacy-episodes",
+		"references_db":  "legacy-refs",
+		"objects_db":     "legacy-objects",
+	})
+	require.NoError(t, store.SaveNotionMeta(notionBootstrapKey, legacy))
+
+	w := newTestNotionWriter(ts.URL, store)
+	require.NoError(t, w.EnsureDatabases(context.Background()))
+	assert.Equal(t, 0, state.dbCreates, "legacy db reused, not recreated")
+	assert.Equal(t, 1, state.dbRenames, "episodes db renamed to Glossn")
+
+	// the persisted blob is now at the current schema — no second migration
+	w2 := newTestNotionWriter(ts.URL, store)
+	require.NoError(t, w2.EnsureDatabases(context.Background()))
+	assert.Equal(t, 1, state.dbRenames, "migration runs once")
 }
 
 func TestNotionEnsureDatabasesRebootstrapOnStaleID(t *testing.T) {
@@ -221,7 +305,7 @@ func TestNotionEnsureDatabasesRebootstrapOnStaleID(t *testing.T) {
 
 	w := newTestNotionWriter(ts.URL, store)
 	require.NoError(t, w.EnsureDatabases(context.Background()))
-	assert.Equal(t, 3, state.dbCreates, "stale id triggers re-bootstrap")
+	assert.Equal(t, 1, state.dbCreates, "stale id triggers re-bootstrap")
 }
 
 func TestNotionEnsureDatabasesRebootstrapOnTrashedDB(t *testing.T) {
@@ -236,7 +320,7 @@ func TestNotionEnsureDatabasesRebootstrapOnTrashedDB(t *testing.T) {
 
 	w := newTestNotionWriter(ts.URL, store)
 	require.NoError(t, w.EnsureDatabases(context.Background()))
-	assert.Equal(t, 3, state.dbCreates, "archived db triggers re-bootstrap")
+	assert.Equal(t, 1, state.dbCreates, "archived db triggers re-bootstrap")
 
 	stale, err := store.LoadNotionMeta("page:old-episode")
 	require.NoError(t, err)
@@ -271,15 +355,15 @@ func TestNotionWriteEpisode(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, created)
 	assert.Equal(t, "https://notion.so/page-1", url)
-	assert.GreaterOrEqual(t, state.patches, 3, "250 paragraphs need 3+ batches")
+	assert.GreaterOrEqual(t, state.patches, 3, "250 paragraphs (transcript) + refs need 3+ batches")
 	assert.LessOrEqual(t, state.maxBatch, 100)
-	// pages: 1 episode + 1 object (deduped) + 2 references
-	assert.Equal(t, 4, state.pageCreates)
+	// references now live inside the episode page, so only the episode page is created
+	assert.Equal(t, 1, state.pageCreates)
 
 	// second write of the same sourceID short-circuits to the existing page
 	url2, created2, err := w.WriteEpisode(context.Background(), "vid-1", in)
 	require.NoError(t, err)
 	assert.False(t, created2)
 	assert.Equal(t, url, url2)
-	assert.Equal(t, 4, state.pageCreates, "no new pages")
+	assert.Equal(t, 1, state.pageCreates, "no new pages")
 }

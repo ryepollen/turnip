@@ -663,3 +663,63 @@ func TestStore_PendingActions(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ok, "fresh record survives gc")
 }
+
+func TestStore_TriageActions(t *testing.T) {
+	tmpfile := filepath.Join(os.TempDir(), "test-triage-actions.db")
+	defer os.Remove(tmpfile)
+
+	db, err := bolt.Open(tmpfile, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	require.NoError(t, err)
+	s := BoltDB{DB: db}
+
+	// GetPendingAction on empty bucket: miss, no error
+	_, ok, err := s.GetPendingAction("nope")
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	created := time.Now().Add(-time.Minute).UTC()
+	require.NoError(t, s.SavePendingAction(PendingActionRecord{
+		Token: "tri1", Kind: "triage",
+		VideoIDs: []string{"aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc"},
+		Titles:   []string{"One", "Two", "Three"},
+		ChatID:   9, CreatedAt: created,
+	}))
+
+	// non-destructive read returns titles and survives repeated reads
+	rec, ok, err := s.GetPendingAction("tri1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "triage", rec.Kind)
+	assert.Equal(t, []string{"One", "Two", "Three"}, rec.Titles)
+	assert.Empty(t, rec.Done)
+	_, ok, _ = s.GetPendingAction("tri1")
+	assert.True(t, ok, "GetPendingAction does not consume the record")
+
+	// mark one done: refreshes CreatedAt and records the id
+	now := time.Now().UTC()
+	rec, ok, err = s.TouchPendingActionDone("tri1", "bbbbbbbbbbb", now)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, []string{"bbbbbbbbbbb"}, rec.Done)
+	assert.True(t, rec.CreatedAt.After(created), "touch refreshes TTL clock")
+
+	// marking the same id again is idempotent (no duplicate in Done)
+	rec, _, err = s.TouchPendingActionDone("tri1", "bbbbbbbbbbb", now)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"bbbbbbbbbbb"}, rec.Done)
+
+	// a second id appends
+	rec, _, err = s.TouchPendingActionDone("tri1", "aaaaaaaaaaa", now)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"bbbbbbbbbbb", "aaaaaaaaaaa"}, rec.Done)
+
+	// touch with empty videoID only refreshes the clock, leaves Done intact
+	rec, _, err = s.TouchPendingActionDone("tri1", "", now.Add(time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"bbbbbbbbbbb", "aaaaaaaaaaa"}, rec.Done)
+
+	// touch on unknown token: miss, no error
+	_, ok, err = s.TouchPendingActionDone("ghost", "x", now)
+	require.NoError(t, err)
+	assert.False(t, ok)
+}

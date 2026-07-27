@@ -695,8 +695,10 @@ func (s *BoltDB) DeleteOldNotesJobs(cutoff time.Time) (count int, err error) {
 // telebot message is reconstructed from ChatID/OrigMsgID on take.
 type PendingActionRecord struct {
 	Token     string    `json:"token"`
-	Kind      string    `json:"kind"` // "yt" | "article" | "podcast" | "podcast_show"
+	Kind      string    `json:"kind"` // "yt" | "article" | "podcast" | "podcast_show" | "triage"
 	VideoIDs  []string  `json:"video_ids,omitempty"`
+	Titles    []string  `json:"titles,omitempty"` // parallel to VideoIDs, for the triage list
+	Done      []string  `json:"done,omitempty"`   // video IDs already queued from a triage list
 	URL       string    `json:"url,omitempty"`
 	ChatID    int64     `json:"chat_id"`
 	OrigMsgID int       `json:"orig_msg_id,omitempty"`
@@ -740,6 +742,69 @@ func (s *BoltDB) TakePendingAction(token string) (rec PendingActionRecord, ok bo
 		}
 		ok = true
 		return bucket.Delete([]byte(token))
+	})
+	return rec, ok, err
+}
+
+// GetPendingAction loads the action for token without deleting it. Unlike
+// TakePendingAction (one-shot menus), a triage list must survive many taps and
+// page flips, so it is read non-destructively. ok is false when the token is
+// unknown or the record is broken.
+func (s *BoltDB) GetPendingAction(token string) (rec PendingActionRecord, ok bool, err error) {
+	err = s.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(pendingActionsBkt)
+		if bucket == nil {
+			return nil
+		}
+		v := bucket.Get([]byte(token))
+		if v == nil {
+			return nil
+		}
+		if jerr := json.Unmarshal(v, &rec); jerr != nil {
+			return nil // broken record: treated as a miss
+		}
+		ok = true
+		return nil
+	})
+	return rec, ok, err
+}
+
+// TouchPendingActionDone refreshes the record's CreatedAt (so an actively used
+// triage list is not garbage-collected mid-session) and, when videoID is
+// non-empty, records it in Done so the same item is not queued twice. It is a
+// no-op miss when the token is unknown. Returns the updated record.
+func (s *BoltDB) TouchPendingActionDone(token, videoID string, now time.Time) (rec PendingActionRecord, ok bool, err error) {
+	err = s.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(pendingActionsBkt)
+		if bucket == nil {
+			return nil
+		}
+		v := bucket.Get([]byte(token))
+		if v == nil {
+			return nil
+		}
+		if jerr := json.Unmarshal(v, &rec); jerr != nil {
+			return nil
+		}
+		ok = true
+		rec.CreatedAt = now
+		if videoID != "" {
+			seen := false
+			for _, d := range rec.Done {
+				if d == videoID {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				rec.Done = append(rec.Done, videoID)
+			}
+		}
+		jdata, jerr := json.Marshal(&rec)
+		if jerr != nil {
+			return fmt.Errorf("marshal pending action %s: %w", token, jerr)
+		}
+		return bucket.Put([]byte(token), jdata)
 	})
 	return rec, ok, err
 }
