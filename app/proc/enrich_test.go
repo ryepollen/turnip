@@ -43,22 +43,50 @@ func TestFormatTimecode(t *testing.T) {
 }
 
 func TestPackLines(t *testing.T) {
+	// budgets are in estimated tokens; Cyrillic runes ≈ 1 token each, so the
+	// 5-rune lines below cost 5 tokens apiece and pack predictably
 	tests := []struct {
-		name     string
-		lines    []string
-		maxChars int
-		want     []string
+		name      string
+		lines     []string
+		maxTokens int
+		want      []string
 	}{
-		{"all fit", []string{"aa", "bb"}, 100, []string{"aa\nbb"}},
-		{"split at boundary", []string{"aaaa", "bbbb", "cccc"}, 9, []string{"aaaa\nbbbb", "cccc"}},
-		{"oversized line own chunk", []string{"aa", "bbbbbbbbbb", "cc"}, 5, []string{"aa", "bbbbbbbbbb", "cc"}},
+		{"all fit", []string{"ааааа", "ббббб"}, 100, []string{"ааааа\nббббб"}},
+		{"split at boundary", []string{"ааааа", "ббббб", "ввввв"}, 11, []string{"ааааа\nббббб", "ввввв"}},
+		{"oversized line own chunk", []string{"аа", "бббббббббббб", "вв"}, 5, []string{"аа", "бббббббббббб", "вв"}},
 		{"empty input", nil, 10, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, packLines(tt.lines, tt.maxChars))
+			assert.Equal(t, tt.want, packLines(tt.lines, tt.maxTokens))
 		})
 	}
+}
+
+func TestEstimateTokens(t *testing.T) {
+	assert.Equal(t, 0, estimateTokens(""))
+	// ASCII ≈ 4 chars/token
+	assert.Equal(t, 1, estimateTokens("abcd"))
+	assert.Equal(t, 2, estimateTokens("abcde"))
+	// Cyrillic ≈ 1 token/char
+	assert.Equal(t, 6, estimateTokens("привет"))
+	// mixed: 6 Cyrillic + "ab" (1) = 7
+	assert.Equal(t, 7, estimateTokens("приветab"))
+	// conservative: Russian text tokenizes far above its byte-quarter
+	assert.Greater(t, estimateTokens(strings.Repeat("слово ", 100)), 400)
+}
+
+func TestGroupByTokens(t *testing.T) {
+	// each 5-rune Cyrillic item ≈ 5 tokens; budget 12 packs two per group
+	items := []string{"ааааа", "ббббб", "ввввв", "ггггг", "ддддд"}
+	groups := groupByTokens(items, 12)
+	assert.Equal(t, [][]string{{"ааааа", "ббббб"}, {"ввввв", "ггггг"}, {"ддддд"}}, groups)
+
+	// oversized item stands alone
+	big := strings.Repeat("я", 50)
+	assert.Equal(t, [][]string{{"аа"}, {big}, {"бб"}}, groupByTokens([]string{"аа", big, "бб"}, 10))
+
+	assert.Nil(t, groupByTokens(nil, 10))
 }
 
 func TestTailHeadChars(t *testing.T) {
@@ -113,7 +141,7 @@ func TestCleanTranscriptChunked(t *testing.T) {
 	svc := NewEnrichService("test-key", "")
 	svc.BaseURL = ts.URL
 
-	// build enough segments to force at least 2 chunks of enrichChunkSize
+	// build enough segments to force at least 2 chunks of summaryChunkTokens
 	var segs []TranscriptSegment
 	for i := 0; i < 200; i++ {
 		segs = append(segs, TranscriptSegment{Start: float64(i * 30), Text: strings.Repeat("слово ", 20)})
@@ -167,11 +195,12 @@ func TestExtractReferencesMergeAndMalformed(t *testing.T) {
 	svc := NewEnrichService("test-key", "")
 	svc.BaseURL = ts.URL
 
-	// force exactly 3 chunks
+	// force exactly 3 chunks: Cyrillic ≈ 1 token/char, so a line just over the
+	// budget can't pair with another and each becomes its own chunk
 	lines := []string{
-		strings.Repeat("a", enrichChunkSize-10),
-		strings.Repeat("b", enrichChunkSize-10),
-		strings.Repeat("c", enrichChunkSize-10),
+		strings.Repeat("а", summaryChunkTokens-10),
+		strings.Repeat("б", summaryChunkTokens-10),
+		strings.Repeat("в", summaryChunkTokens-10),
 	}
 	refs, err := svc.ExtractReferences(context.Background(), strings.Join(lines, "\n"))
 	require.NoError(t, err)
@@ -221,4 +250,39 @@ func TestSummarizeMapReduce(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "combined summary", combined)
 	assert.GreaterOrEqual(t, atomic.LoadInt32(&calls), int32(4), "partials + combine")
+}
+
+// TestReduceSummariesBounded verifies the combine step never feeds an
+// over-budget request to the LLM even with many partials: every combine call's
+// input must stay under the TPM ceiling, which is what triggered the original
+// 413. Each partial is sized so no single group can hold more than a few.
+func TestReduceSummariesBounded(t *testing.T) {
+	var maxSeen int
+	ts := mockGroqChat(t, func(userMsg string, _ bool) string {
+		if strings.Contains(userMsg, "---") {
+			if tk := estimateTokens(userMsg); tk > maxSeen {
+				maxSeen = tk
+			}
+			require.LessOrEqual(t, estimateTokens(userMsg), summaryChunkTokens,
+				"combine input must stay under the TPM budget")
+			// shrink so the reduction converges instead of re-growing
+			return strings.Repeat("я", summaryChunkTokens/3)
+		}
+		return userMsg
+	})
+	defer ts.Close()
+
+	svc := NewEnrichService("test-key", "")
+	svc.BaseURL = ts.URL
+
+	// 10 partials at ~40% of budget each → no two-plus fit together, forcing
+	// several reduce rounds
+	partials := make([]string, 10)
+	for i := range partials {
+		partials[i] = strings.Repeat("ж", summaryChunkTokens*2/5)
+	}
+	out, err := svc.reduceSummaries(context.Background(), partials, "combine")
+	require.NoError(t, err)
+	require.NotEmpty(t, out)
+	assert.Positive(t, maxSeen, "combine actually ran")
 }
