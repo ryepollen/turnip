@@ -80,6 +80,8 @@ type EpisodeInput struct {
 	Date        string // YYYY-MM-DD
 	DurationMin int
 	Tags        []string
+	Source      string // youtube | podcast | article — fills the «Тип» select
+	CoverURL    string // page cover image (e.g. YouTube thumbnail); empty = no cover
 	Summary     string
 	Transcript  string
 	Refs        []Reference
@@ -158,6 +160,11 @@ func (w *NotionWriter) EnsureDatabases(ctx context.Context) error {
 		"Дата":               map[string]any{"date": map[string]any{}},
 		"Длительность (мин)": map[string]any{"number": map[string]any{}},
 		"Теги":               map[string]any{"multi_select": map[string]any{}},
+		"Тип": map[string]any{"select": map[string]any{"options": []map[string]any{
+			{"name": "youtube", "color": "red"},
+			{"name": "podcast", "color": "purple"},
+			{"name": "article", "color": "gray"},
+		}}},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create %s db: %w", glossnDBTitle, err)
@@ -385,6 +392,9 @@ func (w *NotionWriter) createEpisodePage(ctx context.Context, in EpisodeInput) (
 	if in.DurationMin > 0 {
 		props["Длительность (мин)"] = map[string]any{"number": in.DurationMin}
 	}
+	if in.Source != "" {
+		props["Тип"] = map[string]any{"select": map[string]any{"name": in.Source}}
+	}
 
 	children := []map[string]any{heading2Block("Саммари")}
 	// leave room for the heading plus up to two toggles when capping the summary
@@ -406,11 +416,15 @@ func (w *NotionWriter) createEpisodePage(ctx context.Context, in EpisodeInput) (
 		ID  string `json:"id"`
 		URL string `json:"url"`
 	}
-	err = w.doNotion(ctx, "POST", "/pages", map[string]any{
+	pageBody := map[string]any{
 		"parent":     map[string]any{"database_id": w.ids.Episodes},
 		"properties": props,
 		"children":   children,
-	}, &resp)
+	}
+	if in.CoverURL != "" {
+		pageBody["cover"] = map[string]any{"type": "external", "external": map[string]any{"url": in.CoverURL}}
+	}
+	err = w.doNotion(ctx, "POST", "/pages", pageBody, &resp)
 	if err != nil {
 		return "", "", err
 	}

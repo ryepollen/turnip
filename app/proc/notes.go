@@ -442,6 +442,10 @@ func (n *NotesService) process(ctx context.Context, job ytstore.NotesJobRecord) 
 	}
 
 	n.progress(job, "📓 пишу в Notion")
+	var coverURL string
+	if job.Source == "youtube" {
+		coverURL = fmt.Sprintf("https://i.ytimg.com/vi/%s/hqdefault.jpg", job.SourceID)
+	}
 	pageURL, _, err := n.Notion.WriteEpisode(ctx, job.SourceID, EpisodeInput{
 		Title:       meta.Title,
 		URL:         meta.URL,
@@ -449,6 +453,8 @@ func (n *NotesService) process(ctx context.Context, job ytstore.NotesJobRecord) 
 		Date:        meta.Date,
 		DurationMin: meta.DurationMin,
 		Tags:        meta.Tags,
+		Source:      meta.Source,
+		CoverURL:    coverURL,
 		Summary:     summary,
 		Transcript:  body,
 		Refs:        refs,

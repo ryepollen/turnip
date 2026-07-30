@@ -154,11 +154,13 @@ func (m *memMetaStore) DeleteNotionMetaPrefix(prefix string) (int, error) {
 func newNotionMock(t *testing.T) (*httptest.Server, *struct {
 	dbCreates, pageCreates, patches, dbRenames int
 	maxBatch                                   int
+	lastPage                                   map[string]any
 	mu                                         sync.Mutex
 }) {
 	state := &struct {
 		dbCreates, pageCreates, patches, dbRenames int
 		maxBatch                                   int
+		lastPage                                   map[string]any
 		mu                                         sync.Mutex
 	}{}
 
@@ -198,13 +200,13 @@ func newNotionMock(t *testing.T) (*httptest.Server, *struct {
 		_ = json.NewEncoder(w).Encode(map[string]string{"id": "db-1"})
 	})
 	mux.HandleFunc("/pages", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Children []map[string]any `json:"children"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		assert.LessOrEqual(t, len(req.Children), 100, "initial children within limit")
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		children, _ := body["children"].([]any)
+		assert.LessOrEqual(t, len(children), 100, "initial children within limit")
 		state.mu.Lock()
 		state.pageCreates++
+		state.lastPage = body
 		n := state.pageCreates
 		state.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]string{
@@ -343,6 +345,7 @@ func TestNotionWriteEpisode(t *testing.T) {
 	in := EpisodeInput{
 		Title: "Тестовый эпизод", URL: "https://youtu.be/x", Channel: "Канал",
 		Date: "2026-06-15", DurationMin: 94, Tags: []string{"design"},
+		Source: "youtube", CoverURL: "https://i.ytimg.com/vi/vid-1/hqdefault.jpg",
 		Summary:    "Саммари.\n\n- мысль раз\n- мысль два",
 		Transcript: strings.Join(paras, "\n\n"),
 		Refs: []Reference{
@@ -355,6 +358,16 @@ func TestNotionWriteEpisode(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, created)
 	assert.Equal(t, "https://notion.so/page-1", url)
+
+	// the episode page carries Тип=youtube and a thumbnail cover for the gallery/board
+	props, _ := state.lastPage["properties"].(map[string]any)
+	require.NotNil(t, props)
+	typ, _ := props["Тип"].(map[string]any)
+	sel, _ := typ["select"].(map[string]any)
+	assert.Equal(t, "youtube", sel["name"], "Тип select set from source")
+	cover, _ := state.lastPage["cover"].(map[string]any)
+	ext, _ := cover["external"].(map[string]any)
+	assert.Equal(t, "https://i.ytimg.com/vi/vid-1/hqdefault.jpg", ext["url"], "page cover = thumbnail")
 	assert.GreaterOrEqual(t, state.patches, 3, "250 paragraphs (transcript) + refs need 3+ batches")
 	assert.LessOrEqual(t, state.maxBatch, 100)
 	// references now live inside the episode page, so only the episode page is created
