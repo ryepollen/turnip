@@ -177,6 +177,7 @@ func (t *TelegramBot) Run(ctx context.Context) error {
 	t.Bot.Handle("/status", t.handleStatus)
 	t.Bot.Handle("/read", t.handleRead)
 	t.Bot.Handle("/digest", t.handleDigest)
+	t.Bot.Handle("/refs", t.handleRefs)
 	t.Bot.Handle("/feeds", t.handleFeeds)
 	t.Bot.Handle("/archive", t.handleArchive)
 	t.Bot.Handle("/help", t.handleHelp)
@@ -586,6 +587,7 @@ Podcasts, статья) — появится меню: слушать, пере�
 /md — список транскриптов (скачать / в Notion / удалить)
 /notes <url> [short|long] — транскрипт + саммари + отсылки в Notion
 /digest — теги; /digest <тег> — сводный конспект по теме
+/refs — отсылки по типам; /refs <тип> — книги/люди/инструменты из всех эпизодов
 /status — очередь задач, R2, лимиты LLM
 
 Читать:
@@ -1311,6 +1313,9 @@ func (t *TelegramBot) handleCallback(c *tb.Callback) {
 	case strings.HasPrefix(c.Data, "\frd_act|"):
 		c.Data = strings.TrimPrefix(c.Data, "\frd_act|")
 		t.handleReadListActionCallback(c)
+	case strings.HasPrefix(c.Data, "\frefs_pg|"):
+		c.Data = strings.TrimPrefix(c.Data, "\frefs_pg|")
+		t.handleRefsPageCallback(c)
 	case strings.HasPrefix(c.Data, "\fpub_pg|"):
 		c.Data = strings.TrimPrefix(c.Data, "\fpub_pg|")
 		t.handlePubPageCallback(c)

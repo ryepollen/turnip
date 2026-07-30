@@ -369,6 +369,7 @@ func makeNotesService(conf *config.Conf, ytStore *store.BoltDB, outWr, errWr io.
 		Apple:       proc.NewAppleResolver(),
 		Concurrency: conf.Notes.Concurrency,
 		JobStore:    ytStore,
+		RefIndex:    ytStore,
 	})
 }
 

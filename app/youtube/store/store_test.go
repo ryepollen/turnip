@@ -764,3 +764,64 @@ func TestStore_TriageActions(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ok)
 }
+
+func TestStore_ReferencesIndex(t *testing.T) {
+	tmpfile := filepath.Join(os.TempDir(), "refs-test.db")
+	defer os.Remove(tmpfile)
+
+	db, err := bolt.Open(tmpfile, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	require.NoError(t, err)
+	s := BoltDB{DB: db}
+
+	// empty index: no error, zero counts
+	refs, err := s.ListReferences("")
+	require.NoError(t, err)
+	assert.Len(t, refs, 0)
+	counts, total, err := s.ReferenceTypeCounts()
+	require.NoError(t, err)
+	assert.Equal(t, 0, total)
+	assert.Empty(t, counts)
+
+	require.NoError(t, s.SaveReferences("vid1", []ReferenceEntry{
+		{Type: "книга", Name: "Дюна", Timecode: "01:00", Quote: "ц1", EpisodeTitle: "Эп1", NotionURL: "https://notion.so/1"},
+		{Type: "человек", Name: "Герберт", Timecode: "02:00", EpisodeTitle: "Эп1"},
+	}))
+	require.NoError(t, s.SaveReferences("vid2", []ReferenceEntry{
+		{Type: "книга", Name: "1984", EpisodeTitle: "Эп2"},
+	}))
+
+	// counts aggregate across episodes
+	counts, total, err = s.ReferenceTypeCounts()
+	require.NoError(t, err)
+	assert.Equal(t, 3, total)
+	assert.Equal(t, 2, counts["книга"])
+	assert.Equal(t, 1, counts["человек"])
+
+	// filter by type spans episodes
+	books, err := s.ListReferences("книга")
+	require.NoError(t, err)
+	assert.Len(t, books, 2)
+
+	// sourceID and CreatedAt are backfilled
+	all, err := s.ListReferences("")
+	require.NoError(t, err)
+	assert.Len(t, all, 3)
+	for _, r := range all {
+		assert.NotEmpty(t, r.SourceID)
+		assert.False(t, r.CreatedAt.IsZero())
+	}
+
+	// re-saving the same source replaces (no duplication)
+	require.NoError(t, s.SaveReferences("vid1", []ReferenceEntry{
+		{Type: "инструмент", Name: "Notion", EpisodeTitle: "Эп1"},
+	}))
+	_, total, err = s.ReferenceTypeCounts()
+	require.NoError(t, err)
+	assert.Equal(t, 2, total, "vid1 refs replaced (1) + vid2 (1)")
+
+	// empty refs clears the episode
+	require.NoError(t, s.SaveReferences("vid2", nil))
+	_, total, err = s.ReferenceTypeCounts()
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+}

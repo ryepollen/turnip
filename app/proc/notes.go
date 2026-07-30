@@ -166,6 +166,12 @@ type NotesJobStore interface {
 	DeleteOldNotesJobs(cutoff time.Time) (int, error)
 }
 
+// RefIndexStore persists the lightweight cross-episode reference index that
+// backs /refs (implemented by ytstore.BoltDB)
+type RefIndexStore interface {
+	SaveReferences(sourceID string, refs []ytstore.ReferenceEntry) error
+}
+
 // NotesService runs the transcription pipeline: audio -> Groq Whisper -> LLM
 // cleanup -> L1 markdown file, and optionally -> summary+references -> Notion (L2).
 // The queue lives in bolt: jobs survive restarts (interrupted ones are requeued
@@ -181,6 +187,7 @@ type NotesService struct {
 	Apple       *AppleResolver     // apple podcasts episode resolution
 	Concurrency int
 	JobStore    NotesJobStore
+	RefIndex    RefIndexStore // cross-episode reference index for /refs, nil-safe
 	Notifier    NotesNotifier // set once before Run, nil-safe
 
 	// External handles queue jobs the core pipeline doesn't know (level "vo":
@@ -204,6 +211,7 @@ type NotesParams struct {
 	Apple       *AppleResolver
 	Concurrency int
 	JobStore    NotesJobStore
+	RefIndex    RefIndexStore
 }
 
 // NewNotesService creates the notes pipeline service
@@ -223,6 +231,7 @@ func NewNotesService(params NotesParams) *NotesService {
 		Apple:       params.Apple,
 		Concurrency: concurrency,
 		JobStore:    params.JobStore,
+		RefIndex:    params.RefIndex,
 		kick:        make(chan struct{}, 1),
 	}
 }
@@ -463,12 +472,36 @@ func (n *NotesService) process(ctx context.Context, job ytstore.NotesJobRecord) 
 		return res, fmt.Errorf("failed to write to notion: %w", err)
 	}
 	res.NotionPageURL = pageURL
+	n.indexReferences(job, meta, pageURL, refs)
 
 	meta.addProcessed("notes")
 	if err := writeNoteFile(mdPath, meta, body); err != nil {
 		log.Printf("[WARN] failed to update processed marker in %s: %v", mdPath, err)
 	}
 	return res, nil
+}
+
+// indexReferences mirrors the episode's references into the cross-episode bolt
+// index that backs /refs. Best-effort: a failure here never fails the note.
+func (n *NotesService) indexReferences(job ytstore.NotesJobRecord, meta NoteMeta, pageURL string, refs []Reference) {
+	if n.RefIndex == nil || len(refs) == 0 {
+		return
+	}
+	entries := make([]ytstore.ReferenceEntry, 0, len(refs))
+	for _, r := range refs {
+		entries = append(entries, ytstore.ReferenceEntry{
+			Type:         normalizeRefType(r.Type),
+			Name:         r.Name,
+			Timecode:     r.Timecode,
+			Quote:        r.Quote,
+			EpisodeTitle: meta.Title,
+			EpisodeURL:   meta.URL,
+			NotionURL:    pageURL,
+		})
+	}
+	if err := n.RefIndex.SaveReferences(job.SourceID, entries); err != nil {
+		log.Printf("[WARN] failed to index references for %s: %v", job.SourceID, err)
+	}
 }
 
 // ensureL1 returns the L1 transcript for the job, producing it if the file

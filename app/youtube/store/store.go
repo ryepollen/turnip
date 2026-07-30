@@ -21,6 +21,7 @@ var historyLogBkt = []byte("history_log")
 var notionMetaBkt = []byte("notion_meta")
 var notesJobsBkt = []byte("notes_jobs")
 var pendingActionsBkt = []byte("pending_actions")
+var refsIndexBkt = []byte("refs_index")
 
 // notes job statuses
 const (
@@ -64,6 +65,22 @@ type HistoryEntry struct {
 	FeedName  string    `json:"feed"`
 	Deleted   bool      `json:"deleted,omitempty"`
 	DeletedAt time.Time `json:"deleted_at,omitempty"`
+}
+
+// ReferenceEntry is one indexed reference (a book/person/tool/... mentioned in an
+// episode) in the lightweight cross-episode index. Populated by the notes (L2)
+// pipeline alongside the Notion page write; lets /refs list every mention of a
+// type across all episodes without re-reading Notion.
+type ReferenceEntry struct {
+	Type         string    `json:"type"` // книга/человек/инструмент/...
+	Name         string    `json:"name"`
+	Timecode     string    `json:"timecode,omitempty"`
+	Quote        string    `json:"quote,omitempty"`
+	EpisodeTitle string    `json:"episode_title"`
+	EpisodeURL   string    `json:"episode_url,omitempty"` // original source link
+	NotionURL    string    `json:"notion_url,omitempty"`  // episode page in Notion
+	SourceID     string    `json:"source_id"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // BoltDB store for metadata related to downloaded YouTube audio.
@@ -509,6 +526,110 @@ func (s *BoltDB) LoadHistory(feedName string, offset, limit int) (entries []Hist
 		return nil
 	})
 	return entries, total, err
+}
+
+// SaveReferences replaces every indexed reference for one episode (keyed by
+// sourceID). Re-running /notes for the same source overwrites its references
+// rather than duplicating them. Empty refs clears the episode's sub-bucket.
+func (s *BoltDB) SaveReferences(sourceID string, refs []ReferenceEntry) error {
+	if sourceID == "" {
+		return fmt.Errorf("SaveReferences: empty sourceID")
+	}
+	return s.Update(func(tx *bolt.Tx) error {
+		root, e := tx.CreateBucketIfNotExists(refsIndexBkt)
+		if e != nil {
+			return fmt.Errorf("create refs_index bucket: %w", e)
+		}
+		if root.Bucket([]byte(sourceID)) != nil {
+			if e := root.DeleteBucket([]byte(sourceID)); e != nil {
+				return fmt.Errorf("reset refs sub-bucket %s: %w", sourceID, e)
+			}
+		}
+		if len(refs) == 0 {
+			return nil
+		}
+		sub, e := root.CreateBucket([]byte(sourceID))
+		if e != nil {
+			return fmt.Errorf("create refs sub-bucket %s: %w", sourceID, e)
+		}
+		for i, r := range refs {
+			r.SourceID = sourceID
+			if r.CreatedAt.IsZero() {
+				r.CreatedAt = time.Now().UTC()
+			}
+			jdata, jerr := json.Marshal(&r)
+			if jerr != nil {
+				return fmt.Errorf("marshal reference: %w", jerr)
+			}
+			if e := sub.Put([]byte(fmt.Sprintf("%04d", i)), jdata); e != nil {
+				return e
+			}
+		}
+		return nil
+	})
+}
+
+// ListReferences returns every indexed reference across all episodes, optionally
+// filtered to one type (empty = all). The caller groups and paginates.
+func (s *BoltDB) ListReferences(typeFilter string) (refs []ReferenceEntry, err error) {
+	err = s.View(func(tx *bolt.Tx) error {
+		root := tx.Bucket(refsIndexBkt)
+		if root == nil {
+			return nil
+		}
+		return root.ForEach(func(name, v []byte) error {
+			if v != nil { // leaf key, not a sub-bucket — none expected at root
+				return nil
+			}
+			sub := root.Bucket(name)
+			if sub == nil {
+				return nil
+			}
+			return sub.ForEach(func(_, jv []byte) error {
+				var r ReferenceEntry
+				if jerr := json.Unmarshal(jv, &r); jerr != nil {
+					return nil
+				}
+				if typeFilter != "" && r.Type != typeFilter {
+					return nil
+				}
+				refs = append(refs, r)
+				return nil
+			})
+		})
+	})
+	return refs, err
+}
+
+// ReferenceTypeCounts returns the number of indexed references per type, plus
+// the grand total. Backs the argument-less /refs overview.
+func (s *BoltDB) ReferenceTypeCounts() (counts map[string]int, total int, err error) {
+	counts = map[string]int{}
+	err = s.View(func(tx *bolt.Tx) error {
+		root := tx.Bucket(refsIndexBkt)
+		if root == nil {
+			return nil
+		}
+		return root.ForEach(func(name, v []byte) error {
+			if v != nil {
+				return nil
+			}
+			sub := root.Bucket(name)
+			if sub == nil {
+				return nil
+			}
+			return sub.ForEach(func(_, jv []byte) error {
+				var r ReferenceEntry
+				if jerr := json.Unmarshal(jv, &r); jerr != nil {
+					return nil
+				}
+				counts[r.Type]++
+				total++
+				return nil
+			})
+		})
+	})
+	return counts, total, err
 }
 
 // SaveNotesJob creates or updates a notes job record keyed by its ID
