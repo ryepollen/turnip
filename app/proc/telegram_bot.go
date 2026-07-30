@@ -1375,7 +1375,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 				if i == 0 {
 					origMsg = pa.originalMsg
 				}
-				t.enqueueNotesJob(st, origMsg, "https://www.youtube.com/watch?v="+videoID, action, "")
+				t.enqueueNotesJob(st, origMsg, "https://www.youtube.com/watch?v="+videoID, action, "", notesPriorityUser)
 			}
 		case "audio_notes":
 			t.startAudioProcessing(chat, statusMsg, pa)
@@ -1383,7 +1383,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 			// statusMsg and the original message deletion
 			for _, videoID := range pa.videoIDs {
 				st, _ := t.Bot.Send(chat, "⏳ Конспект в очереди...")
-				t.enqueueNotesJob(st, nil, "https://www.youtube.com/watch?v="+videoID, "notes", "")
+				t.enqueueNotesJob(st, nil, "https://www.youtube.com/watch?v="+videoID, "notes", "", notesPriorityUser)
 			}
 		case "vo":
 			if !IsVotCliAvailable() {
@@ -1425,7 +1425,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 		case "vo":
 			t.enqueueVoiceoverJob(chat, statusMsg, pa.originalMsg, pa.url)
 		case "md", "notes":
-			t.enqueueNotesJob(statusMsg, pa.originalMsg, pa.url, action, "")
+			t.enqueueNotesJob(statusMsg, pa.originalMsg, pa.url, action, "", notesPriorityUser)
 		default:
 			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
 		}
@@ -1459,7 +1459,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 			_, _ = t.Bot.Edit(statusMsg, "⏳ Adding to reader…")
 			go t.processRead(context.Background(), chat, statusMsg, pa.originalMsg, pa.url)
 		case "md", "notes":
-			t.enqueueNotesJob(statusMsg, pa.originalMsg, pa.url, action, "")
+			t.enqueueNotesJob(statusMsg, pa.originalMsg, pa.url, action, "", notesPriorityUser)
 		default:
 			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
 		}
@@ -1574,7 +1574,7 @@ func (t *TelegramBot) handleListEntryActionCallback(c *tb.Callback) {
 			return
 		}
 		statusMsg, _ := t.Bot.Send(c.Message.Chat, "⏳ В очереди...")
-		t.enqueueNotesJob(statusMsg, nil, entry.Link.Href, "notes", "")
+		t.enqueueNotesJob(statusMsg, nil, entry.Link.Href, "notes", "", notesPriorityUser)
 		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Поставил в очередь"})
 	}
 }
@@ -1946,7 +1946,7 @@ func (t *TelegramBot) handleNotesCommand(m *tb.Message, level string) {
 			if i == 0 {
 				origMsg = m
 			}
-			t.enqueueNotesJob(statusMsg, origMsg, "https://www.youtube.com/watch?v="+videoID, level, length)
+			t.enqueueNotesJob(statusMsg, origMsg, "https://www.youtube.com/watch?v="+videoID, level, length, notesPriorityUser)
 		}
 		return
 	}
@@ -1958,7 +1958,7 @@ func (t *TelegramBot) handleNotesCommand(m *tb.Message, level string) {
 	}
 
 	statusMsg, _ := t.Bot.Send(m.Chat, "⏳ В очереди...")
-	t.enqueueNotesJob(statusMsg, m, rawURL, level, length)
+	t.enqueueNotesJob(statusMsg, m, rawURL, level, length, notesPriorityUser)
 }
 
 // parseSummaryLength extracts a standalone short|long word (any case) from the
@@ -1974,11 +1974,20 @@ func parseSummaryLength(text string) (length, rest string) {
 	return "", text
 }
 
+// notes job priorities: a single user-initiated link jumps ahead of a
+// background bulk batch (playlist triage, whole-show voiceover) so an urgent
+// link isn't stuck behind 50 queued playlist items. The job already in flight
+// is never interrupted — only the next claim honours priority.
+const (
+	notesPriorityBulk = 0
+	notesPriorityUser = 1
+)
+
 // enqueueNotesJob persists one link as a notes job. The queue lives in bolt,
 // so the telegram context (chat + status message ids) rides along in the
 // record and survives restarts. Unlike the audio flow, notes never touch the
-// RSS feed bucket.
-func (t *TelegramBot) enqueueNotesJob(statusMsg, originalMsg *tb.Message, rawURL, level, length string) {
+// RSS feed bucket. priority orders the claim (see notesPriority* constants).
+func (t *TelegramBot) enqueueNotesJob(statusMsg, originalMsg *tb.Message, rawURL, level, length string, priority int) {
 	if t.NotesSvc == nil || statusMsg == nil {
 		return
 	}
@@ -1995,6 +2004,7 @@ func (t *TelegramBot) enqueueNotesJob(statusMsg, originalMsg *tb.Message, rawURL
 		Source:      source,
 		Level:       level,
 		SumLength:   length,
+		Priority:    priority,
 		ChatID:      statusMsg.Chat.ID,
 		StatusMsgID: statusMsg.ID,
 	}
@@ -2144,6 +2154,7 @@ func (t *TelegramBot) enqueueVoiceoverJob(chat *tb.Chat, statusMsg, originalMsg 
 		SourceID:    "vo_" + apID,
 		Source:      "podcast",
 		Level:       "vo",
+		Priority:    notesPriorityUser,
 		ChatID:      statusMsg.Chat.ID,
 		StatusMsgID: statusMsg.ID,
 	}
@@ -2185,6 +2196,7 @@ func (t *TelegramBot) enqueueShowVoiceovers(ctx context.Context, chat *tb.Chat, 
 			SourceID:    voID,
 			Source:      "podcast",
 			Level:       "vo",
+			Priority:    notesPriorityBulk, // whole-show batch: background
 			ChatID:      st.Chat.ID,
 			StatusMsgID: st.ID,
 		}
@@ -2300,6 +2312,7 @@ func (t *TelegramBot) handleDigest(m *tb.Message) {
 		SourceID:    "digest_" + slugifyTopic(tag),
 		Source:      "digest",
 		Level:       "digest",
+		Priority:    notesPriorityUser,
 		ChatID:      statusMsg.Chat.ID,
 		StatusMsgID: statusMsg.ID,
 	}

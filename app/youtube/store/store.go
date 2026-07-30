@@ -41,6 +41,7 @@ type NotesJobRecord struct {
 	Level       string    `json:"level"`                    // "md" | "notes"
 	SumLength   string    `json:"summary_length,omitempty"` // "" (normal) | "short" | "long", L2 only
 	ReuseAudio  string    `json:"reuse_audio,omitempty"`
+	Priority    int       `json:"priority,omitempty"` // higher = claimed first; bulk=0, user=1
 	Status      string    `json:"status"`
 	Error       string    `json:"error,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
@@ -528,16 +529,23 @@ func (s *BoltDB) SaveNotesJob(job NotesJobRecord) error {
 	})
 }
 
-// ClaimNextNotesJob atomically takes the oldest queued job and marks it
-// processing. ok is false when the queue is empty. Safe with multiple workers:
-// the claim happens inside a single bolt update transaction.
+// ClaimNextNotesJob atomically takes the highest-priority queued job and marks
+// it processing; jobs of equal priority are taken oldest-first (FIFO). This lets
+// a single user link (priority 1) jump ahead of a background playlist-triage
+// batch (priority 0) without interrupting the job already in flight. ok is false
+// when the queue is empty. Safe with multiple workers: the whole selection +
+// claim happens inside a single bolt update transaction.
 func (s *BoltDB) ClaimNextNotesJob() (job NotesJobRecord, ok bool, err error) {
 	err = s.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(notesJobsBkt)
 		if bucket == nil {
 			return nil
 		}
+		var bestKey []byte
+		var best NotesJobRecord
 		c := bucket.Cursor()
+		// cursor is key-ascending = oldest-first (keys are zero-padded nanos), so
+		// replacing only on strictly higher priority keeps FIFO within a priority
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var item NotesJobRecord
 			if jerr := json.Unmarshal(v, &item); jerr != nil {
@@ -547,18 +555,24 @@ func (s *BoltDB) ClaimNextNotesJob() (job NotesJobRecord, ok bool, err error) {
 			if item.Status != NotesJobQueued {
 				continue
 			}
-			item.Status = NotesJobProcessing
-			item.UpdatedAt = time.Now().UTC()
-			jdata, jerr := json.Marshal(&item)
-			if jerr != nil {
-				return fmt.Errorf("marshal notes job %s: %w", item.ID, jerr)
+			if bestKey == nil || item.Priority > best.Priority {
+				bestKey = append([]byte(nil), k...) // copy: cursor reuses k's memory
+				best = item
 			}
-			if perr := bucket.Put(k, jdata); perr != nil {
-				return fmt.Errorf("claim notes job %s: %w", item.ID, perr)
-			}
-			job, ok = item, true
+		}
+		if bestKey == nil {
 			return nil
 		}
+		best.Status = NotesJobProcessing
+		best.UpdatedAt = time.Now().UTC()
+		jdata, jerr := json.Marshal(&best)
+		if jerr != nil {
+			return fmt.Errorf("marshal notes job %s: %w", best.ID, jerr)
+		}
+		if perr := bucket.Put(bestKey, jdata); perr != nil {
+			return fmt.Errorf("claim notes job %s: %w", best.ID, perr)
+		}
+		job, ok = best, true
 		return nil
 	})
 	return job, ok, err

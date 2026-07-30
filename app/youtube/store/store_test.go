@@ -609,6 +609,47 @@ func TestStore_NotesJobs(t *testing.T) {
 	assert.Equal(t, "bbb", jobs[0].SourceID)
 }
 
+func TestStore_NotesJobs_Priority(t *testing.T) {
+	tmpfile := filepath.Join(os.TempDir(), "test-notes-jobs-prio.db")
+	defer os.Remove(tmpfile)
+
+	db, err := bolt.Open(tmpfile, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	require.NoError(t, err)
+	s := BoltDB{DB: db}
+
+	mkJob := func(n int, sourceID string, prio int) NotesJobRecord {
+		return NotesJobRecord{
+			ID: fmt.Sprintf("%020d-%s", n, sourceID), SourceID: sourceID,
+			Level: "md", Priority: prio, Status: NotesJobQueued,
+			CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		}
+	}
+	// three background (playlist) jobs queued first, then two user links arrive.
+	// store only compares the int; the bulk=0/user=1 policy lives in proc.
+	require.NoError(t, s.SaveNotesJob(mkJob(1, "bulk1", 0)))
+	require.NoError(t, s.SaveNotesJob(mkJob(2, "bulk2", 0)))
+	require.NoError(t, s.SaveNotesJob(mkJob(3, "bulk3", 0)))
+	require.NoError(t, s.SaveNotesJob(mkJob(4, "user1", 1)))
+	require.NoError(t, s.SaveNotesJob(mkJob(5, "user2", 1)))
+
+	// user links jump ahead of the bulk backlog, FIFO among themselves
+	claim := func() string {
+		j, ok, cerr := s.ClaimNextNotesJob()
+		require.NoError(t, cerr)
+		require.True(t, ok)
+		return j.SourceID
+	}
+	assert.Equal(t, "user1", claim(), "higher priority first")
+	assert.Equal(t, "user2", claim(), "then the other user link (FIFO)")
+	assert.Equal(t, "bulk1", claim(), "then oldest bulk")
+	assert.Equal(t, "bulk2", claim())
+	assert.Equal(t, "bulk3", claim())
+
+	_, ok, err := s.ClaimNextNotesJob()
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
 func TestStore_PendingActions(t *testing.T) {
 	tmpfile := filepath.Join(os.TempDir(), "test-pending-actions.db")
 	defer os.Remove(tmpfile)

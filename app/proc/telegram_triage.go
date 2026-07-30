@@ -253,7 +253,9 @@ func (t *TelegramBot) triageQueueOne(chat *tb.Chat, token, action, videoID strin
 			level = "notes"
 		}
 		st, _ := t.Bot.Send(chat, "⏳ Queued…")
-		t.enqueueNotesJob(st, nil, videoURL, level, "")
+		// triage items come from a big playlist/batch: background priority so a
+		// single user link queued meanwhile jumps ahead of the remaining items
+		t.enqueueNotesJob(st, nil, videoURL, level, "", notesPriorityBulk)
 	}
 	if _, _, err := t.Store.TouchPendingActionDone(token, videoID, time.Now().UTC()); err != nil {
 		log.Printf("[WARN] mark triage done %s/%s: %v", token, videoID, err)
