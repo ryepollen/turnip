@@ -304,6 +304,39 @@ func TestService_RSSFeedPlayList(t *testing.T) {
 	assert.Contains(t, res, `<link>https://www.youtube.com/playlist?list=channel1</link>`)
 }
 
+// TestService_RSSFeedConfiguredAuthor verifies an aggregated personal feed uses
+// the configured author rather than the newest episode's channel, and does not
+// leak that channel as the show link (the "Lex Fridman" bug).
+func TestService_RSSFeedConfiguredAuthor(t *testing.T) {
+	storeSvc := &mocks.StoreServiceMock{
+		LoadFunc: func(string, int) ([]ytfeed.Entry, error) {
+			res := []ytfeed.Entry{
+				{ChannelID: "channel1", VideoID: "vid1", Title: "title1", File: "/tmp/file1.mp3"},
+			}
+			res[0].Link.Href = "http://example.com/v1"
+			res[0].Author.Name = "Lex Fridman"
+			res[0].Author.URI = "http://example.com/c1"
+			return res, nil
+		},
+	}
+
+	svc := Service{
+		Feeds:          []FeedInfo{{ID: "manual", Name: "Offthplant", Type: ytfeed.FTChannel}},
+		Store:          storeSvc,
+		RootURL:        "http://localhost:8080/yt",
+		KeepPerChannel: 10,
+	}
+
+	res, err := svc.RSSFeed(FeedInfo{ID: "manual", Name: "Offthplant", Type: ytfeed.FTChannel, Author: "Offthplant 🪴"})
+	require.NoError(t, err)
+
+	assert.Contains(t, res, `<itunes:author>Offthplant 🪴</itunes:author>`)
+	assert.Contains(t, res, `<itunes:name>Offthplant 🪴</itunes:name>`, "itunes:owner name set")
+	assert.NotContains(t, res, `<itunes:author>Lex Fridman</itunes:author>`, "must not inherit episode channel as show author")
+	assert.NotContains(t, res, `<link>http://example.com/c1</link>`, "must not link the show to a foreign channel")
+	assert.Contains(t, res, `<link>http://example.com/v1</link>`, "per-item link still present")
+}
+
 func TestService_makeFileName(t *testing.T) {
 
 	tbl := []struct {

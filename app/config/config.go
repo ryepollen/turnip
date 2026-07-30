@@ -49,6 +49,7 @@ type Conf struct {
 		AllowedUserID   int64  `yaml:"allowed_user_id"`
 		FeedName        string `yaml:"feed_name"`
 		FeedTitle       string `yaml:"feed_title"`
+		FeedAuthor      string `yaml:"feed_author"` // podcast author shown in clients; empty falls back to feed_title
 		FeedDescription string `yaml:"feed_description"`
 		FeedImage       string `yaml:"feed_image"`
 		MaxItems        int    `yaml:"max_items"`

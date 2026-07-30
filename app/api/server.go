@@ -365,6 +365,10 @@ func (s *Server) getYoutubeFeedCtrl(w http.ResponseWriter, r *http.Request) {
 		fi.Name = s.Conf.TelegramBot.FeedTitle
 		fi.Description = s.Conf.TelegramBot.FeedDescription
 		fi.Image = s.Conf.TelegramBot.FeedImage
+		fi.Author = s.Conf.TelegramBot.FeedAuthor
+		if fi.Author == "" {
+			fi.Author = s.Conf.TelegramBot.FeedTitle // never leak the newest episode's channel as the show author
+		}
 	}
 
 	// convert local image path to URL
