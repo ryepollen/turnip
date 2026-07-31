@@ -289,3 +289,27 @@ func TestNotesRunRequeuesInterrupted(t *testing.T) {
 	assert.Equal(t, "stuck1", job.SourceID)
 	assert.Equal(t, ytstore.NotesJobProcessing, job.Status)
 }
+
+func TestNotesDrainQueuePaused(t *testing.T) {
+	store := newTestJobStore(t)
+	svc := NewNotesService(NotesParams{MDLocation: t.TempDir(), Concurrency: 1, JobStore: store})
+
+	require.NoError(t, store.SaveNotesJob(ytstore.NotesJobRecord{
+		ID: "00000000000000000001-a", SourceID: "a", URL: "u",
+		Source: "youtube", Level: "md", Status: ytstore.NotesJobQueued,
+	}))
+
+	// paused: drainQueue must not claim the job (would otherwise try to process
+	// it, needing a downloader/network — its staying queued proves the gate)
+	require.NoError(t, svc.SetPaused(true))
+	assert.True(t, svc.IsPaused())
+	svc.drainQueue(context.Background())
+
+	queued, err := store.CountNotesJobs(ytstore.NotesJobQueued)
+	require.NoError(t, err)
+	assert.Equal(t, 1, queued, "paused queue leaves the job untouched")
+
+	// resume clears the flag
+	require.NoError(t, svc.SetPaused(false))
+	assert.False(t, svc.IsPaused())
+}

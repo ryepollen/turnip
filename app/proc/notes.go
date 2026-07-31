@@ -164,6 +164,8 @@ type NotesJobStore interface {
 	HasActiveNotesJob(sourceID string) (bool, error)
 	ResetProcessingNotesJobs() (int, error)
 	DeleteOldNotesJobs(cutoff time.Time) (int, error)
+	SetNotesPaused(paused bool) error
+	NotesPaused() (bool, error)
 }
 
 // RefIndexStore persists the lightweight cross-episode reference index that
@@ -289,6 +291,34 @@ func (n *NotesService) QueueStatus() (queued, processing int, recent []ytstore.N
 	return queued, processing, recent, err
 }
 
+// SetPaused pauses or resumes the queue. Paused workers finish the in-flight
+// job but claim no new ones; the flag is persisted so it survives restarts.
+// Resuming kicks a worker so pickup is immediate, not poll-delayed.
+func (n *NotesService) SetPaused(paused bool) error {
+	if n.JobStore == nil {
+		return fmt.Errorf("очередь конспектов не настроена")
+	}
+	if err := n.JobStore.SetNotesPaused(paused); err != nil {
+		return err
+	}
+	if !paused {
+		select {
+		case n.kick <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+
+// IsPaused reports whether the queue is currently paused.
+func (n *NotesService) IsPaused() bool {
+	if n.JobStore == nil {
+		return false
+	}
+	paused, _ := n.JobStore.NotesPaused()
+	return paused
+}
+
 // Run requeues interrupted jobs, prunes old records and blocks running the
 // worker pool until ctx is done
 func (n *NotesService) Run(ctx context.Context) {
@@ -332,6 +362,11 @@ func (n *NotesService) Run(ctx context.Context) {
 // drainQueue claims and runs jobs until the queue is empty
 func (n *NotesService) drainQueue(ctx context.Context) {
 	for ctx.Err() == nil {
+		// paused: finish nothing new. An in-flight job (runJob below) is never
+		// interrupted; we simply stop claiming until /resume.
+		if paused, err := n.JobStore.NotesPaused(); err == nil && paused {
+			return
+		}
 		job, ok, err := n.JobStore.ClaimNextNotesJob()
 		if err != nil {
 			log.Printf("[WARN] failed to claim notes job: %v", err)

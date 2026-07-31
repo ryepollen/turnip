@@ -825,3 +825,37 @@ func TestStore_ReferencesIndex(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, total)
 }
+
+func TestStore_NotesPaused(t *testing.T) {
+	tmpfile := filepath.Join(os.TempDir(), "pause-test.db")
+	defer os.Remove(tmpfile)
+
+	db, err := bolt.Open(tmpfile, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	require.NoError(t, err)
+	s := BoltDB{DB: db}
+
+	// default: not paused (bucket absent)
+	paused, err := s.NotesPaused()
+	require.NoError(t, err)
+	assert.False(t, paused)
+
+	require.NoError(t, s.SetNotesPaused(true))
+	paused, err = s.NotesPaused()
+	require.NoError(t, err)
+	assert.True(t, paused)
+
+	// idempotent set
+	require.NoError(t, s.SetNotesPaused(true))
+	paused, _ = s.NotesPaused()
+	assert.True(t, paused)
+
+	require.NoError(t, s.SetNotesPaused(false))
+	paused, err = s.NotesPaused()
+	require.NoError(t, err)
+	assert.False(t, paused)
+
+	// clearing when already clear is fine
+	require.NoError(t, s.SetNotesPaused(false))
+	paused, _ = s.NotesPaused()
+	assert.False(t, paused)
+}

@@ -178,6 +178,8 @@ func (t *TelegramBot) Run(ctx context.Context) error {
 	t.Bot.Handle("/read", t.handleRead)
 	t.Bot.Handle("/digest", t.handleDigest)
 	t.Bot.Handle("/refs", t.handleRefs)
+	t.Bot.Handle("/pause", t.handlePause)
+	t.Bot.Handle("/resume", t.handleResume)
 	t.Bot.Handle("/feeds", t.handleFeeds)
 	t.Bot.Handle("/archive", t.handleArchive)
 	t.Bot.Handle("/help", t.handleHelp)
@@ -595,6 +597,7 @@ Podcasts, статья) — появится меню: слушать, пере�
 /digest — теги; /digest <тег> — сводный конспект по теме
 /refs — отсылки по типам; /refs <тип> — книги/люди/инструменты из всех эпизодов
 /status — очередь задач, R2, лимиты LLM
+/pause — пауза очереди конспектов; /resume — продолжить
 
 Читать:
 /read <url> — статья в структурный MD (читалка)
@@ -2348,7 +2351,11 @@ func (t *TelegramBot) handleStatus(m *tb.Message) {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "📋 Очередь конспектов\n⏳ в очереди: %d\n⚙️ в работе: %d\n", queued, processing)
+	b.WriteString("📋 Очередь конспектов\n")
+	if t.NotesSvc.IsPaused() {
+		b.WriteString("⏸ на паузе (/resume чтобы продолжить)\n")
+	}
+	fmt.Fprintf(&b, "⏳ в очереди: %d\n⚙️ в работе: %d\n", queued, processing)
 	if line := t.r2UsageLine(); line != "" {
 		b.WriteString(line + "\n")
 	}
@@ -2375,6 +2382,42 @@ func (t *TelegramBot) handleStatus(m *tb.Message) {
 		}
 	}
 	_, _ = t.Bot.Send(m.Chat, b.String())
+}
+
+// handlePause pauses the notes queue: the in-flight job finishes, nothing new
+// is claimed until /resume. Useful to let a single urgent link or the audio
+// path have the machine while a big playlist backlog waits.
+func (t *TelegramBot) handlePause(m *tb.Message) {
+	if !t.isAuthorized(m.Sender) {
+		return
+	}
+	if t.NotesSvc == nil {
+		_, _ = t.Bot.Send(m.Chat, "Конспекты выключены")
+		return
+	}
+	if err := t.NotesSvc.SetPaused(true); err != nil {
+		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Error: %v", err))
+		return
+	}
+	queued, processing, _, _ := t.NotesSvc.QueueStatus()
+	_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("⏸ Очередь на паузе. Текущая задача доработает, новые не берутся.\n⏳ в очереди: %d · ⚙️ в работе: %d\n/resume — продолжить", queued, processing))
+}
+
+// handleResume resumes the notes queue and wakes a worker immediately.
+func (t *TelegramBot) handleResume(m *tb.Message) {
+	if !t.isAuthorized(m.Sender) {
+		return
+	}
+	if t.NotesSvc == nil {
+		_, _ = t.Bot.Send(m.Chat, "Конспекты выключены")
+		return
+	}
+	if err := t.NotesSvc.SetPaused(false); err != nil {
+		_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("Error: %v", err))
+		return
+	}
+	queued, processing, _, _ := t.NotesSvc.QueueStatus()
+	_, _ = t.Bot.Send(m.Chat, fmt.Sprintf("▶️ Очередь возобновлена.\n⏳ в очереди: %d · ⚙️ в работе: %d", queued, processing))
 }
 
 // sendNoteDocument sends the L1 markdown file to the chat as a document with a

@@ -22,6 +22,7 @@ var notionMetaBkt = []byte("notion_meta")
 var notesJobsBkt = []byte("notes_jobs")
 var pendingActionsBkt = []byte("pending_actions")
 var refsIndexBkt = []byte("refs_index")
+var queueCtrlBkt = []byte("queue_control")
 
 // notes job statuses
 const (
@@ -751,6 +752,34 @@ func (s *BoltDB) HasActiveNotesJob(sourceID string) (found bool, err error) {
 		})
 	})
 	return found, err
+}
+
+// SetNotesPaused persists the queue pause flag. Paused workers finish the
+// in-flight job but claim no new ones. Survives restarts.
+func (s *BoltDB) SetNotesPaused(paused bool) error {
+	return s.Update(func(tx *bolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists(queueCtrlBkt)
+		if err != nil {
+			return fmt.Errorf("failed to create queue_control bucket: %w", err)
+		}
+		if paused {
+			return bucket.Put([]byte("paused"), []byte("1"))
+		}
+		return bucket.Delete([]byte("paused"))
+	})
+}
+
+// NotesPaused reports whether the notes queue is currently paused.
+func (s *BoltDB) NotesPaused() (paused bool, err error) {
+	err = s.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(queueCtrlBkt)
+		if bucket == nil {
+			return nil
+		}
+		paused = bucket.Get([]byte("paused")) != nil
+		return nil
+	})
+	return paused, err
 }
 
 // ResetProcessingNotesJobs returns interrupted processing jobs back to queued.
