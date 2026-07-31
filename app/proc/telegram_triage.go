@@ -60,7 +60,8 @@ func (t *TelegramBot) loadTriage(token string) (pendingTriage, bool) {
 
 // buildTriageMessage renders one page of the triage list: a numbered list with a
 // per-video row of [🎵 audio] [📄 md] [📓 notes] buttons, a page-wide row, and
-// navigation. Already-queued videos are marked ✓.
+// navigation. Videos queued this session are marked "✓ поставил"; videos
+// already in the feed or the notes queue from before carry a dedup marker.
 func (t *TelegramBot) buildTriageMessage(rec pendingTriage, page int) (string, *tb.ReplyMarkup) {
 	total := len(rec.videoIDs)
 	pages := (total + triagePageSize - 1) / triagePageSize
@@ -89,7 +90,9 @@ func (t *TelegramBot) buildTriageMessage(rec pendingTriage, page int) (string, *
 		title := triageItemTitle(rec, i)
 		mark := ""
 		if rec.done[id] {
-			mark = " ✓"
+			mark = " ✓ поставил"
+		} else if st, when := t.videoDupStatus(id); st != dupNone {
+			mark = " · " + dupMarker(st, when)
 		}
 		fmt.Fprintf(&b, "%d. %s%s\n", i+1, truncateRunes(title, 60), mark)
 
@@ -205,11 +208,17 @@ func (t *TelegramBot) handleTriageActionCallback(c *tb.Callback) {
 			if rec.done[id] {
 				continue
 			}
+			// skip videos already in the feed or the notes queue — page-all means
+			// "queue everything genuinely new here", the point of re-sending a
+			// partially-done playlist
+			if st, _ := t.videoDupStatus(id); st != dupNone {
+				continue
+			}
 			t.triageQueueOne(chat, token, itemAction, id)
 			queued++
 		}
 		if queued == 0 {
-			_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Вся страница уже в очереди"})
+			_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Всё на странице уже в ленте/очереди"})
 			return
 		}
 	default:

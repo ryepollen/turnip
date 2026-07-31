@@ -355,8 +355,14 @@ func (t *TelegramBot) handleText(m *tb.Message) {
 		var prompt string
 		if len(videoIDs) == 1 {
 			prompt = "🤔 What to do?"
+			if st, when := t.videoDupStatus(videoIDs[0]); st != dupNone {
+				prompt += "\n" + dupNote(st, when)
+			}
 		} else {
 			prompt = fmt.Sprintf("🤔 What to do with %d links?", len(videoIDs))
+			if known := t.countKnown(videoIDs); known > 0 {
+				prompt += fmt.Sprintf("\n⚠️ %d из %d уже в ленте/очереди", known, len(videoIDs))
+			}
 		}
 		_, _ = t.Bot.Send(m.Chat, prompt, t.buildActionMenu(token, "yt"))
 		return
