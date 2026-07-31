@@ -1,0 +1,16 @@
+# scratch masks / intermediates from potrace tracing
+*.pbm
+big.png
+crop.png
+union.png
+u_*.png
+l_*.png
+c_*.png
+*_bw.png
+*_preview.png
+turnip_crop*.png
+turnip_composite.png
+# low-res preview renders (keep only final 3000)
+out/*-1000.png
+out/family-1000.png
+.DS_Store

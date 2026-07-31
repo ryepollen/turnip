@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:1500px; height:1500px; }
+  .card {
+    width:1500px; height:1500px; position:relative; overflow:hidden;
+    /* warm dark wall, like a lit lamp in a dim room */
+    background:
+      radial-gradient(58% 58% at 50% 46%, #4a3a29 0%, #2b2016 55%, #17100a 100%);
+    font-family:"Courier New","Menlo",monospace;
+  }
+  /* faint plaster grain */
+  .card::after {
+    content:""; position:absolute; inset:0; pointer-events:none;
+    background-image:repeating-linear-gradient(0deg, transparent 0 3px, rgba(0,0,0,.05) 3px 4px);
+    opacity:.5;
+  }
+  /* the plafond: soft glowing disc */
+  .plafond {
+    position:absolute; left:50%; top:44%; transform:translate(-50%,-50%);
+    width:820px; height:820px; border-radius:50%;
+    background:radial-gradient(circle at 50% 42%, #FCF5E4 0%, #F6EBCF 58%, #EBD9AE 78%, #dcc793 100%);
+    box-shadow:
+      0 0 120px 60px rgba(255,225,160,.45),
+      0 0 300px 120px rgba(255,205,120,.25),
+      inset 0 -18px 60px rgba(150,110,60,.25);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+  }
+  .icon { width:420px; height:440px; margin-top:22px; }
+  .onair {
+    color:#9E2E24; font-family:"Helvetica Neue",Arial,sans-serif;
+    font-weight:800; font-size:104px; letter-spacing:2px;
+    margin-top:2px; text-shadow:0 1px 0 rgba(255,255,255,.35);
+  }
+  /* wordmark on the dark wall, below the lamp */
+  .wordmark {
+    position:absolute; left:0; right:0; bottom:150px; text-align:center;
+    color:#EEE4CE; font-weight:700; font-size:96px; letter-spacing:8px;
+  }
+  .sub {
+    position:absolute; left:0; right:0; bottom:96px; text-align:center;
+    direction:rtl; font-family:"Times New Roman","Arial Hebrew",serif;
+    color:#C9B48C; font-size:34px; opacity:.85;
+  }
+</style>
+</head><body>
+<div class="card">
+  <div class="plafond">
+    <svg class="icon" viewBox="0 0 200 210">
+      <!-- bushy beet greens: 5 blades fanning up from the crown -->
+      <g fill="#5FA83C" stroke="#2b2018" stroke-width="5.5" stroke-linejoin="round">
+        <g transform="translate(100,86) rotate(-38)"><path d="M0 0 C-15 -24 -15 -54 0 -76 C15 -54 15 -24 0 0 Z"/></g>
+        <g transform="translate(100,86) rotate(-19)"><path d="M0 0 C-15 -26 -15 -60 0 -84 C15 -60 15 -26 0 0 Z"/></g>
+        <g transform="translate(100,86) rotate(0)"><path d="M0 0 C-15 -28 -15 -64 0 -90 C15 -64 15 -28 0 0 Z"/></g>
+        <g transform="translate(100,86) rotate(19)"><path d="M0 0 C-15 -26 -15 -60 0 -84 C15 -60 15 -26 0 0 Z"/></g>
+        <g transform="translate(100,86) rotate(38)"><path d="M0 0 C-15 -24 -15 -54 0 -76 C15 -54 15 -24 0 0 Z"/></g>
+      </g>
+      <!-- turnip body: round shoulders tapering to a root tail -->
+      <path d="M100 80
+               C152 80 170 116 160 146
+               C153 168 128 182 100 206
+               C72 182 47 168 40 146
+               C30 116 48 80 100 80 Z"
+            fill="#E9B646" stroke="#2b2018" stroke-width="6" stroke-linejoin="round"/>
+      <!-- midrib veins on the leaves -->
+      <g fill="none" stroke="#2b2018" stroke-width="3.5" stroke-linecap="round" opacity=".7">
+        <path d="M100 84 L100 20"/>
+        <path d="M100 84 L78 34"/>
+        <path d="M100 84 L122 34"/>
+      </g>
+      <!-- stripes on the bulb -->
+      <g fill="none" stroke="#2b2018" stroke-width="4" stroke-linecap="round" opacity=".75">
+        <path d="M68 126 C82 134 98 136 112 131"/>
+        <path d="M74 148 C90 158 106 160 120 153"/>
+      </g>
+    </svg>
+    <div class="onair">ON&nbsp;AIR</div>
+  </div>
+  <div class="wordmark">OFFTHPLANT</div>
+  <div class="sub">פֿון פּערזענלעכע מחלוקות און פּרינציפּן</div>
+</div>
+</body></html>

@@ -1,0 +1,48 @@
+/* Shared "on-air plafond" cover system.
+   One glowing round lamp in a dim room; a simple flat toy pictogram inside
+   (kindergarten locker marker == radio on-air lamp). Per feed only the toy
+   (and its accent) changes. Authored at 1500x1500; render 2x -> 3000. */
+
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:1500px; height:1500px; }
+
+.card {
+  width:1500px; height:1500px; position:relative; overflow:hidden;
+  background:radial-gradient(58% 58% at 50% 46%, #4a3a29 0%, #2b2016 55%, #17100a 100%);
+  font-family:"Courier New","Menlo",monospace;
+}
+.card::after { /* faint plaster grain */
+  content:""; position:absolute; inset:0; pointer-events:none;
+  background-image:repeating-linear-gradient(0deg, transparent 0 3px, rgba(0,0,0,.05) 3px 4px);
+  opacity:.5;
+}
+
+/* the plafond: soft glowing disc */
+.plafond {
+  position:absolute; left:50%; top:44%; transform:translate(-50%,-50%);
+  width:820px; height:820px; border-radius:50%;
+  background:radial-gradient(circle at 50% 42%, #FCF5E4 0%, #F6EBCF 58%, #EBD9AE 78%, #dcc793 100%);
+  box-shadow:
+    0 0 120px 60px rgba(255,225,160,.45),
+    0 0 300px 120px rgba(255,205,120,.25),
+    inset 0 -18px 60px rgba(150,110,60,.25);
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+}
+.icon { width:430px; height:440px; }
+
+.onair {
+  color:#9E2E24; font-family:"Helvetica Neue",Arial,sans-serif;
+  font-weight:800; font-size:104px; letter-spacing:2px;
+  margin-top:2px; text-shadow:0 1px 0 rgba(255,255,255,.35);
+}
+
+/* wordmark + subtitle on the dark wall, below the lamp */
+.wordmark {
+  position:absolute; left:0; right:0; bottom:150px; text-align:center;
+  color:#EEE4CE; font-weight:700; font-size:96px; letter-spacing:8px;
+}
+.sub {
+  position:absolute; left:0; right:0; bottom:96px; text-align:center;
+  direction:rtl; font-family:"Times New Roman","Arial Hebrew",serif;
+  color:#C9B48C; font-size:34px; opacity:.85;
+}
