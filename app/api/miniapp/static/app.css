@@ -1,0 +1,177 @@
+/* Wegweiser — case-file / stamp aesthetic: paper, ink, mono, dense rows.
+   Telegram theme vars are a soft fallback so it never looks broken in-app. */
+
+:root {
+  --paper: #efe9dd;
+  --paper-2: #e6dfce;
+  --ink: #1c1a17;
+  --ink-soft: #4a463d;
+  --line: #b9b09a;
+  --line-strong: #8a8069;
+  --stamp: #7a2318;
+  --accent: #245a4a;
+  --ok: #245a4a;
+  --warn: #8a5a12;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--tg-theme-bg-color, var(--paper));
+  color: var(--tg-theme-text-color, var(--ink));
+  font-family: "SF Mono", "JetBrains Mono", "Menlo", "Consolas", ui-monospace, monospace;
+  font-size: 14px;
+  line-height: 1.35;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  padding: 0 0 env(safe-area-inset-bottom);
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+/* header */
+.topbar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 12px 14px 8px;
+  border-bottom: 2px solid var(--ink);
+}
+.brand { font-weight: 700; letter-spacing: 2px; }
+.brand .mark { letter-spacing: 0; }
+.who { font-size: 12px; color: var(--ink-soft); }
+
+/* tabs */
+.tabs {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  padding: 8px 8px 0;
+  border-bottom: 1px solid var(--line);
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar { display: none; }
+.tab {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-bottom: none;
+  background: var(--paper-2);
+  color: var(--ink-soft);
+  cursor: pointer;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 1px;
+  user-select: none;
+}
+.tab.active {
+  background: var(--tg-theme-bg-color, var(--paper));
+  color: var(--ink);
+  font-weight: 700;
+  border-color: var(--ink);
+}
+
+/* pulse line */
+.pulse {
+  padding: 8px 14px;
+  font-size: 12px;
+  color: var(--ink-soft);
+  border-bottom: 1px dashed var(--line);
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.pulse .chip { white-space: nowrap; }
+.pulse .sep { color: var(--line-strong); }
+.pulse .paused { color: var(--stamp); font-weight: 700; }
+
+/* list rows */
+.list { padding: 0 0 8px; }
+.row {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.row .head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.row .title {
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.row .title.struck { text-decoration: line-through; color: var(--ink-soft); }
+.row .meta {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.row .meta .sep { color: var(--line-strong); }
+.badge {
+  display: inline-block;
+  padding: 0 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+  font-size: 10px;
+  letter-spacing: .5px;
+  color: var(--ink-soft);
+}
+.badge.notion { color: var(--accent); border-color: var(--accent); }
+.badge.deleted { color: var(--stamp); border-color: var(--stamp); }
+
+/* action buttons */
+.actions {
+  margin-top: 7px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.btn {
+  appearance: none;
+  border: 1px solid var(--line-strong);
+  background: var(--paper-2);
+  color: var(--ink);
+  padding: 4px 9px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 2px;
+  min-height: 30px;
+}
+.btn:active { transform: translateY(1px); }
+.btn.danger { color: var(--stamp); border-color: var(--stamp); }
+.btn.primary { color: var(--accent); border-color: var(--accent); }
+.btn.wide { flex: 1; text-align: center; }
+.btn[disabled] { opacity: .5; cursor: default; }
+
+/* pager */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 12px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.pager .btn { min-width: 44px; }
+
+/* misc */
+.empty, .err {
+  padding: 24px 14px;
+  text-align: center;
+  color: var(--ink-soft);
+}
+.err { color: var(--stamp); }
+.loading { padding: 24px 14px; text-align: center; color: var(--ink-soft); }
+a.link { color: var(--accent); text-decoration: underline; }

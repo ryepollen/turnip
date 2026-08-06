@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -240,6 +241,82 @@ func NewNotesService(params NotesParams) *NotesService {
 
 // NotionEnabled reports whether L2 (Notion) is configured
 func (n *NotesService) NotionEnabled() bool { return n != nil && n.Notion != nil }
+
+// NoteListItem is one L1 transcript on disk, as returned by List (newest first)
+type NoteListItem struct {
+	SourceID string
+	Path     string
+	Meta     NoteMeta
+	ModTime  time.Time
+}
+
+// List reads every L1 transcript's frontmatter, newest first. Shared by the
+// bot's /md list and the Mini App notes tab so both see the same catalog.
+func (n *NotesService) List() ([]NoteListItem, error) {
+	if n == nil {
+		return nil, fmt.Errorf("конспекты не настроены")
+	}
+	files, err := filepath.Glob(filepath.Join(n.MDLocation, "*.md"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to list md files: %w", err)
+	}
+	items := make([]NoteListItem, 0, len(files))
+	for _, path := range files {
+		fi, statErr := os.Stat(path)
+		if statErr != nil {
+			continue
+		}
+		item := NoteListItem{
+			SourceID: strings.TrimSuffix(filepath.Base(path), ".md"),
+			Path:     path,
+			ModTime:  fi.ModTime(),
+		}
+		if meta, _, rerr := readNoteFile(path); rerr == nil {
+			item.Meta = meta
+		} else {
+			item.Meta = NoteMeta{Title: item.SourceID} // unreadable frontmatter: still listed
+		}
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].ModTime.After(items[j].ModTime) })
+	return items, nil
+}
+
+// EnqueueURL is a headless enqueue by URL: it derives the source id/kind the
+// same way the bot's tap path does and queues a job, no Telegram involved. Used
+// by the Mini App's 📓 button. Audio reuse is left to the worker (audioFor).
+func (n *NotesService) EnqueueURL(rawURL, level string, priority int) error {
+	if n == nil || n.JobStore == nil {
+		return fmt.Errorf("очередь конспектов не настроена")
+	}
+	if level == "" {
+		level = "notes"
+	}
+	sourceID, source := noteSourceID(rawURL)
+	return n.Enqueue(ytstore.NotesJobRecord{
+		URL:      rawURL,
+		SourceID: sourceID,
+		Source:   source,
+		Level:    level,
+		Priority: priority,
+	})
+}
+
+// Delete removes an L1 transcript file by source id. sourceID is validated to
+// stay inside MDLocation (no path traversal). Missing file is not an error.
+func (n *NotesService) Delete(sourceID string) error {
+	if n == nil {
+		return fmt.Errorf("конспекты не настроены")
+	}
+	if sourceID == "" || strings.ContainsAny(sourceID, `/\`) || strings.Contains(sourceID, "..") {
+		return fmt.Errorf("bad source id")
+	}
+	path := filepath.Join(n.MDLocation, sourceID+".md")
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to delete transcript: %w", err)
+	}
+	return nil
+}
 
 // Enqueue persists a new queued job, rejecting duplicates and overflow.
 // The record's ID, status and timestamps are set here.

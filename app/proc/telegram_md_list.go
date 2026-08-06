@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
-	"time"
 
 	tb "gopkg.in/tucnak/telebot.v2"
 )
@@ -15,44 +13,13 @@ import (
 // three action buttons, ten rows of buttons would not fit a phone screen
 const mdListPageSize = 5
 
-// noteListItem is one L1 transcript on disk
-type noteListItem struct {
-	SourceID string
-	Path     string
-	Meta     NoteMeta
-	ModTime  time.Time
-}
+// noteListItem is one L1 transcript on disk (alias of the service-level type,
+// shared with the Mini App)
+type noteListItem = NoteListItem
 
 // loadNotesList reads all L1 files' frontmatter, newest first
 func (t *TelegramBot) loadNotesList() ([]noteListItem, error) {
-	if t.NotesSvc == nil {
-		return nil, fmt.Errorf("конспекты не настроены")
-	}
-	files, err := filepath.Glob(filepath.Join(t.NotesSvc.MDLocation, "*.md"))
-	if err != nil {
-		return nil, fmt.Errorf("failed to list md files: %w", err)
-	}
-
-	items := make([]noteListItem, 0, len(files))
-	for _, path := range files {
-		fi, statErr := os.Stat(path)
-		if statErr != nil {
-			continue
-		}
-		item := noteListItem{
-			SourceID: strings.TrimSuffix(filepath.Base(path), ".md"),
-			Path:     path,
-			ModTime:  fi.ModTime(),
-		}
-		if meta, _, rerr := readNoteFile(path); rerr == nil {
-			item.Meta = meta
-		} else {
-			item.Meta = NoteMeta{Title: item.SourceID} // unreadable frontmatter: still listed
-		}
-		items = append(items, item)
-	}
-	sort.Slice(items, func(i, j int) bool { return items[i].ModTime.After(items[j].ModTime) })
-	return items, nil
+	return t.NotesSvc.List()
 }
 
 // handleMDList shows the paginated transcript list (triggered by bare /md)

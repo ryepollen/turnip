@@ -23,8 +23,11 @@ import (
 
 	"github.com/umputun/feed-master/app/config"
 	"github.com/umputun/feed-master/app/feed"
+	"github.com/umputun/feed-master/app/proc"
+	"github.com/umputun/feed-master/app/publisher"
 	"github.com/umputun/feed-master/app/youtube"
 	ytfeed "github.com/umputun/feed-master/app/youtube/feed"
+	ytstore "github.com/umputun/feed-master/app/youtube/store"
 )
 
 //go:generate moq -out mocks/yt_service.go -pkg mocks -skip-ensure -fmt goimports . YoutubeSvc
@@ -47,6 +50,20 @@ type Server struct {
 	// VM stops streaming gigabytes through GCP egress
 	MediaRedirectBase string
 
+	// Mini App («Wegweiser»): a single-user web face served under /wegweiser and
+	// gated by Telegram initData (signed with BotToken, user must be AllowedUserID).
+	// The data accessors are the same ones the bot uses — the app is a read/act
+	// surface over them, not a new store.
+	BotToken      string // telegram bot token, for initData verification
+	AllowedUserID int64  // the only user allowed into the Mini App
+	NotesSvc      *proc.NotesService
+	ReadSvc       *proc.ReadService
+	Pub           *publisher.Service
+	AppStore      MiniAppStore // history/refs/jobs reads (satisfied by youtube/store.BoltDB)
+	// DeleteFeedEntry removes a feed episode the same way /del does (file + R2 +
+	// bucket + history). Wired to the bot's DeleteEntry; nil when the bot is off.
+	DeleteFeedEntry func(entry ytfeed.Entry) error
+
 	httpServer *http.Server
 	cache      lcw.LoadingCache[[]byte]
 	templates  *template.Template
@@ -67,6 +84,20 @@ type Store interface {
 // YoutubeStore provides access to YouTube channel data
 type YoutubeStore interface {
 	Load(channelID string, maxItems int) ([]ytfeed.Entry, error)
+}
+
+// MiniAppStore is the slice of the youtube bolt store the Mini App reads and
+// acts on. Satisfied by *youtube/store.BoltDB; kept narrow so tests can mock it.
+type MiniAppStore interface {
+	LoadHistory(feedName string, offset, limit int) ([]ytstore.HistoryEntry, int, error)
+	ListReferences(typeFilter string) ([]ytstore.ReferenceEntry, error)
+	ReferenceTypeCounts() (map[string]int, int, error)
+	LoadNotesJobs(status string, limit int) ([]ytstore.NotesJobRecord, error)
+	CountNotesJobs(status string) (int, error)
+	// action support: deleting a feed entry (same primitives as the bot's /del)
+	Remove(entry ytfeed.Entry) error
+	ResetProcessed(entry ytfeed.Entry) error
+	MarkHistoryDeleted(feedName, videoID, href string) error
 }
 
 // Run starts http server for API with all routes
@@ -161,6 +192,11 @@ func (s *Server) router() http.Handler {
 			rpod.HandleFunc("GET /pod/{secret}/{category}", s.getPodFeedCtrl)
 		})
 	}
+
+	// Mini App «Wegweiser»: public shell + static assets, then the JSON API
+	// behind the single-user initData gate
+	s.miniappWebRoutes(router)
+	s.miniappRoutes(router)
 
 	router.Mount("/yt").Route(func(r *routegroup.Bundle) {
 		r.Use(timeout(60 * time.Second))

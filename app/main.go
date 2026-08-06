@@ -185,6 +185,12 @@ func main() {
 	// owner notifications for the audio watcher (set when the bot comes up)
 	var ownerNotify func(string)
 
+	// hoisted for the Mini App: the API server reuses the bot's services and its
+	// one delete path (nil when the bot is disabled — the app just won't act)
+	var notesSvc *proc.NotesService
+	var readSvc *proc.ReadService
+	var deleteFeedEntry func(ytfeed.Entry) error
+
 	// Initialize Telegram Bot for manual video additions
 	if conf.TelegramBot.Enabled && opts.TelegramToken != "" && conf.TelegramBot.AllowedUserID != 0 {
 		log.Printf("[INFO] starting telegram bot for user %d, feed: %s", conf.TelegramBot.AllowedUserID, conf.TelegramBot.FeedName)
@@ -193,8 +199,8 @@ func main() {
 		errWr := log.ToWriter(log.Default(), "INFO")
 		botDownloader := ytfeed.NewDownloader(conf.YouTube.DlTemplate, outWr, errWr, conf.YouTube.FilesLocation, conf.YouTube.CookiesFile)
 
-		notesSvc := makeNotesService(conf, ytStore, outWr, errWr)
-		readSvc := makeReadService(conf)
+		notesSvc = makeNotesService(conf, ytStore, outWr, errWr)
+		readSvc = makeReadService(conf)
 
 		// feed media offload: new episodes go to R2, /yt/media redirects there
 		var feedMedia *publisher.FeedMedia
@@ -234,6 +240,7 @@ func main() {
 				notesSvc.External = tgBot.RunQueuedVoiceover // podcast translations ride the same queue
 			}
 			ownerNotify = tgBot.NotifyOwner
+			deleteFeedEntry = tgBot.DeleteEntry // Mini App reuses the /del path
 			go func() {
 				if err := tgBot.Run(context.Background()); err != nil {
 					log.Printf("[ERROR] telegram bot failed: %v", err)
@@ -263,6 +270,14 @@ func main() {
 		YoutubeStore: ytStore,
 		YoutubeSvc:   &ytSvc,
 		AdminPasswd:  opts.AdminPasswd,
+		// Mini App «Wegweiser»: single-user web face over the bot's own services
+		BotToken:        opts.TelegramToken,
+		AllowedUserID:   conf.TelegramBot.AllowedUserID,
+		NotesSvc:        notesSvc,
+		ReadSvc:         readSvc,
+		Pub:             pubSvc,
+		AppStore:        ytStore,
+		DeleteFeedEntry: deleteFeedEntry,
 	}
 	if pubSvc != nil {
 		server.PodSecret = pubSvc.Secret

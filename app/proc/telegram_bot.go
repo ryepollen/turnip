@@ -1666,6 +1666,11 @@ func (t *TelegramBot) handleListDeleteCallback(c *tb.Callback) {
 	_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Deleted"})
 }
 
+// DeleteEntry removes a feed entry exactly as /del does (file + R2 object +
+// bucket + history mark). Exported so the Mini App API can reuse the one true
+// delete path instead of duplicating it.
+func (t *TelegramBot) DeleteEntry(entry ytfeed.Entry) error { return t.deleteEntry(entry) }
+
 func (t *TelegramBot) deleteEntry(entry ytfeed.Entry) error {
 	// delete audio file from disk and its offloaded R2 object
 	if entry.File != "" {
