@@ -580,7 +580,7 @@ func (t *TelegramBot) handleHelp(m *tb.Message) {
 		return
 	}
 
-	help := fmt.Sprintf(`🎧 Turnip Bot
+	help := fmt.Sprintf(`🎧 irrweg
 
 Пришли ссылку (YouTube-видео или плейлист, эпизод/подкаст Apple
 Podcasts, статья) — появится меню: слушать, перевод RU, MD-файл, Notion.
@@ -603,7 +603,7 @@ Podcasts, статья) — появится меню: слушать, пере�
 /read <url> — статья в структурный MD (читалка)
 /read — список статей (скачать / открыть / удалить)
 
-Платформа (книги/курсы):
+Платформа (Hörbuch / Seminar):
 /feeds — ленты с URL подписки
 /archive <категория> — 🗄 в архив / 🔁 переобработать
 
@@ -611,8 +611,9 @@ Podcasts, статья) — появится меню: слушать, пере�
 /history — вечный лог всех отправлений
 /help — эта справка
 Файл cookies.txt вложением — обновить YouTube-куки
+🗂 Кнопка меню — Wegweiser (веб-лицо системы: лента, конспекты, очередь)
 
-RSS: %s/irrweg`, t.BaseURL)
+Ленты: Schattenweg 🌙 %s/irrweg · Hörbuch/Seminar → /feeds`, t.BaseURL)
 
 	_, _ = t.Bot.Send(m.Chat, help)
 }
