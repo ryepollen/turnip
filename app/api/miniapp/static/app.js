@@ -88,7 +88,7 @@ async function download(path, filename) {
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
   } catch (e) {
-    toast('Не удалось скачать');
+    toast('Download failed');
   }
 }
 
@@ -103,13 +103,13 @@ function fmtDate(iso) {
 /* ------- tab definitions ------- */
 
 const TABS = [
-  { key: 'feed', label: 'Лента', paged: true },
-  { key: 'history', label: 'История', paged: true },
-  { key: 'notes', label: 'Конспекты', paged: true },
-  { key: 'read', label: 'Читалка', paged: true },
-  { key: 'queue', label: 'Очередь', paged: false },
-  { key: 'refs', label: 'Отсылки', paged: false },
-  { key: 'feeds', label: 'Издания', paged: false },
+  { key: 'feed', label: 'Feed', paged: true },
+  { key: 'history', label: 'History', paged: true },
+  { key: 'notes', label: 'Notes', paged: true },
+  { key: 'read', label: 'Reader', paged: true },
+  { key: 'queue', label: 'Queue', paged: false },
+  { key: 'refs', label: 'References', paged: false },
+  { key: 'feeds', label: 'Editions', paged: false },
 ];
 
 const state = { tab: 'feed', offset: 0, refType: null };
@@ -129,7 +129,7 @@ function metaLine(parts) {
 }
 
 function renderFeed(data) {
-  if (!data.items.length) return '<div class="empty">В ленте пусто</div>';
+  if (!data.items.length) return '<div class="empty">Feed is empty</div>';
   return data.items.map((it) => {
     const meta = metaLine([
       esc(fmtDate(it.added)),
@@ -137,8 +137,8 @@ function renderFeed(data) {
       it.has_notion ? badge('notion', '📓 Notion') : '',
     ]);
     const acts =
-      (it.media_url ? '<button class="btn" data-act="open" data-url="' + esc(it.media_url) + '">⬇ Аудио</button>' : '') +
-      '<button class="btn primary" data-act="notes" data-url="' + esc(it.url) + '">📓 Конспект</button>' +
+      (it.media_url ? '<button class="btn" data-act="open" data-url="' + esc(it.media_url) + '">⬇ Audio</button>' : '') +
+      '<button class="btn primary" data-act="notes" data-url="' + esc(it.url) + '">📓 Notes</button>' +
       '<button class="btn danger" data-act="feed-del" data-id="' + esc(it.video_id) + '" data-t="' + esc(it.title) + '">🗑</button>';
     return row(
       '<div class="head"><div class="title">' + esc(it.title) + '</div></div>' +
@@ -149,13 +149,13 @@ function renderFeed(data) {
 }
 
 function renderHistory(data) {
-  if (!data.items.length) return '<div class="empty">История пуста</div>';
+  if (!data.items.length) return '<div class="empty">History is empty</div>';
   return data.items.map((it) => {
     const meta = metaLine([
       esc(fmtDate(it.ts)),
       esc(it.action),
       it.duration ? esc(it.duration) : '',
-      it.deleted ? badge('deleted', '✗ удалён ' + fmtDate(it.deleted_at)) : '',
+      it.deleted ? badge('deleted', '✗ deleted ' + fmtDate(it.deleted_at)) : '',
     ]);
     return row(
       '<div class="head"><div class="title' + (it.deleted ? ' struck' : '') + '">' + esc(it.title || it.url) + '</div></div>' +
@@ -165,11 +165,11 @@ function renderHistory(data) {
 }
 
 function renderNotes(data) {
-  if (!data.items.length) return '<div class="empty">Нет транскриптов</div>';
+  if (!data.items.length) return '<div class="empty">No transcripts</div>';
   return data.items.map((it) => {
     const meta = metaLine([
       esc(it.date),
-      it.duration_min ? esc(it.duration_min + 'м') : '',
+      it.duration_min ? esc(it.duration_min + 'm') : '',
       (it.tags && it.tags.length) ? esc(it.tags.join(', ')) : '',
       it.has_notion ? badge('notion', '📓') : '',
     ]);
@@ -186,17 +186,17 @@ function renderNotes(data) {
 }
 
 function renderRead(data) {
-  if (!data.items.length) return '<div class="empty">Нет статей</div>';
+  if (!data.items.length) return '<div class="empty">No articles</div>';
   return data.items.map((it) => {
     const meta = metaLine([
       esc(it.date),
-      it.reading_min ? esc(it.reading_min + 'м чтения') : '',
+      it.reading_min ? esc(it.reading_min + 'm read') : '',
       it.site ? esc(it.site) : '',
       (it.tags && it.tags.length) ? esc(it.tags.join(', ')) : '',
     ]);
     const acts =
       '<button class="btn" data-act="read-dl" data-id="' + esc(it.source_id) + '">⬇ .md</button>' +
-      (it.source_url ? '<button class="btn" data-act="open" data-url="' + esc(it.source_url) + '">🔗 Источник</button>' : '') +
+      (it.source_url ? '<button class="btn" data-act="open" data-url="' + esc(it.source_url) + '">🔗 Source</button>' : '') +
       '<button class="btn danger" data-act="read-del" data-id="' + esc(it.source_id) + '" data-t="' + esc(it.title) + '">🗑</button>';
     return row(
       '<div class="head"><div class="title">' + esc(it.title) + '</div></div>' +
@@ -208,13 +208,13 @@ function renderRead(data) {
 
 function renderQueue(data) {
   const pauseBtn = data.paused
-    ? '<button class="btn primary wide" data-act="resume">▶ Продолжить</button>'
-    : '<button class="btn wide" data-act="pause">⏸ Пауза</button>';
+    ? '<button class="btn primary wide" data-act="resume">▶ Resume</button>'
+    : '<button class="btn wide" data-act="pause">⏸ Pause</button>';
   let html = row(
     '<div class="meta">' +
-    '<span class="chip">в очереди: <b>' + data.queued + '</b></span><span class="sep">·</span>' +
-    '<span class="chip">в работе: <b>' + data.processing + '</b></span>' +
-    (data.paused ? '<span class="sep">·</span><span class="paused">на паузе</span>' : '') +
+    '<span class="chip">queued: <b>' + data.queued + '</b></span><span class="sep">·</span>' +
+    '<span class="chip">processing: <b>' + data.processing + '</b></span>' +
+    (data.paused ? '<span class="sep">·</span><span class="paused">paused</span>' : '') +
     '</div><div class="actions">' + pauseBtn + '</div>'
   );
   if (data.recent && data.recent.length) {
@@ -227,13 +227,13 @@ function renderQueue(data) {
       );
     }).join('');
   } else {
-    html += '<div class="empty">Очередь пуста</div>';
+    html += '<div class="empty">Queue is empty</div>';
   }
   return html;
 }
 
 function renderRefsSummary(data) {
-  if (!data.types || !data.types.length) return '<div class="empty">Отсылок пока нет</div>';
+  if (!data.types || !data.types.length) return '<div class="empty">No references yet</div>';
   return data.types.map((t) => row(
     '<div class="head"><div class="title" data-act="ref-type" data-type="' + esc(t.type) + '">' +
     esc(t.type) + '</div><div class="meta"><b>' + t.count + '</b></div></div>'
@@ -241,8 +241,8 @@ function renderRefsSummary(data) {
 }
 
 function renderRefsGroups(data) {
-  const back = '<div class="row"><button class="btn" data-act="ref-back">◀ Все типы</button></div>';
-  if (!data.groups || !data.groups.length) return back + '<div class="empty">Пусто</div>';
+  const back = '<div class="row"><button class="btn" data-act="ref-back">◀ All types</button></div>';
+  if (!data.groups || !data.groups.length) return back + '<div class="empty">Empty</div>';
   const body = data.groups.map((g) => {
     const mentions = g.mentions.map((m) => {
       const label = esc(m.episode_title || m.episode_url || '—') + (m.timecode ? ' <span class="badge">' + esc(m.timecode) + '</span>' : '');
@@ -258,11 +258,11 @@ function renderRefsGroups(data) {
 }
 
 function renderFeeds(data) {
-  if (!data.feeds || !data.feeds.length) return '<div class="empty">Изданий нет</div>';
+  if (!data.feeds || !data.feeds.length) return '<div class="empty">No editions</div>';
   return data.feeds.map((f) => row(
     '<div class="head"><div class="title">' + esc(f.category) + '</div></div>' +
-    '<div class="meta">' + f.episodes + ' эп.</div>' +
-    '<div class="actions"><button class="btn" data-act="open" data-url="' + esc(f.feed_url) + '">🔗 Ссылка на ленту</button></div>'
+    '<div class="meta">' + f.episodes + ' ep.</div>' +
+    '<div class="actions"><button class="btn" data-act="open" data-url="' + esc(f.feed_url) + '">🔗 Feed link</button></div>'
   )).join('');
 }
 
@@ -277,7 +277,7 @@ function renderPager(total) {
     ? '<button class="btn" data-act="prev">◀</button>' : '<button class="btn" disabled>◀</button>';
   const next = state.offset + PAGE < total
     ? '<button class="btn" data-act="next">▶</button>' : '<button class="btn" disabled>▶</button>';
-  p.innerHTML = prev + '<span>стр. ' + page + '/' + pages + '</span>' + next;
+  p.innerHTML = prev + '<span>p. ' + page + '/' + pages + '</span>' + next;
 }
 
 /* ------- loaders ------- */
@@ -321,7 +321,7 @@ async function loadTab() {
       }
     }
   } catch (e) {
-    l.innerHTML = '<div class="err">Ошибка: ' + esc(e.message) + '</div>';
+    l.innerHTML = '<div class="err">Error: ' + esc(e.message) + '</div>';
   }
 }
 
@@ -330,11 +330,11 @@ async function loadPulse() {
     const s = await apiGet('/summary');
     const p = document.getElementById('pulse');
     p.innerHTML =
-      '<span class="chip">' + s.feed + ' в ленте</span><span class="sep">·</span>' +
-      '<span class="chip">' + s.queued + ' в очереди</span><span class="sep">·</span>' +
-      '<span class="chip">' + s.notes + ' консп.</span><span class="sep">·</span>' +
-      '<span class="chip">' + s.refs + ' отсылок</span>' +
-      (s.paused ? '<span class="sep">·</span><span class="paused">пауза</span>' : '');
+      '<span class="chip">' + s.feed + ' in feed</span><span class="sep">·</span>' +
+      '<span class="chip">' + s.queued + ' queued</span><span class="sep">·</span>' +
+      '<span class="chip">' + s.notes + ' notes</span><span class="sep">·</span>' +
+      '<span class="chip">' + s.refs + ' refs</span>' +
+      (s.paused ? '<span class="sep">·</span><span class="paused">paused</span>' : '');
   } catch (e) {
     document.getElementById('pulse').textContent = '';
   }
@@ -347,28 +347,28 @@ async function handleAction(act, el) {
     case 'open':
       openLink(el.getAttribute('data-url')); break;
     case 'notes':
-      try { await apiPost('/notes/enqueue', { url: el.getAttribute('data-url'), level: 'notes' }); toast('📓 В очереди'); haptic('success'); loadPulse(); }
+      try { await apiPost('/notes/enqueue', { url: el.getAttribute('data-url'), level: 'notes' }); toast('📓 Queued'); haptic('success'); loadPulse(); }
       catch (e) { toast(e.message); haptic('error'); }
       break;
     case 'feed-del':
-      confirmThen('Удалить «' + (el.getAttribute('data-t') || '') + '» из ленты?', async () => {
-        try { await apiPost('/feed/delete', { video_id: el.getAttribute('data-id') }); toast('Удалено'); haptic('success'); loadTab(); loadPulse(); }
+      confirmThen('Delete "' + (el.getAttribute('data-t') || '') + '" from feed?', async () => {
+        try { await apiPost('/feed/delete', { video_id: el.getAttribute('data-id') }); toast('Deleted'); haptic('success'); loadTab(); loadPulse(); }
         catch (e) { toast(e.message); haptic('error'); }
       });
       break;
     case 'note-dl':
       download('/notes/file?id=' + encodeURIComponent(el.getAttribute('data-id')), el.getAttribute('data-id') + '.md'); break;
     case 'note-del':
-      confirmThen('Удалить транскрипт?', async () => {
-        try { await apiPost('/notes/delete', { source_id: el.getAttribute('data-id') }); toast('Удалено'); haptic('success'); loadTab(); loadPulse(); }
+      confirmThen('Delete transcript?', async () => {
+        try { await apiPost('/notes/delete', { source_id: el.getAttribute('data-id') }); toast('Deleted'); haptic('success'); loadTab(); loadPulse(); }
         catch (e) { toast(e.message); haptic('error'); }
       });
       break;
     case 'read-dl':
       download('/read/file?id=' + encodeURIComponent(el.getAttribute('data-id')), el.getAttribute('data-id') + '.md'); break;
     case 'read-del':
-      confirmThen('Удалить статью?', async () => {
-        try { await apiPost('/read/delete', { source_id: el.getAttribute('data-id') }); toast('Удалено'); haptic('success'); loadTab(); loadPulse(); }
+      confirmThen('Delete article?', async () => {
+        try { await apiPost('/read/delete', { source_id: el.getAttribute('data-id') }); toast('Deleted'); haptic('success'); loadTab(); loadPulse(); }
         catch (e) { toast(e.message); haptic('error'); }
       });
       break;
@@ -416,12 +416,10 @@ function init() {
   if (tg) {
     tg.ready();
     tg.expand();
-    const u = tg.initDataUnsafe && tg.initDataUnsafe.user;
-    if (u) document.getElementById('who').textContent = '@' + (u.username || u.first_name || '');
   }
   if (!INIT_DATA) {
     document.getElementById('list').innerHTML =
-      '<div class="err">Открой через кнопку бота в Telegram — здесь нет подписи доступа.</div>';
+      '<div class="err">Open via the bot button in Telegram — no access signature here.</div>';
     return;
   }
   buildTabs();
