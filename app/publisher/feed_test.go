@@ -37,6 +37,12 @@ func TestLoadFeedConfigDefaults(t *testing.T) {
 	assert.Equal(t, "books", cfg.Title)
 	assert.Equal(t, "ru", cfg.Language)
 	assert.Equal(t, "serial", cfg.Type)
+	// books are a single pre-mastered source → normalization off by default
+	assert.False(t, cfg.NormalizeEnabled(), "books default to normalize off")
+
+	// mixed content (courses etc.) keeps loudnorm on by default
+	assert.True(t, LoadFeedConfig(t.TempDir(), "courses").NormalizeEnabled(),
+		"non-book categories default to normalize on")
 
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "feed.yaml"),
@@ -45,6 +51,15 @@ func TestLoadFeedConfigDefaults(t *testing.T) {
 	assert.Equal(t, "Аудиокниги", cfg.Title)
 	assert.Equal(t, "episodic", cfg.Type)
 	assert.Equal(t, "Я", cfg.Author)
+
+	// an explicit normalize: in feed.yaml overrides the category default both ways
+	on := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(on, "feed.yaml"), []byte("normalize: true"), 0o600))
+	assert.True(t, LoadFeedConfig(on, "books").NormalizeEnabled(), "explicit true wins for books")
+
+	off := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(off, "feed.yaml"), []byte("normalize: false"), 0o600))
+	assert.False(t, LoadFeedConfig(off, "courses").NormalizeEnabled(), "explicit false wins for courses")
 }
 
 func TestBuildFeedXMLSerialOrder(t *testing.T) {

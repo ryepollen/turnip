@@ -23,12 +23,24 @@ type FeedConfig struct {
 	Language    string `yaml:"language"` // default ru
 	Type        string `yaml:"type"`     // serial | episodic, default serial
 	Author      string `yaml:"author"`
-	Normalize   *bool  `yaml:"normalize"` // loudnorm to -16 LUFS, default true (mp3 only)
+	Normalize   *bool  `yaml:"normalize"` // loudnorm to -16 LUFS; default depends on category (see normalizeDefaultFor)
 }
 
-// NormalizeEnabled resolves the tri-state normalize flag (nil = on)
+// NormalizeEnabled resolves the tri-state normalize flag (nil = on).
+// LoadFeedConfig fills nil with a category-aware default, so this only sees nil
+// for FeedConfigs built directly (e.g. in tests) — there the safe fallback is on.
 func (c FeedConfig) NormalizeEnabled() bool {
 	return c.Normalize == nil || *c.Normalize
+}
+
+// normalizeDefaultFor decides the loudnorm default when feed.yaml is silent.
+// Books come from a single publisher already mastered to a consistent level, so
+// re-encoding every chapter only burns CPU (30+ min/file on the small VM) and can
+// leave a loudness step at the seam; mixed content (courses, podcasts) still wins
+// from a uniform -16 LUFS across sources. An explicit normalize: in feed.yaml
+// always overrides this.
+func normalizeDefaultFor(category string) bool {
+	return category != "books"
 }
 
 // LoadFeedConfig reads dir/feed.yaml; missing file yields defaults with the
@@ -46,6 +58,10 @@ func LoadFeedConfig(dir, category string) FeedConfig {
 	}
 	if cfg.Type != "episodic" {
 		cfg.Type = "serial"
+	}
+	if cfg.Normalize == nil { // feed.yaml didn't say — pick the category default
+		d := normalizeDefaultFor(category)
+		cfg.Normalize = &d
 	}
 	return cfg
 }
