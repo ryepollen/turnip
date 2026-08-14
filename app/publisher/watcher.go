@@ -28,6 +28,19 @@ type seenFile struct {
 // otherwise a permission problem would spam Telegram every other scan
 const failureCooldown = 30 * time.Minute
 
+// flushAfterIdleScans is how many consecutive scans a category must publish
+// nothing new before its "📚 +N эпизодов" summary is sent. Dropping a 51-part
+// book would otherwise fire 51 notifications; instead we coalesce the whole
+// burst into one "можно слушать" message once the category goes quiet.
+const flushAfterIdleScans = 2
+
+// catBurst accumulates one category's freshly published episodes until the
+// burst ends, so the owner gets a single summary instead of per-file spam.
+type catBurst struct {
+	added int // episodes published since this burst started
+	idle  int // consecutive scans with nothing new for this category
+}
+
 // Watch scans originals/ on an interval and publishes new stable files.
 // notify (nil-safe) receives human-readable progress messages for Telegram.
 func (p *Service) Watch(ctx context.Context, interval time.Duration, notify func(string)) {
@@ -37,6 +50,7 @@ func (p *Service) Watch(ctx context.Context, interval time.Duration, notify func
 	log.Printf("[INFO] audio watcher started: %s every %s", filepath.Join(p.AudioDir, "originals"), interval)
 	seen := map[string]*seenFile{}
 	cooldown := map[string]time.Time{}
+	bursts := map[string]*catBurst{}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -44,17 +58,62 @@ func (p *Service) Watch(ctx context.Context, interval time.Duration, notify func
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.scanOnce(ctx, seen, cooldown, notify)
+			added := p.scanOnce(ctx, seen, cooldown, notify)
+			p.flushBursts(bursts, added, notify)
 		}
 	}
 }
 
-// scanOnce walks all category dirs and publishes files that became stable
-func (p *Service) scanOnce(ctx context.Context, seen map[string]*seenFile, cooldown map[string]time.Time, notify func(string)) {
+// flushBursts folds this scan's per-category publish counts into ongoing
+// bursts and emits one summary per category once it has been quiet for
+// flushAfterIdleScans scans (the burst has clearly ended).
+func (p *Service) flushBursts(bursts map[string]*catBurst, added map[string]int, notify func(string)) {
+	for cat, n := range added {
+		b := bursts[cat]
+		if b == nil {
+			b = &catBurst{}
+			bursts[cat] = b
+		}
+		b.added += n
+		b.idle = 0
+	}
+	for cat, b := range bursts {
+		if added[cat] > 0 {
+			continue // still growing — hold the summary
+		}
+		if b.idle++; b.idle < flushAfterIdleScans {
+			continue
+		}
+		if notify != nil && b.added > 0 {
+			total := p.episodeCount(cat)
+			if b.added == 1 {
+				notify(fmt.Sprintf("📚 «%s»: +1 эпизод (всего %d)\nЛента: %s", cat, total, p.FeedURL(cat)))
+			} else {
+				notify(fmt.Sprintf("📚 «%s»: +%d эпизодов — можно слушать (всего %d)\nЛента: %s", cat, b.added, total, p.FeedURL(cat)))
+			}
+		}
+		delete(bursts, cat)
+	}
+}
+
+// episodeCount returns how many episodes a category currently has published
+func (p *Service) episodeCount(category string) int {
+	eps, err := p.loadEpisodes(category)
+	if err != nil {
+		return 0
+	}
+	return len(eps)
+}
+
+// scanOnce walks all category dirs and publishes files that became stable.
+// It returns how many episodes each category published this scan, so the
+// caller can coalesce a burst into a single summary notification.
+func (p *Service) scanOnce(ctx context.Context, seen map[string]*seenFile, cooldown map[string]time.Time, notify func(string)) map[string]int {
+	added := map[string]int{}
 	root := filepath.Join(p.AudioDir, "originals")
 	categories, err := os.ReadDir(root)
 	if err != nil {
-		return // no originals dir yet — nothing to do
+		return added // no originals dir yet — nothing to do
 	}
 
 	for _, catDir := range categories {
@@ -107,9 +166,11 @@ func (p *Service) scanOnce(ctx context.Context, seen map[string]*seenFile, coold
 				cooldown[path] = time.Now().Add(failureCooldown)
 				continue // keep the seen entry: the file must not look "new" next scan
 			}
+			added[category]++
 			delete(seen, path)
 		}
 	}
+	return added
 }
 
 // processAndPublish runs the pipeline for one stable file: loudnorm (when
@@ -135,7 +196,9 @@ func (p *Service) processAndPublish(ctx context.Context, path, category string, 
 		say("❌ %s/%s: публикация не удалась (повтор через %s): %v", category, base, failureCooldown, err)
 		return err
 	}
-	say("📚 Опубликовано: %s → «%s»\nЛента: %s", category, ep.Title, p.FeedURL(category))
+	// Per-file success is logged only; the owner-facing "📚 +N эпизодов"
+	// summary is emitted once per burst by flushBursts (no 51-message spam).
+	log.Printf("[INFO] watcher: published %s → «%s»", category, ep.Title)
 	return nil
 }
 

@@ -46,21 +46,29 @@ func TestWatcherStabilityAndPublish(t *testing.T) {
 	var notices []string
 	notify := func(s string) { notices = append(notices, s) }
 	seen, cooldown := map[string]*seenFile{}, map[string]time.Time{}
+	bursts := map[string]*catBurst{}
 
 	// scan 1: first sight — not published yet
-	svc.scanOnce(t.Context(), seen, cooldown, notify)
+	added := svc.scanOnce(t.Context(), seen, cooldown, notify)
+	svc.flushBursts(bursts, added, notify)
 	assert.Equal(t, 0, *puts, "first scan only records the file")
 
-	// scan 2: stable → published
-	svc.scanOnce(t.Context(), seen, cooldown, notify)
+	// scan 2: stable → published, but NO per-file notification (batched)
+	added = svc.scanOnce(t.Context(), seen, cooldown, notify)
+	svc.flushBursts(bursts, added, notify)
 	assert.Equal(t, 1, *puts, "stable file published")
-	require.Len(t, notices, 1)
-	assert.Contains(t, notices[0], "Опубликовано")
-	assert.Contains(t, notices[0], "/holzweg/sec/books.xml")
+	assert.Equal(t, 1, added["books"], "scan reports one publish for books")
+	assert.Empty(t, notices, "no per-file spam while the burst is active")
 
-	// scan 3: already in state → no re-publish
-	svc.scanOnce(t.Context(), seen, cooldown, notify)
-	assert.Equal(t, 1, *puts, "published files are skipped")
+	// subsequent quiet scans end the burst → exactly one summary
+	for i := 0; i < flushAfterIdleScans; i++ {
+		added = svc.scanOnce(t.Context(), seen, cooldown, notify)
+		svc.flushBursts(bursts, added, notify)
+	}
+	require.Len(t, notices, 1, "one summary per burst")
+	assert.Contains(t, notices[0], "эпизод")
+	assert.Contains(t, notices[0], "/holzweg/sec/books.xml")
+	assert.Equal(t, 1, *puts, "published files are skipped on later scans")
 
 	// feed exists
 	_, err := os.Stat(filepath.Join(svc.AudioDir, "feeds", "books.xml"))
@@ -135,8 +143,12 @@ func TestWatcherCooldownAfterFailure(t *testing.T) {
 	// fixing the file changes mtime/permissions → user re-touches → fresh chance
 	require.NoError(t, os.Chmod(path, 0o600))
 	require.NoError(t, os.WriteFile(path, []byte("audio-fixed"), 0o600))
-	svc.scanOnce(t.Context(), seen, cooldown, notify) // sees change, resets
-	svc.scanOnce(t.Context(), seen, cooldown, notify) // stable → publish
+	svc.scanOnce(t.Context(), seen, cooldown, notify)          // sees change, resets
+	added := svc.scanOnce(t.Context(), seen, cooldown, notify) // stable → publish
 	assert.Equal(t, 1, *puts, "published after the fix")
-	assert.Contains(t, notices[len(notices)-1], "Опубликовано")
+	assert.Equal(t, 1, added["books"], "recovery publish is reported to the caller")
+	// success is silent per-file now (summary is flushBursts' job); only the
+	// original ❌ failure notice remains — no new message on recovery
+	assert.Len(t, notices, 1, "recovery publish does not add a per-file notice")
+	assert.Contains(t, notices[0], "❌")
 }
