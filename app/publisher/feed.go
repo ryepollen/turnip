@@ -24,6 +24,11 @@ type FeedConfig struct {
 	Type        string `yaml:"type"`     // serial | episodic, default serial
 	Author      string `yaml:"author"`
 	Normalize   *bool  `yaml:"normalize"` // loudnorm to -16 LUFS; default depends on category (see normalizeDefaultFor)
+	// EpisodeStrip is a book/show prefix trimmed off each episode title in the
+	// feed only. Files keep their full self-describing names on disk/iCloud (the
+	// ferry is flat and drops the book folder), while Overcast shows the short
+	// tail: filename "NN - Автор. «Книга». Часть N" → episode title "Часть N".
+	EpisodeStrip string `yaml:"episode_strip"`
 }
 
 // NormalizeEnabled resolves the tri-state normalize flag (nil = on).
@@ -114,6 +119,29 @@ func parseTrackName(filename string) (order int, title string) {
 	return 0, base
 }
 
+// episodeLeadPunct trims separators left after cutting a book/show prefix
+// («Книга». Часть 1 → Часть 1), matching tune_get's chapterTitle cleanup.
+const episodeLeadPunct = " \t.,:;–—«»\"'()-"
+
+// stripEpisodePrefix removes a configured book/show prefix from an episode
+// title for feed display only. Case-insensitive, tolerant of the punctuation
+// that separates the prefix from the chapter tail. Falls back to the original
+// title if stripping would leave it empty.
+func stripEpisodePrefix(title, prefix string) string {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return title
+	}
+	t := strings.TrimSpace(title)
+	if len(t) >= len(prefix) && strings.EqualFold(t[:len(prefix)], prefix) {
+		t = strings.TrimLeft(t[len(prefix):], episodeLeadPunct)
+		if t != "" {
+			return t
+		}
+	}
+	return strings.TrimSpace(title)
+}
+
 // serialEpoch is the base for synthetic pubDates of serial feeds: players sort
 // by pubDate, so lesson N gets epoch+N minutes and the order always holds
 var serialEpoch = time.Date(2020, 1, 1, 12, 0, 0, 0, time.UTC)
@@ -199,7 +227,7 @@ func BuildFeedXML(cfg FeedConfig, episodes []Episode) ([]byte, error) {
 			mime = "audio/mpeg"
 		}
 		item := rssItem{
-			Title:   ep.Title,
+			Title:   stripEpisodePrefix(ep.Title, cfg.EpisodeStrip),
 			GUID:    rssGUID{Value: ep.GUID(), IsPermaLink: "false"},
 			PubDate: pubDate.Format(time.RFC1123Z),
 			Enclosure: rssEnclosure{

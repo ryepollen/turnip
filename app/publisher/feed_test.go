@@ -62,6 +62,36 @@ func TestLoadFeedConfigDefaults(t *testing.T) {
 	assert.False(t, LoadFeedConfig(off, "courses").NormalizeEnabled(), "explicit false wins for courses")
 }
 
+func TestStripEpisodePrefix(t *testing.T) {
+	const book = "Гэри Стивенсон. «Бешеные деньги. Исповедь валютного трейдера»."
+	tests := []struct {
+		name, title, prefix, want string
+	}{
+		{"exact prefix + separator", "Гэри Стивенсон. «Бешеные деньги. Исповедь валютного трейдера». Часть 7", book, "Часть 7"},
+		{"already short", "Часть 7", book, "Часть 7"},
+		{"no prefix configured", "Гэри Стивенсон. Часть 1", "", "Гэри Стивенсон. Часть 1"},
+		{"prefix not present", "Другая книга. Глава 2", book, "Другая книга. Глава 2"},
+		{"case-insensitive", "гэри стивенсон. «бешеные деньги. исповедь валютного трейдера». Часть 9", book, "Часть 9"},
+		{"strip would empty → keep original", book, book, book},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, stripEpisodePrefix(tt.title, tt.prefix))
+		})
+	}
+}
+
+func TestBuildFeedXMLEpisodeStrip(t *testing.T) {
+	eps := []Episode{
+		{File: "01 - Автор. «Кн». Часть 1.mp3", Title: "Автор. «Кн». Часть 1", Order: 1, PublicURL: "https://pub/01.mp3"},
+	}
+	cfg := FeedConfig{Title: "Кн", Type: "serial", EpisodeStrip: "Автор. «Кн»."}
+	data, err := BuildFeedXML(cfg, eps)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "<title>Часть 1</title>")
+	assert.NotContains(t, string(data), "<title>Автор")
+}
+
 func TestBuildFeedXMLSerialOrder(t *testing.T) {
 	eps := []Episode{
 		{File: "02 - Two.mp3", Title: "Two", Order: 2, R2Key: "a/s/c/02.mp3", PublicURL: "https://pub/02.mp3", SizeBytes: 200, DurationSec: 120},
