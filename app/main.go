@@ -131,6 +131,7 @@ func main() {
 		outWr := log.ToWriter(log.Default(), "DEBUG")
 		errWr := log.ToWriter(log.Default(), "INFO")
 		dwnl := ytfeed.NewDownloader(conf.YouTube.DlTemplate, outWr, errWr, conf.YouTube.FilesLocation, conf.YouTube.CookiesFile)
+		dwnl.SetSponsorBlock(conf.YouTube.SponsorBlock)
 		fd := ytfeed.Feed{Client: &http.Client{Timeout: 10 * time.Second},
 			ChannelBaseURL: conf.YouTube.BaseChanURL, PlaylistBaseURL: conf.YouTube.BasePlaylistURL}
 
@@ -198,6 +199,7 @@ func main() {
 		outWr := log.ToWriter(log.Default(), "DEBUG")
 		errWr := log.ToWriter(log.Default(), "INFO")
 		botDownloader := ytfeed.NewDownloader(conf.YouTube.DlTemplate, outWr, errWr, conf.YouTube.FilesLocation, conf.YouTube.CookiesFile)
+		botDownloader.SetSponsorBlock(conf.YouTube.SponsorBlock)
 
 		notesSvc = makeNotesService(conf, ytStore, outWr, errWr)
 		readSvc = makeReadService(conf)

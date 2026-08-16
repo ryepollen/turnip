@@ -32,6 +32,36 @@ func TestDownloader_Get(t *testing.T) {
 	t.Log(l)
 }
 
+func TestInjectSponsorBlock(t *testing.T) {
+	const base = `yt-dlp --extract-audio -f m4a/bestaudio "https://youtu.be/x" -o out.mp3`
+	tests := []struct {
+		name string
+		cats string
+		want string
+	}{
+		{"empty disables", "", base},
+		{"whitespace disables", "  ", base},
+		{"single category", "sponsor",
+			`yt-dlp --sponsorblock-remove sponsor --extract-audio -f m4a/bestaudio "https://youtu.be/x" -o out.mp3`},
+		{"curated set", "sponsor,selfpromo,interaction",
+			`yt-dlp --sponsorblock-remove sponsor,selfpromo,interaction --extract-audio -f m4a/bestaudio "https://youtu.be/x" -o out.mp3`},
+		{"trimmed", "  sponsor  ",
+			`yt-dlp --sponsorblock-remove sponsor --extract-audio -f m4a/bestaudio "https://youtu.be/x" -o out.mp3`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, injectSponsorBlock(base, tt.cats))
+		})
+	}
+}
+
+func TestSetSponsorBlock(t *testing.T) {
+	d := NewDownloader("yt-dlp {{.ID}}", nil, nil, "", "")
+	assert.Empty(t, d.sponsorBlockCat)
+	d.SetSponsorBlock("  sponsor,selfpromo  ")
+	assert.Equal(t, "sponsor,selfpromo", d.sponsorBlockCat, "categories are trimmed on set")
+}
+
 func TestDownloader_GetSkip(t *testing.T) {
 	lw := bytes.NewBuffer(nil)
 	loc := os.TempDir()

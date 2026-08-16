@@ -53,11 +53,12 @@ var ErrSkip = errors.New("skip")
 
 // Downloader executes an external command to download a video and extract its audio.
 type Downloader struct {
-	ytTemplate   string
-	logOutWriter io.Writer
-	logErrWriter io.Writer
-	destination  string
-	cookiesFile  string
+	ytTemplate      string
+	logOutWriter    io.Writer
+	logErrWriter    io.Writer
+	destination     string
+	cookiesFile     string
+	sponsorBlockCat string // yt-dlp --sponsorblock-remove categories; empty disables
 }
 
 // NewDownloader creates a new Downloader with the given template (full command with placeholders for {{.ID}} and {{.Filename}}.
@@ -70,6 +71,27 @@ func NewDownloader(tmpl string, logOutWriter, logErrWriter io.Writer, destinatio
 		destination:  destination,
 		cookiesFile:  cookiesFile,
 	}
+}
+
+// SetSponsorBlock enables removal of the given SponsorBlock categories (comma
+// separated, e.g. "sponsor,selfpromo,interaction") from downloaded audio via
+// yt-dlp's --sponsorblock-remove. Empty leaves downloads untouched. Applied to
+// feed-serving downloaders only — the notes downloader must keep source
+// timecodes so transcript timestamps match the original video.
+func (d *Downloader) SetSponsorBlock(categories string) {
+	d.sponsorBlockCat = strings.TrimSpace(categories)
+}
+
+// injectSponsorBlock adds --sponsorblock-remove <cats> to a yt-dlp command
+// string when categories are set (mirrors how --cookies is injected). yt-dlp
+// applies the ModifyChapters postprocessor via ffmpeg, so ad/self-promo/
+// interaction segments are cut during extraction. Kept pure for testing.
+func injectSponsorBlock(cmdStr, categories string) string {
+	categories = strings.TrimSpace(categories)
+	if categories == "" {
+		return cmdStr
+	}
+	return strings.Replace(cmdStr, "yt-dlp ", "yt-dlp --sponsorblock-remove "+categories+" ", 1)
 }
 
 // ytdlpArgs returns common yt-dlp arguments including cookies if configured
@@ -116,6 +138,7 @@ func (d *Downloader) get(ctx context.Context, id, fname string, useCookies bool)
 	if useCookies && d.cookiesFile != "" {
 		cmdStr = strings.Replace(cmdStr, "yt-dlp ", "yt-dlp --cookies "+d.cookiesFile+" ", 1)
 	}
+	cmdStr = injectSponsorBlock(cmdStr, d.sponsorBlockCat)
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", cmdStr) // nolint
 	cmd.Stdin = os.Stdin
