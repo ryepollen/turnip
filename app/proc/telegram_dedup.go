@@ -15,14 +15,16 @@ import (
 type dupState int
 
 const (
-	dupNone    dupState = iota // never seen
-	dupInFeed                  // already an episode in the feed
-	dupInQueue                 // a notes job (queued/processing) exists for it
+	dupNone       dupState = iota // never seen
+	dupInFeed                     // already an episode in the feed
+	dupInQueue                    // a notes job (queued/processing) exists for it
+	dupNotesReady                 // an L1 transcript/notes file already exists
 )
 
-// videoDupStatus reports whether videoID is already in the feed or the notes
-// queue. Two bolt reads, no network. when is the feed-add time for dupInFeed,
-// zero otherwise. nil-safe: returns dupNone when the store is absent.
+// videoDupStatus reports the most relevant "already known" state for videoID,
+// read cheaply from bolt + a file stat, no network. Priority: feed episode →
+// in-flight notes job → finished transcript. when is the feed-add time for
+// dupInFeed, zero otherwise. nil-safe: returns dupNone when the store is absent.
 func (t *TelegramBot) videoDupStatus(videoID string) (dupState, time.Time) {
 	if t.Store == nil || videoID == "" {
 		return dupNone, time.Time{}
@@ -34,7 +36,34 @@ func (t *TelegramBot) videoDupStatus(videoID string) (dupState, time.Time) {
 	if found, err := t.Store.HasActiveNotesJob(videoID); err == nil && found {
 		return dupInQueue, time.Time{}
 	}
+	if t.NotesSvc != nil && t.NotesSvc.HasNotes(videoID) {
+		return dupNotesReady, time.Time{}
+	}
 	return dupNone, time.Time{}
+}
+
+// videoHandledFor reports whether the specific action is already satisfied for a
+// video, so page-all skips only what that action would redo: 🎵 (audio) skips
+// videos already in the feed; 📓/📄 (notes/md) skip a finished transcript or an
+// in-flight notes job. Feed presence does not block notes and vice versa.
+func (t *TelegramBot) videoHandledFor(videoID, action string) bool {
+	if t.Store == nil || videoID == "" {
+		return false
+	}
+	switch action {
+	case "au":
+		if found, _, err := t.Store.CheckProcessed(ytfeed.Entry{ChannelID: t.FeedName, VideoID: videoID}); err == nil && found {
+			return true
+		}
+	case "md", "nt":
+		if found, err := t.Store.HasActiveNotesJob(videoID); err == nil && found {
+			return true
+		}
+		if t.NotesSvc != nil && t.NotesSvc.HasNotes(videoID) {
+			return true
+		}
+	}
+	return false
 }
 
 // countKnown returns how many of the ids are already in the feed or the queue.
@@ -58,6 +87,8 @@ func dupMarker(st dupState, when time.Time) string {
 		return "✅ в ленте (" + humanAgo(when, time.Now()) + ")"
 	case dupInQueue:
 		return "⏳ в очереди"
+	case dupNotesReady:
+		return "✅ конспект готов"
 	default:
 		return ""
 	}
@@ -74,6 +105,8 @@ func dupNote(st dupState, when time.Time) string {
 		return fmt.Sprintf("⚠️ Уже в ленте (%s). Жми действие, если нужно заново.", humanAgo(when, time.Now()))
 	case dupInQueue:
 		return "⏳ Уже в очереди на конспект."
+	case dupNotesReady:
+		return "✅ Конспект уже готов. Жми действие, если нужно заново."
 	default:
 		return ""
 	}

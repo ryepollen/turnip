@@ -73,7 +73,11 @@ const (
 	maxPageSize            = 50
 	pendingActionTTL       = 10 * time.Minute
 	maxShowEpisodes        = 50 // cap for "add the whole show" batches
-	maxPlaylistItems       = 50 // cap for "expand a youtube playlist" batches
+	// maxPlaylistItems is a safety ceiling, not a display cap: the triage list
+	// paginates (5/page) and bolt holds the ids+titles cheaply (~70 B each), so a
+	// real playlist no longer loses its tail at 50. It still bounds pathological
+	// inputs (RD radio/mixes are already dropped upstream as infinite).
+	maxPlaylistItems = 300 // cap for "expand a youtube playlist" batches
 
 	// cookieStaleAge: YouTube cookies live ~2–3 months; nudge the owner once the
 	// file (mtime = last refresh) crosses this, before private/age-gated video
@@ -2007,7 +2011,9 @@ const (
 // so the telegram context (chat + status message ids) rides along in the
 // record and survives restarts. Unlike the audio flow, notes never touch the
 // RSS feed bucket. priority orders the claim (see notesPriority* constants).
-func (t *TelegramBot) enqueueNotesJob(statusMsg, originalMsg *tb.Message, rawURL, level, length string, priority int) {
+// The optional title gives the queue view a human label right away (triage and
+// the /md list know it up front); single links backfill it during processing.
+func (t *TelegramBot) enqueueNotesJob(statusMsg, originalMsg *tb.Message, rawURL, level, length string, priority int, title ...string) {
 	if t.NotesSvc == nil || statusMsg == nil {
 		return
 	}
@@ -2018,8 +2024,13 @@ func (t *TelegramBot) enqueueNotesJob(statusMsg, originalMsg *tb.Message, rawURL
 	_, _ = t.Bot.Edit(statusMsg, "⏳ Queued…")
 
 	sourceID, source := noteSourceID(rawURL)
+	label := ""
+	if len(title) > 0 {
+		label = title[0]
+	}
 	rec := ytstore.NotesJobRecord{
 		URL:         rawURL,
+		Title:       label,
 		SourceID:    sourceID,
 		Source:      source,
 		Level:       level,

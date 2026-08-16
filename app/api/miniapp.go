@@ -410,6 +410,7 @@ func (s *Server) appRefsCtrl(w http.ResponseWriter, r *http.Request) {
 // appJob is one recent notes-queue job for the status tab
 type appJob struct {
 	URL     string `json:"url"`
+	Title   string `json:"title,omitempty"`
 	Level   string `json:"level"`
 	Status  string `json:"status"`
 	Error   string `json:"error,omitempty"`
@@ -436,6 +437,7 @@ func (s *Server) appStatusCtrl(w http.ResponseWriter, r *http.Request) {
 		for _, j := range recent {
 			out.Recent = append(out.Recent, appJob{
 				URL:     j.URL,
+				Title:   j.Title,
 				Level:   j.Level,
 				Status:  j.Status,
 				Error:   j.Error,

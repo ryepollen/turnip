@@ -191,7 +191,7 @@ func (t *TelegramBot) handleTriageActionCallback(c *tb.Callback) {
 			_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Уже в очереди"})
 			return
 		}
-		t.triageQueueOne(chat, token, action, id)
+		t.triageQueueOne(chat, token, action, id, triageItemTitle(rec, idx))
 	case "pgau", "pgnt":
 		itemAction := "au"
 		if action == "pgnt" {
@@ -208,13 +208,14 @@ func (t *TelegramBot) handleTriageActionCallback(c *tb.Callback) {
 			if rec.done[id] {
 				continue
 			}
-			// skip videos already in the feed or the notes queue — page-all means
-			// "queue everything genuinely new here", the point of re-sending a
-			// partially-done playlist
-			if st, _ := t.videoDupStatus(id); st != dupNone {
+			// page-all means "queue everything genuinely new here" (the point of
+			// re-sending a partially-done playlist). Skip is action-aware: 🎵
+			// skips only feed dups, 📓 skips finished-or-queued notes — so a
+			// playlist done as notes isn't blocked from audio and vice versa.
+			if t.videoHandledFor(id, itemAction) {
 				continue
 			}
-			t.triageQueueOne(chat, token, itemAction, id)
+			t.triageQueueOne(chat, token, itemAction, id, triageItemTitle(rec, i))
 			queued++
 		}
 		if queued == 0 {
@@ -241,7 +242,7 @@ func (t *TelegramBot) handleTriageActionCallback(c *tb.Callback) {
 // marks it done in bolt (which also refreshes the list's TTL so an active triage
 // session is not garbage-collected mid-work). Audio uses the existing download
 // flow; md/nt go through the notes queue.
-func (t *TelegramBot) triageQueueOne(chat *tb.Chat, token, action, videoID string) {
+func (t *TelegramBot) triageQueueOne(chat *tb.Chat, token, action, videoID, title string) {
 	videoURL := "https://www.youtube.com/watch?v=" + videoID
 	switch action {
 	case "au":
@@ -264,7 +265,7 @@ func (t *TelegramBot) triageQueueOne(chat *tb.Chat, token, action, videoID strin
 		st, _ := t.Bot.Send(chat, "⏳ Queued…")
 		// triage items come from a big playlist/batch: background priority so a
 		// single user link queued meanwhile jumps ahead of the remaining items
-		t.enqueueNotesJob(st, nil, videoURL, level, "", notesPriorityBulk)
+		t.enqueueNotesJob(st, nil, videoURL, level, "", notesPriorityBulk, title)
 	}
 	if _, _, err := t.Store.TouchPendingActionDone(token, videoID, time.Now().UTC()); err != nil {
 		log.Printf("[WARN] mark triage done %s/%s: %v", token, videoID, err)

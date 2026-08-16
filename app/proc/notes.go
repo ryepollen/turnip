@@ -318,6 +318,18 @@ func (n *NotesService) Delete(sourceID string) error {
 	return nil
 }
 
+// HasNotes reports whether an L1 transcript already exists for sourceID (a
+// YouTube video id / apple episode id — the .md filename stem). A cheap stat, no
+// network: lets dedup markers show "конспект готов" so a re-sent playlist skips
+// notes work that a previous run already finished.
+func (n *NotesService) HasNotes(sourceID string) bool {
+	if n == nil || sourceID == "" || strings.ContainsAny(sourceID, `/\`) || strings.Contains(sourceID, "..") {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(n.MDLocation, sourceID+".md"))
+	return err == nil
+}
+
 // Enqueue persists a new queued job, rejecting duplicates and overflow.
 // The record's ID, status and timestamps are set here.
 func (n *NotesService) Enqueue(rec ytstore.NotesJobRecord) error {
@@ -460,6 +472,12 @@ func (n *NotesService) drainQueue(ctx context.Context) {
 func (n *NotesService) runJob(ctx context.Context, job ytstore.NotesJobRecord) {
 	res, err := n.process(ctx, job)
 	job.UpdatedAt = time.Now().UTC()
+	// backfill a human label for the queue view when the job was enqueued from a
+	// bare link (single /notes, menu tap): triage/md_list already pass a title,
+	// but single links only learn it once the pipeline resolved source metadata.
+	if job.Title == "" && res.Title != "" {
+		job.Title = res.Title
+	}
 	if err != nil {
 		log.Printf("[ERROR] notes job failed for %s: %v", job.URL, err)
 		job.Status, job.Error = ytstore.NotesJobFailed, err.Error()

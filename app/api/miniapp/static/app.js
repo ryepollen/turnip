@@ -220,9 +220,10 @@ function renderQueue(data) {
   if (data.recent && data.recent.length) {
     html += data.recent.map((j) => {
       const mark = j.status === 'failed' ? '❌' : (j.status === 'done' ? '✅' : (j.status === 'processing' ? '⏳' : '•'));
+      const label = j.title || j.url;
       const meta = metaLine([esc(j.level), esc(j.status), esc(fmtDate(j.updated)), j.error ? esc(j.error) : '']);
       return row(
-        '<div class="head"><div class="title">' + mark + ' ' + esc(j.url) + '</div></div>' +
+        '<div class="head"><div class="title">' + mark + ' ' + esc(label) + '</div></div>' +
         '<div class="meta">' + meta + '</div>'
       );
     }).join('');

@@ -58,10 +58,12 @@ func TestDupMarkerAndNote(t *testing.T) {
 	assert.Equal(t, "", dupMarker(dupNone, time.Time{}))
 	assert.Equal(t, "⏳ в очереди", dupMarker(dupInQueue, time.Time{}))
 	assert.Equal(t, "✅ в ленте", dupMarker(dupInFeed, time.Time{}))
+	assert.Equal(t, "✅ конспект готов", dupMarker(dupNotesReady, time.Time{}))
 	assert.Contains(t, dupMarker(dupInFeed, now.Add(-3*24*time.Hour)), "✅ в ленте (3 дня назад)")
 
 	assert.Equal(t, "", dupNote(dupNone, time.Time{}))
 	assert.Contains(t, dupNote(dupInQueue, time.Time{}), "в очереди")
 	assert.Contains(t, dupNote(dupInFeed, time.Time{}), "Уже в ленте")
+	assert.Contains(t, dupNote(dupNotesReady, time.Time{}), "Конспект уже готов")
 	assert.Contains(t, dupNote(dupInFeed, now.Add(-2*24*time.Hour)), "2 дня назад")
 }

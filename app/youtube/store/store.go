@@ -38,6 +38,7 @@ const (
 type NotesJobRecord struct {
 	ID          string    `json:"id"` // {unix_nanos padded}-{sourceID}, key order = FIFO
 	URL         string    `json:"url"`
+	Title       string    `json:"title,omitempty"` // human label for the queue view; from triage titles or backfilled from transcript frontmatter
 	SourceID    string    `json:"source_id"`
 	Source      string    `json:"source"`                   // "youtube" | "article"
 	Level       string    `json:"level"`                    // "md" | "notes"
