@@ -2253,6 +2253,18 @@ func (t *TelegramBot) NotesJobFailed(job ytstore.NotesJobRecord, res NotesResult
 	chat, statusMsg := t.notesChatMsg(job)
 
 	if res.MDPath != "" {
+		// bulk items (playlist/triage fan-out) must not flood the chat with a .md
+		// document each — a systemic later-stage failure would dump dozens of
+		// files to download and messages to delete. The transcript is already on
+		// disk, reachable via the /md list and the Mini App, so just report it
+		// compactly. A single deliberate request still gets the document handed
+		// over, since that's the artifact the user is waiting on.
+		if job.Priority <= notesPriorityBulk {
+			if job.StatusMsgID != 0 {
+				_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ %s\n📄 транскрипт готов (в /md-списке), но конспект не удался:\n%v", res.Title, err))
+			}
+			return
+		}
 		if job.StatusMsgID != 0 {
 			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("⚠️ %s\n📄 транскрипт готов (файл ниже), но дальше не получилось:\n%v", res.Title, err))
 		}

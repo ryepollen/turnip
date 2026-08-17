@@ -120,7 +120,8 @@ func TestSetDefault(t *testing.T) {
 
 	assert.Equal(t, "var/md", c.Notes.MDLocation)
 	assert.Equal(t, "whisper-large-v3", c.Notes.WhisperModel)
-	assert.Equal(t, "llama-3.3-70b-versatile", c.Notes.LLMModel)
+	assert.Equal(t, "openai/gpt-oss-120b", c.Notes.LLMModel)
+	assert.Equal(t, "openai/gpt-oss-20b", c.Notes.LLMCleanModel)
 	assert.Equal(t, 1, c.Notes.Concurrency)
 	assert.Equal(t, 600, c.Notes.ChunkSeconds)
 }

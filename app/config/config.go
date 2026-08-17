@@ -67,8 +67,9 @@ type Conf struct {
 		MDLocation       string `yaml:"md_location"`
 		WhisperModel     string `yaml:"whisper_model"`
 		WhisperBaseURL   string `yaml:"whisper_base_url"` // OpenAI-compatible ASR; default Groq
-		LLMModel         string `yaml:"llm_model"`
-		LLMBaseURL       string `yaml:"llm_base_url"` // OpenAI-compatible; default Groq
+		LLMModel         string `yaml:"llm_model"`       // strong model for summary/refs/digest
+		LLMCleanModel    string `yaml:"llm_clean_model"` // cheap model for the bulk cleanup pass
+		LLMBaseURL       string `yaml:"llm_base_url"`    // OpenAI-compatible; default Groq
 		NotionParentPage string `yaml:"notion_parent_page"`
 		Concurrency      int    `yaml:"concurrency"`
 		ChunkSeconds     int    `yaml:"chunk_seconds"`
@@ -253,7 +254,10 @@ func (c *Conf) setDefaults() {
 		c.Notes.WhisperModel = "whisper-large-v3"
 	}
 	if c.Notes.LLMModel == "" {
-		c.Notes.LLMModel = "llama-3.3-70b-versatile"
+		c.Notes.LLMModel = "openai/gpt-oss-120b"
+	}
+	if c.Notes.LLMCleanModel == "" {
+		c.Notes.LLMCleanModel = "openai/gpt-oss-20b"
 	}
 	if c.Notes.Concurrency == 0 {
 		c.Notes.Concurrency = 1

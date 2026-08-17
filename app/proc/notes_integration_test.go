@@ -44,7 +44,7 @@ func TestIntegrationEnrich(t *testing.T) {
 		t.Skip("GROQ_API_KEY not set")
 	}
 
-	svc := NewEnrichService(key, "")
+	svc := NewEnrichService(key, "", "")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 

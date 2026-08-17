@@ -55,7 +55,7 @@ func TestProcessDigestEndToEnd(t *testing.T) {
 		return "СВОДНЫЙ КОНСПЕКТ ПО ДИЗАЙНУ"
 	})
 	defer groq.Close()
-	enricher := NewEnrichService("test-key", "")
+	enricher := NewEnrichService("test-key", "", "")
 	enricher.BaseURL = groq.URL
 
 	notionSrv, state := newNotionMock(t)
@@ -127,7 +127,7 @@ func TestProcessDigestSmartSelection(t *testing.T) {
 		return "СВОДНЫЙ КОНСПЕКТ ПО НЕФТИ"
 	})
 	defer groq.Close()
-	enricher := NewEnrichService("test-key", "")
+	enricher := NewEnrichService("test-key", "", "")
 	enricher.BaseURL = groq.URL
 
 	notionSrv, _ := newNotionMock(t)

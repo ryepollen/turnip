@@ -11,12 +11,15 @@ import (
 	"time"
 )
 
-// Groq free-tier TPM on the tightest model (llama-3.1-8b-instant) is 6000 tokens
-// per minute, and a single request whose input+output overshoots that ceiling
-// gets a non-retryable 413 "Request too large". Sizes below are in *estimated
-// tokens*, not chars — Cyrillic tokenizes at roughly one token per character
-// (~2 bytes/token) versus ~4 bytes/token for Latin, so a byte/char budget that
-// is safe for English silently overflows on Russian transcripts.
+// The notes pipeline runs two Groq models: a cheap fast one for the bulk cleanup
+// pass (gpt-oss-20b) and a stronger one for summary/references/digest
+// (gpt-oss-120b). Both sit at a 250K TPM ceiling, so the budgets below leave
+// generous headroom; they stay conservative anyway because a single request
+// whose input+output overshoots the ceiling gets a non-retryable 413 "Request
+// too large". Sizes below are in *estimated tokens*, not chars — Cyrillic
+// tokenizes at roughly one token per character (~2 bytes/token) versus
+// ~4 bytes/token for Latin, so a byte/char budget that is safe for English
+// silently overflows on Russian transcripts.
 const (
 	// cleanupChunkTokens caps the input of a cleanup pass, where the output is
 	// about as large as the input; leaves room for both under the TPM ceiling.
@@ -33,25 +36,43 @@ const (
 	selectMaxOut = 800
 )
 
-// EnrichService runs LLM passes over transcripts via Groq chat completions
+// EnrichService runs LLM passes over transcripts via Groq chat completions.
+// Model is the strong model used for summary/references/digest; CleanModel is
+// the cheaper, faster one used for the high-volume transcript cleanup pass.
 type EnrichService struct {
-	APIKey  string
-	Model   string
-	BaseURL string
-	client  *http.Client
+	APIKey     string
+	Model      string
+	CleanModel string
+	BaseURL    string
+	client     *http.Client
 }
 
-// NewEnrichService creates an enrichment service
-func NewEnrichService(apiKey, model string) *EnrichService {
+// NewEnrichService creates an enrichment service. model is the strong summary
+// model, cleanModel the cheap cleanup model; empty values fall back to Groq's
+// current production GPT-OSS pair.
+func NewEnrichService(apiKey, model, cleanModel string) *EnrichService {
 	if model == "" {
-		model = "llama-3.3-70b-versatile"
+		model = "openai/gpt-oss-120b"
+	}
+	if cleanModel == "" {
+		cleanModel = "openai/gpt-oss-20b"
 	}
 	return &EnrichService{
-		APIKey:  apiKey,
-		Model:   model,
-		BaseURL: groqAPIBase,
-		client:  &http.Client{Timeout: 3 * time.Minute},
+		APIKey:     apiKey,
+		Model:      model,
+		CleanModel: cleanModel,
+		BaseURL:    groqAPIBase,
+		client:     &http.Client{Timeout: 3 * time.Minute},
 	}
+}
+
+// cleanModelID returns the model to use for cleanup passes, falling back to the
+// strong model if no dedicated cleanup model is configured.
+func (e *EnrichService) cleanModelID() string {
+	if e.CleanModel != "" {
+		return e.CleanModel
+	}
+	return e.Model
 }
 
 // NoteTags is the L1 metadata extracted by the LLM
@@ -82,7 +103,7 @@ func (e *EnrichService) CleanTranscript(ctx context.Context, tr *Transcript, pro
 	var out []string
 	prevTail := ""
 	for i, chunk := range chunks {
-		cleaned, err := e.chat(ctx, cleanupPrompt(prevTail), chunk, false, cleanupMaxOut)
+		cleaned, err := e.chatModel(ctx, e.cleanModelID(), cleanupPrompt(prevTail), chunk, false, cleanupMaxOut)
 		if err != nil {
 			return "", fmt.Errorf("failed to clean chunk %d/%d: %w", i+1, len(chunks), err)
 		}
@@ -106,7 +127,7 @@ func (e *EnrichService) CleanPlainText(ctx context.Context, text string, progres
 	var out []string
 	prevTail := ""
 	for i, chunk := range chunks {
-		cleaned, err := e.chat(ctx, plainCleanupPrompt(prevTail), chunk, false, cleanupMaxOut)
+		cleaned, err := e.chatModel(ctx, e.cleanModelID(), plainCleanupPrompt(prevTail), chunk, false, cleanupMaxOut)
 		if err != nil {
 			return "", fmt.Errorf("failed to clean chunk %d/%d: %w", i+1, len(chunks), err)
 		}
@@ -272,15 +293,22 @@ func (e *EnrichService) SynthesizeDigest(ctx context.Context, tag, combined stri
 	return e.reduceSummaries(ctx, partials, digestCombinePrompt(tag))
 }
 
-// chat makes one Groq chat completions call. maxOut (>0) caps the completion via
-// max_tokens so a request's input+output stays under the TPM ceiling.
+// chat makes one Groq chat completions call on the strong Model. maxOut (>0)
+// caps the completion via max_tokens so a request's input+output stays under
+// the TPM ceiling.
 func (e *EnrichService) chat(ctx context.Context, system, user string, jsonMode bool, maxOut int) (string, error) {
+	return e.chatModel(ctx, e.Model, system, user, jsonMode, maxOut)
+}
+
+// chatModel makes one Groq chat completions call on the named model, letting
+// cleanup passes run on the cheaper CleanModel while summary passes use Model.
+func (e *EnrichService) chatModel(ctx context.Context, model, system, user string, jsonMode bool, maxOut int) (string, error) {
 	if e.APIKey == "" {
 		return "", fmt.Errorf("groq api key not configured (set GROQ_API_KEY)")
 	}
 
 	payload := map[string]any{
-		"model":       e.Model,
+		"model":       model,
 		"temperature": 0.2,
 		"messages": []map[string]string{
 			{"role": "system", "content": system},

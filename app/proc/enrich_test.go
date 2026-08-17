@@ -138,7 +138,7 @@ func TestCleanTranscriptChunked(t *testing.T) {
 	})
 	defer ts.Close()
 
-	svc := NewEnrichService("test-key", "")
+	svc := NewEnrichService("test-key", "", "")
 	svc.BaseURL = ts.URL
 
 	// build enough segments to force at least 2 chunks of summaryChunkTokens
@@ -166,7 +166,7 @@ func TestExtractMeta(t *testing.T) {
 	})
 	defer ts.Close()
 
-	svc := NewEnrichService("test-key", "")
+	svc := NewEnrichService("test-key", "", "")
 	svc.BaseURL = ts.URL
 
 	meta, err := svc.ExtractMeta(context.Background(), "My Title", "My Channel", "текст")
@@ -192,7 +192,7 @@ func TestExtractReferencesMergeAndMalformed(t *testing.T) {
 	})
 	defer ts.Close()
 
-	svc := NewEnrichService("test-key", "")
+	svc := NewEnrichService("test-key", "", "")
 	svc.BaseURL = ts.URL
 
 	// force exactly 3 chunks: Cyrillic ≈ 1 token/char, so a line just over the
@@ -238,7 +238,7 @@ func TestSummarizeMapReduce(t *testing.T) {
 	})
 	defer ts.Close()
 
-	svc := NewEnrichService("test-key", "")
+	svc := NewEnrichService("test-key", "", "")
 	svc.BaseURL = ts.URL
 
 	short, err := svc.Summarize(context.Background(), "короткий текст", "")
@@ -272,7 +272,7 @@ func TestReduceSummariesBounded(t *testing.T) {
 	})
 	defer ts.Close()
 
-	svc := NewEnrichService("test-key", "")
+	svc := NewEnrichService("test-key", "", "")
 	svc.BaseURL = ts.URL
 
 	// 10 partials at ~40% of budget each → no two-plus fit together, forcing

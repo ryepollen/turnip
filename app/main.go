@@ -363,10 +363,10 @@ func makeNotesService(conf *config.Conf, ytStore *store.BoltDB, outWr, errWr io.
 	notesDownloader := ytfeed.NewDownloader(conf.YouTube.DlTemplate, outWr, errWr,
 		filepath.Join(conf.Notes.MDLocation, "tmp"), conf.YouTube.CookiesFile)
 
-	log.Printf("[INFO] notes enabled: md location %s, whisper %s, llm %s, notion: %v",
-		conf.Notes.MDLocation, conf.Notes.WhisperModel, conf.Notes.LLMModel, notion != nil)
+	log.Printf("[INFO] notes enabled: md location %s, whisper %s, llm %s (clean %s), notion: %v",
+		conf.Notes.MDLocation, conf.Notes.WhisperModel, conf.Notes.LLMModel, conf.Notes.LLMCleanModel, notion != nil)
 
-	enricher := proc.NewEnrichService(llmKey, conf.Notes.LLMModel)
+	enricher := proc.NewEnrichService(llmKey, conf.Notes.LLMModel, conf.Notes.LLMCleanModel)
 	if conf.Notes.LLMBaseURL != "" {
 		enricher.BaseURL = conf.Notes.LLMBaseURL
 	}
@@ -403,7 +403,7 @@ func makeReadService(conf *config.Conf) *proc.ReadService {
 		llmKey = os.Getenv("GROQ_API_KEY")
 	}
 	if llmKey != "" {
-		enricher = proc.NewEnrichService(llmKey, conf.Notes.LLMModel)
+		enricher = proc.NewEnrichService(llmKey, conf.Notes.LLMModel, conf.Notes.LLMCleanModel)
 		if conf.Notes.LLMBaseURL != "" {
 			enricher.BaseURL = conf.Notes.LLMBaseURL
 		}
