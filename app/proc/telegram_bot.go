@@ -284,12 +284,18 @@ func (t *TelegramBot) gcPendingActions(ctx context.Context) {
 	}
 }
 
+// randToken returns a short random hex token used for callback-data keys and
+// batch ids (6 bytes = 12 hex chars, well within the 64-byte callback limit).
+func randToken() string {
+	var buf [6]byte
+	_, _ = rand.Read(buf[:])
+	return hex.EncodeToString(buf[:])
+}
+
 // storePendingAction persists a menu choice in bolt (survives deploys) keyed by
 // a short random token, and returns the token for the callback data.
 func (t *TelegramBot) storePendingAction(pa *pendingAction) string {
-	var buf [6]byte
-	_, _ = rand.Read(buf[:])
-	token := hex.EncodeToString(buf[:])
+	token := randToken()
 
 	rec := ytstore.PendingActionRecord{
 		Token:     token,
@@ -2078,8 +2084,136 @@ func notesLabel(rawURL string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(rawURL, "https://"), "www.")
 }
 
+// renderBatchStatus formats the single live counter line for a page-all batch,
+// e.g. "📓 стр 1 — партия из 5\n✅ 2 готово · ⏳ 3 в очереди".
+func renderBatchStatus(rec ytstore.NotesBatchRecord) string {
+	pending := rec.Total - rec.Done - rec.Failed
+	if pending < 0 {
+		pending = 0
+	}
+	head := fmt.Sprintf("%s — партия из %d", rec.Label, rec.Total)
+	var parts []string
+	if rec.Done > 0 {
+		parts = append(parts, fmt.Sprintf("✅ %d готово", rec.Done))
+	}
+	if rec.Failed > 0 {
+		parts = append(parts, fmt.Sprintf("⚠️ %d ошибок", rec.Failed))
+	}
+	if pending > 0 {
+		parts = append(parts, fmt.Sprintf("⏳ %d в очереди", pending))
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "✅ готово")
+	}
+	return head + "\n" + strings.Join(parts, " · ")
+}
+
+// bumpBatch atomically adds to a page-all batch's Done/Failed counter and
+// re-renders its one shared status message. Used by both the notes queue (via
+// reportNotesBatch) and the sequential audio batch goroutine.
+func (t *TelegramBot) bumpBatch(batchID string, doneDelta, failedDelta int) {
+	if batchID == "" {
+		return
+	}
+	rec, ok, err := t.Store.IncrNotesBatch(batchID, doneDelta, failedDelta)
+	if err != nil {
+		log.Printf("[WARN] incr notes batch %s: %v", batchID, err)
+		return
+	}
+	if !ok || rec.StatusMsgID == 0 {
+		return
+	}
+	msg := &tb.Message{ID: rec.StatusMsgID, Chat: &tb.Chat{ID: rec.ChatID}}
+	_, _ = t.Bot.Edit(msg, renderBatchStatus(rec))
+}
+
+// reportNotesBatch bumps a batch counter for a notes-queue member on each
+// terminal event — this is what replaces the wall of "⏳ Queued…" messages
+// with a single live counter.
+func (t *TelegramBot) reportNotesBatch(job ytstore.NotesJobRecord, doneDelta, failedDelta int) {
+	t.bumpBatch(job.BatchID, doneDelta, failedDelta)
+}
+
+// triageQueueBatch queues a page-all group under ONE shared status message with
+// a live counter, instead of a per-item "⏳ Queued…". Notes/MD items go through
+// the durable notes queue tagged with the batch id; audio items run in one
+// sequential goroutine. Each id is marked done in the triage record (list ✓).
+func (t *TelegramBot) triageQueueBatch(chat *tb.Chat, token, itemAction, label string, ids, titles []string) {
+	batchID := randToken()
+	st, err := t.Bot.Send(chat, fmt.Sprintf("%s — партия из %d\n⏳ %d в очереди", label, len(ids), len(ids)))
+	if err != nil {
+		log.Printf("[WARN] triage batch status send: %v", err)
+		return
+	}
+	if serr := t.Store.SaveNotesBatch(ytstore.NotesBatchRecord{
+		ID: batchID, ChatID: st.Chat.ID, StatusMsgID: st.ID, Label: label, Total: len(ids),
+	}); serr != nil {
+		log.Printf("[WARN] save notes batch %s: %v", batchID, serr)
+	}
+
+	for i, id := range ids {
+		if _, _, terr := t.Store.TouchPendingActionDone(token, id, time.Now().UTC()); terr != nil {
+			log.Printf("[WARN] mark triage done %s/%s: %v", token, id, terr)
+		}
+		if itemAction == "nt" {
+			t.enqueueNotesBatchItem(st, batchID, "https://www.youtube.com/watch?v="+id, "notes", titles[i])
+		}
+	}
+	if itemAction == "au" {
+		go t.processAudioBatch(context.Background(), batchID, ids)
+	}
+}
+
+// enqueueNotesBatchItem puts one page-all video into the notes queue as a member
+// of batchID: it shares the batch's status message and reports only terminal
+// state into the counter (background priority, like all triage items).
+func (t *TelegramBot) enqueueNotesBatchItem(statusMsg *tb.Message, batchID, rawURL, level, title string) {
+	if t.NotesSvc == nil {
+		return
+	}
+	sourceID, source := noteSourceID(rawURL)
+	rec := ytstore.NotesJobRecord{
+		URL:         rawURL,
+		Title:       title,
+		SourceID:    sourceID,
+		Source:      source,
+		Level:       level,
+		Priority:    notesPriorityBulk,
+		ChatID:      statusMsg.Chat.ID,
+		StatusMsgID: statusMsg.ID,
+		BatchID:     batchID,
+	}
+	if source == "youtube" || source == "podcast" {
+		reuse := filepath.Join(t.FilesLocation, t.makeFileName(sourceID)+".mp3")
+		if fi, err := os.Stat(reuse); err == nil && fi.Size() > 0 {
+			rec.ReuseAudio = reuse
+		}
+	}
+	if err := t.NotesSvc.Enqueue(rec); err != nil {
+		log.Printf("[WARN] enqueue batch notes item %s: %v", rawURL, err)
+		t.bumpBatch(batchID, 0, 1) // still advance the counter so the batch can complete
+	}
+}
+
+// processAudioBatch downloads a page-all group of videos sequentially, feeding
+// each result into the shared batch counter. Audio isn't queue-backed (unlike
+// notes), so it runs here in its own goroutine rather than the notes worker.
+func (t *TelegramBot) processAudioBatch(ctx context.Context, batchID string, ids []string) {
+	for _, id := range ids {
+		if _, err := t.processVideoItem(ctx, id); err != nil {
+			log.Printf("[ERROR] batch audio %s: %v", id, err)
+			t.bumpBatch(batchID, 0, 1)
+			continue
+		}
+		t.bumpBatch(batchID, 1, 0)
+	}
+}
+
 // NotesJobProgress implements NotesNotifier
 func (t *TelegramBot) NotesJobProgress(job ytstore.NotesJobRecord, stage string) {
+	if job.BatchID != "" {
+		return // batch members report only terminal state into the shared counter
+	}
 	if job.StatusMsgID == 0 {
 		return
 	}
@@ -2109,14 +2243,16 @@ func (t *TelegramBot) NotesJobDone(job ytstore.NotesJobRecord, res NotesResult) 
 		return
 	}
 
-	if job.StatusMsgID != 0 {
+	// batch members feed the shared counter instead of a per-item status edit or
+	// a .md document dump; per-item side effects (Notion link, history) still run
+	if job.BatchID == "" && job.StatusMsgID != 0 {
 		msg := fmt.Sprintf("✅ %s\n📄 %s", res.Title, filepath.Base(res.MDPath))
 		if res.NotionPageURL != "" {
 			msg += "\n📓 " + res.NotionPageURL
 		}
 		_, _ = t.Bot.Edit(statusMsg, msg)
 	}
-	if job.Level == "md" {
+	if job.BatchID == "" && job.Level == "md" {
 		t.sendNoteDocument(chat, res)
 	}
 	if res.NotionPageURL != "" && job.Source == "youtube" {
@@ -2136,6 +2272,7 @@ func (t *TelegramBot) NotesJobDone(job ytstore.NotesJobRecord, res NotesResult) 
 	if job.OrigMsgID != 0 {
 		t.deleteMessageAfterDelay(&tb.Message{ID: job.OrigMsgID, Chat: chat}, 5*time.Second)
 	}
+	t.reportNotesBatch(job, 1, 0)
 }
 
 // RunQueuedVoiceover implements the notes queue External handler for level
@@ -2251,6 +2388,15 @@ func (t *TelegramBot) enqueueShowVoiceovers(ctx context.Context, chat *tb.Chat, 
 // of silently losing the work.
 func (t *TelegramBot) NotesJobFailed(job ytstore.NotesJobRecord, res NotesResult, err error) {
 	chat, statusMsg := t.notesChatMsg(job)
+
+	// a batch member never edits its own message or dumps a document — it only
+	// bumps the shared counter's failed tally (the transcript, if any, stays on
+	// disk and is reachable via the /md list and Mini App)
+	if job.BatchID != "" {
+		log.Printf("[WARN] notes batch %s item failed (%s): %v", job.BatchID, job.URL, err)
+		t.reportNotesBatch(job, 0, 1)
+		return
+	}
 
 	if res.MDPath != "" {
 		// bulk items (playlist/triage fan-out) must not flood the chat with a .md

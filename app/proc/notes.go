@@ -165,6 +165,8 @@ type NotesJobStore interface {
 	HasActiveNotesJob(sourceID string) (bool, error)
 	ResetProcessingNotesJobs() (int, error)
 	DeleteOldNotesJobs(cutoff time.Time) (int, error)
+	IncrNotesBatch(id string, doneDelta, failedDelta int) (ytstore.NotesBatchRecord, bool, error)
+	DeleteOldNotesBatches(cutoff time.Time) (int, error)
 	SetNotesPaused(paused bool) error
 	NotesPaused() (bool, error)
 }
@@ -424,6 +426,11 @@ func (n *NotesService) Run(ctx context.Context) {
 		log.Printf("[WARN] failed to prune old notes jobs: %v", err)
 	} else if cnt > 0 {
 		log.Printf("[INFO] pruned %d old notes jobs", cnt)
+	}
+	if cnt, err := n.JobStore.DeleteOldNotesBatches(time.Now().Add(-notesJobsKeep)); err != nil {
+		log.Printf("[WARN] failed to prune old notes batches: %v", err)
+	} else if cnt > 0 {
+		log.Printf("[INFO] pruned %d old notes batches", cnt)
 	}
 
 	log.Printf("[INFO] starting notes service, workers: %d, md location: %s", n.Concurrency, n.MDLocation)

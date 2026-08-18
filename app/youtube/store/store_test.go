@@ -650,6 +650,62 @@ func TestStore_NotesJobs_Priority(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestStore_NotesBatches(t *testing.T) {
+	tmpfile := filepath.Join(os.TempDir(), "test-notes-batches.db")
+	defer os.Remove(tmpfile)
+
+	db, err := bolt.Open(tmpfile, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	require.NoError(t, err)
+	s := BoltDB{DB: db}
+
+	// empty id rejected
+	assert.Error(t, s.SaveNotesBatch(NotesBatchRecord{}))
+
+	// incrementing an unknown batch is a no-op, not an error
+	_, ok, err := s.IncrNotesBatch("nope", 1, 0)
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	require.NoError(t, s.SaveNotesBatch(NotesBatchRecord{
+		ID: "b1", ChatID: 42, StatusMsgID: 7, Label: "📓 стр 1", Total: 5,
+	}))
+
+	// two done, one failed — counters accumulate atomically
+	rec, ok, err := s.IncrNotesBatch("b1", 1, 0)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, 1, rec.Done)
+	assert.Equal(t, 5, rec.Total, "static fields preserved across incr")
+	assert.Equal(t, "📓 стр 1", rec.Label)
+
+	_, _, err = s.IncrNotesBatch("b1", 1, 0)
+	require.NoError(t, err)
+	rec, ok, err = s.IncrNotesBatch("b1", 0, 1)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, 2, rec.Done)
+	assert.Equal(t, 1, rec.Failed)
+	assert.Equal(t, int64(42), rec.ChatID)
+	assert.Equal(t, 7, rec.StatusMsgID)
+
+	// prune keeps fresh batches, drops stale ones by UpdatedAt
+	n, err := s.DeleteOldNotesBatches(time.Now().Add(-time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 0, n, "fresh batch survives")
+
+	_, ok, err = s.IncrNotesBatch("b1", 0, 0)
+	require.NoError(t, err)
+	assert.True(t, ok, "still present before prune")
+
+	n, err = s.DeleteOldNotesBatches(time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "stale batch pruned")
+
+	_, ok, err = s.IncrNotesBatch("b1", 0, 0)
+	require.NoError(t, err)
+	assert.False(t, ok, "gone after prune")
+}
+
 func TestStore_PendingActions(t *testing.T) {
 	tmpfile := filepath.Join(os.TempDir(), "test-pending-actions.db")
 	defer os.Remove(tmpfile)

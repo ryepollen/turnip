@@ -20,6 +20,7 @@ var processedBkt = []byte("processed")
 var historyLogBkt = []byte("history_log")
 var notionMetaBkt = []byte("notion_meta")
 var notesJobsBkt = []byte("notes_jobs")
+var notesBatchesBkt = []byte("notes_batches")
 var pendingActionsBkt = []byte("pending_actions")
 var refsIndexBkt = []byte("refs_index")
 var queueCtrlBkt = []byte("queue_control")
@@ -50,8 +51,26 @@ type NotesJobRecord struct {
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	ChatID      int64     `json:"chat_id,omitempty"`
-	StatusMsgID int       `json:"status_msg_id,omitempty"`
+	StatusMsgID int       `json:"status_msg_id,omitempty"` // for batch jobs this is the shared counter message
 	OrigMsgID   int       `json:"orig_msg_id,omitempty"`
+	BatchID     string    `json:"batch_id,omitempty"` // non-empty = member of a page-all batch reporting into one counter
+}
+
+// NotesBatchRecord tracks a "page-all" group of notes/audio jobs that report
+// progress into a single shared status message with a live counter, instead of
+// one "⏳ Queued…" message per item. It lives in bolt so the counter survives a
+// deploy: the durable jobs keep completing and each terminal event atomically
+// bumps Done/Failed here, then re-renders the shared message.
+type NotesBatchRecord struct {
+	ID          string    `json:"id"`
+	ChatID      int64     `json:"chat_id"`
+	StatusMsgID int       `json:"status_msg_id"`
+	Label       string    `json:"label"` // e.g. "📓 стр 1"
+	Total       int       `json:"total"`
+	Done        int       `json:"done"`
+	Failed      int       `json:"failed"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // HistoryEntry is an append-only record of a user-submitted item. Unlike
@@ -845,6 +864,91 @@ func (s *BoltDB) DeleteOldNotesJobs(cutoff time.Time) (count int, err error) {
 		for _, k := range old {
 			if derr := bucket.Delete(k); derr != nil {
 				return fmt.Errorf("delete notes job %s: %w", string(k), derr)
+			}
+			count++
+		}
+		return nil
+	})
+	return count, err
+}
+
+// SaveNotesBatch creates or updates a batch counter record keyed by its ID.
+func (s *BoltDB) SaveNotesBatch(rec NotesBatchRecord) error {
+	if rec.ID == "" {
+		return errors.New("notes batch id is empty")
+	}
+	if rec.CreatedAt.IsZero() {
+		rec.CreatedAt = time.Now().UTC()
+	}
+	rec.UpdatedAt = time.Now().UTC()
+	return s.Update(func(tx *bolt.Tx) error {
+		bucket, e := tx.CreateBucketIfNotExists(notesBatchesBkt)
+		if e != nil {
+			return fmt.Errorf("create bucket %s: %w", notesBatchesBkt, e)
+		}
+		data, jerr := json.Marshal(&rec)
+		if jerr != nil {
+			return fmt.Errorf("marshal notes batch %s: %w", rec.ID, jerr)
+		}
+		return bucket.Put([]byte(rec.ID), data)
+	})
+}
+
+// IncrNotesBatch atomically bumps Done/Failed for a batch and returns the updated
+// record. ok is false when the batch id is unknown (GC'd or never created).
+func (s *BoltDB) IncrNotesBatch(id string, doneDelta, failedDelta int) (rec NotesBatchRecord, ok bool, err error) {
+	err = s.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(notesBatchesBkt)
+		if bucket == nil {
+			return nil
+		}
+		v := bucket.Get([]byte(id))
+		if v == nil {
+			return nil
+		}
+		if jerr := json.Unmarshal(v, &rec); jerr != nil {
+			return fmt.Errorf("unmarshal notes batch %s: %w", id, jerr)
+		}
+		rec.Done += doneDelta
+		rec.Failed += failedDelta
+		rec.UpdatedAt = time.Now().UTC()
+		data, jerr := json.Marshal(&rec)
+		if jerr != nil {
+			return fmt.Errorf("marshal notes batch %s: %w", id, jerr)
+		}
+		if perr := bucket.Put([]byte(id), data); perr != nil {
+			return perr
+		}
+		ok = true
+		return nil
+	})
+	return rec, ok, err
+}
+
+// DeleteOldNotesBatches removes batch records older than cutoff, keeping the
+// bucket bounded (a batch is short-lived — its jobs finish within hours).
+func (s *BoltDB) DeleteOldNotesBatches(cutoff time.Time) (count int, err error) {
+	err = s.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(notesBatchesBkt)
+		if bucket == nil {
+			return nil
+		}
+		var old [][]byte
+		if ferr := bucket.ForEach(func(k, v []byte) error {
+			var item NotesBatchRecord
+			if jerr := json.Unmarshal(v, &item); jerr != nil {
+				return nil //nolint:nilerr // skip broken record
+			}
+			if !item.UpdatedAt.After(cutoff) {
+				old = append(old, append([]byte(nil), k...))
+			}
+			return nil
+		}); ferr != nil {
+			return ferr
+		}
+		for _, k := range old {
+			if derr := bucket.Delete(k); derr != nil {
+				return fmt.Errorf("delete notes batch %s: %w", string(k), derr)
 			}
 			count++
 		}

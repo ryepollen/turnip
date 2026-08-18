@@ -193,16 +193,16 @@ func (t *TelegramBot) handleTriageActionCallback(c *tb.Callback) {
 		}
 		t.triageQueueOne(chat, token, action, id, triageItemTitle(rec, idx))
 	case "pgau", "pgnt":
-		itemAction := "au"
+		itemAction, emoji := "au", "🎵"
 		if action == "pgnt" {
-			itemAction = "nt"
+			itemAction, emoji = "nt", "📓"
 		}
 		start := page * triagePageSize
 		end := start + triagePageSize
 		if end > len(rec.videoIDs) {
 			end = len(rec.videoIDs)
 		}
-		queued := 0
+		var ids, titles []string
 		for i := start; i < end; i++ {
 			id := rec.videoIDs[i]
 			if rec.done[id] {
@@ -215,13 +215,15 @@ func (t *TelegramBot) handleTriageActionCallback(c *tb.Callback) {
 			if t.videoHandledFor(id, itemAction) {
 				continue
 			}
-			t.triageQueueOne(chat, token, itemAction, id, triageItemTitle(rec, i))
-			queued++
+			ids = append(ids, id)
+			titles = append(titles, triageItemTitle(rec, i))
 		}
-		if queued == 0 {
+		if len(ids) == 0 {
 			_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Всё на странице уже в ленте/очереди"})
 			return
 		}
+		// one shared status message with a live counter, not N "⏳ Queued…"
+		t.triageQueueBatch(chat, token, itemAction, fmt.Sprintf("%s стр %d", emoji, page+1), ids, titles)
 	default:
 		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Bad action"})
 		return
