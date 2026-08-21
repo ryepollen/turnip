@@ -3197,23 +3197,38 @@ func (t *TelegramBot) processVoiceover(ctx context.Context, chat *tb.Chat, statu
 // processVoiceoverViaSubtitles handles long videos (>4h) by downloading subtitles,
 // translating them, and converting to speech via Edge TTS
 func (t *TelegramBot) processVoiceoverViaSubtitles(ctx context.Context, statusMsg *tb.Message, videoURL, videoID string, info *ytfeed.VideoInfo) (string, int, error) {
-	// 1. Download subtitles
+	// 1. Try subtitles first (cheap, keeps original wording). If the video has
+	// none, fall back to Whisper transcription of the audio (needs notes/Groq).
 	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("📝 Скачиваю субтитры: %s...", info.Title))
-	subFile, lang, err := t.SubtitleSvc.DownloadSubtitles(ctx, videoURL)
-	if err != nil {
-		return "", 0, fmt.Errorf("не удалось скачать субтитры: %w", err)
-	}
-	defer t.SubtitleSvc.Cleanup(subFile)
-
-	// 2. Parse subtitles to text
-	_, _ = t.Bot.Edit(statusMsg, "📄 Извлекаю текст из субтитров...")
-	text, err := t.SubtitleSvc.ParseSubtitles(subFile)
-	if err != nil {
-		return "", 0, fmt.Errorf("не удалось распарсить субтитры: %w", err)
+	var text, lang string
+	subFile, subLang, subErr := t.SubtitleSvc.DownloadSubtitles(ctx, videoURL)
+	if subErr != nil {
+		if t.NotesSvc == nil || !t.NotesSvc.Transcriber.Available() {
+			return "", 0, fmt.Errorf("у видео нет субтитров, а транскрипция (Whisper) недоступна — озвучка длинного видео невозможна: %w", subErr)
+		}
+		log.Printf("[INFO] no subtitles for %s, falling back to Whisper: %v", videoID, subErr)
+		_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("📝 Нет субтитров, транскрибирую аудио (Whisper): %s...", info.Title))
+		txt, l, tErr := t.NotesSvc.TranscribeVideoPlain(ctx, videoID, func(done, total int) {
+			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🎧 Транскрибирую %d/%d: %s...", done, total, info.Title))
+		})
+		if tErr != nil {
+			return "", 0, fmt.Errorf("не удалось транскрибировать: %w", tErr)
+		}
+		text, lang = txt, l
+	} else {
+		defer t.SubtitleSvc.Cleanup(subFile)
+		lang = subLang
+		// 2. Parse subtitles to text
+		_, _ = t.Bot.Edit(statusMsg, "📄 Извлекаю текст из субтитров...")
+		parsed, perr := t.SubtitleSvc.ParseSubtitles(subFile)
+		if perr != nil {
+			return "", 0, fmt.Errorf("не удалось распарсить субтитры: %w", perr)
+		}
+		text = parsed
 	}
 
 	if text == "" {
-		return "", 0, fmt.Errorf("субтитры пустые")
+		return "", 0, fmt.Errorf("пустой транскрипт")
 	}
 
 	const maxSubtitleLen = 150000 // ~2.5 hours of audio

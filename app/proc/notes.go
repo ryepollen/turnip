@@ -802,6 +802,47 @@ func (n *NotesService) audioFor(ctx context.Context, job ytstore.NotesJobRecord)
 	}, nil
 }
 
+// TranscribeVideoPlain downloads a YouTube video's audio to a temp file and
+// returns its Whisper transcript as plain joined text plus the detected
+// language. It is the /vo fallback for long videos that have no subtitles: the
+// notes pipeline already owns a temp-dir downloader + Whisper, so voiceover
+// reuses them instead of duplicating that plumbing. progress is nil-safe.
+func (n *NotesService) TranscribeVideoPlain(ctx context.Context, videoID string, progress func(done, total int)) (text, lang string, err error) {
+	if n == nil || !n.Transcriber.Available() {
+		return "", "", fmt.Errorf("transcription not configured (set GROQ_API_KEY)")
+	}
+	if n.Downloader == nil {
+		return "", "", fmt.Errorf("downloader not configured")
+	}
+	file, err := n.Downloader.Get(ctx, videoID, "vo_"+videoID)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to download audio: %w", err)
+	}
+	defer func() {
+		if rmErr := os.Remove(file); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.Printf("[WARN] failed to remove temp audio %s: %v", file, rmErr)
+		}
+	}()
+
+	tr, err := n.Transcriber.Transcribe(ctx, file, progress)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to transcribe: %w", err)
+	}
+
+	var b strings.Builder
+	for _, seg := range tr.Segments {
+		s := strings.TrimSpace(seg.Text)
+		if s == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(s)
+	}
+	return b.String(), tr.Language, nil
+}
+
 // transcribePodcast produces the cleaned transcript body for an Apple Podcasts
 // episode. Source priority: the publisher's official transcript from the show
 // RSS (free, exact) — then Whisper over the audio.

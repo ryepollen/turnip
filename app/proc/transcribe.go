@@ -76,6 +76,12 @@ type groqVerboseResp struct {
 	} `json:"segments"`
 }
 
+// Available reports whether transcription is usable (a Groq key is configured).
+// nil-safe so callers can probe an optional service without a guard.
+func (s *TranscribeService) Available() bool {
+	return s != nil && s.APIKey != ""
+}
+
 // Transcribe chunks the audio file and transcribes each chunk, assembling segments
 // with absolute timestamps. progress is called after each transcribed chunk.
 func (s *TranscribeService) Transcribe(ctx context.Context, audioPath string, progress func(done, total int)) (*Transcript, error) {
