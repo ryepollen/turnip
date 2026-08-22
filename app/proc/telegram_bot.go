@@ -208,7 +208,7 @@ func (t *TelegramBot) Run(ctx context.Context) error {
 	t.Bot.Handle("/pause", t.handlePause)
 	t.Bot.Handle("/resume", t.handleResume)
 	t.Bot.Handle("/feeds", t.handleFeeds)
-	t.Bot.Handle("/archive", t.handleArchive)
+	t.Bot.Handle("/library", t.handleLibrary)
 	t.Bot.Handle("/help", t.handleHelp)
 	t.Bot.Handle("/start", t.handleHelp)
 
@@ -642,7 +642,7 @@ Podcasts, статья) — появится меню: слушать, пере�
 
 Платформа (Hörbuch / Seminar):
 /feeds — ленты с URL подписки
-/archive <категория> — 🗄 в архив / 🔁 переобработать
+/library [тип] — библиотека работ: ▶ Слушать / ⏹ Снять
 
 Прочее:
 /history — вечный лог всех отправлений
@@ -1372,12 +1372,12 @@ func (t *TelegramBot) handleCallback(c *tb.Callback) {
 	case strings.HasPrefix(c.Data, "\frefs_pg|"):
 		c.Data = strings.TrimPrefix(c.Data, "\frefs_pg|")
 		t.handleRefsPageCallback(c)
-	case strings.HasPrefix(c.Data, "\fpub_pg|"):
-		c.Data = strings.TrimPrefix(c.Data, "\fpub_pg|")
-		t.handlePubPageCallback(c)
-	case strings.HasPrefix(c.Data, "\fpub_act|"):
-		c.Data = strings.TrimPrefix(c.Data, "\fpub_act|")
-		t.handlePubActionCallback(c)
+	case strings.HasPrefix(c.Data, "\flib_pg|"):
+		c.Data = strings.TrimPrefix(c.Data, "\flib_pg|")
+		t.handleLibPageCallback(c)
+	case strings.HasPrefix(c.Data, "\flib_act|"):
+		c.Data = strings.TrimPrefix(c.Data, "\flib_act|")
+		t.handleLibActionCallback(c)
 	case strings.HasPrefix(c.Data, "\ftri_page|"):
 		c.Data = strings.TrimPrefix(c.Data, "\ftri_page|")
 		t.handleTriagePageCallback(c)

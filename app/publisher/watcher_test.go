@@ -1,154 +1,64 @@
 package publisher
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func newWatcherTestService(t *testing.T) (*Service, *int) {
-	t.Helper()
-	puts := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPut {
-			puts++
-			w.Header().Set("ETag", `"e"`)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
+func TestRefreshCatalogAnnouncesNewWorks(t *testing.T) {
+	svc, _ := newFakeR2Service(t)
 
-	cfg := R2Config{AccountID: "acc", AccessKeyID: "k", SecretKey: "s", Bucket: "turnip", PublicBaseURL: "https://pub.example"}
-	r2, err := newR2StoreForEndpoint(strings.TrimPrefix(srv.URL, "http://"), cfg)
-	require.NoError(t, err)
-
-	svc := &Service{R2: r2, AudioDir: t.TempDir(), Secret: "sec", Duration: fakeDuration{}, BaseURL: "http://vm:8080"}
-	return svc, &puts
-}
-
-func TestWatcherStabilityAndPublish(t *testing.T) {
-	svc, puts := newWatcherTestService(t)
-
-	catDir := filepath.Join(svc.AudioDir, "originals", "books")
-	require.NoError(t, os.MkdirAll(catDir, 0o750))
-	// normalization off so the test doesn't need ffmpeg
-	require.NoError(t, os.WriteFile(filepath.Join(catDir, "feed.yaml"), []byte("normalize: false"), 0o600))
-	path := filepath.Join(catDir, "01 - Глава.mp3")
-	require.NoError(t, os.WriteFile(path, []byte("audio-bytes"), 0o600))
+	// a work already present before the first scan
+	writeWork(t, svc, "books", "Existing", "01 - A.mp3")
 
 	var notices []string
 	notify := func(s string) { notices = append(notices, s) }
-	seen, cooldown := map[string]*seenFile{}, map[string]time.Time{}
-	bursts := map[string]*catBurst{}
+	known := map[string]bool{}
 
-	// scan 1: first sight — not published yet
-	added := svc.scanOnce(t.Context(), seen, cooldown, notify)
-	svc.flushBursts(bursts, added, notify)
-	assert.Equal(t, 0, *puts, "first scan only records the file")
+	// seed scan (as Watch does at startup) is silent: don't announce the whole library
+	svc.refreshCatalog(known, nil)
+	assert.Empty(t, notices)
 
-	// scan 2: stable → published, but NO per-file notification (batched)
-	added = svc.scanOnce(t.Context(), seen, cooldown, notify)
-	svc.flushBursts(bursts, added, notify)
-	assert.Equal(t, 1, *puts, "stable file published")
-	assert.Equal(t, 1, added["books"], "scan reports one publish for books")
-	assert.Empty(t, notices, "no per-file spam while the burst is active")
+	// nothing new → nothing announced
+	svc.refreshCatalog(known, notify)
+	assert.Empty(t, notices, "no new work, no message")
 
-	// subsequent quiet scans end the burst → exactly one summary
-	for i := 0; i < flushAfterIdleScans; i++ {
-		added = svc.scanOnce(t.Context(), seen, cooldown, notify)
-		svc.flushBursts(bursts, added, notify)
-	}
-	require.Len(t, notices, 1, "one summary per burst")
-	assert.Contains(t, notices[0], "эпизод")
-	assert.Contains(t, notices[0], "/holzweg/sec/books.xml")
-	assert.Equal(t, 1, *puts, "published files are skipped on later scans")
+	// a new work appears
+	writeWork(t, svc, "podcasts", "Fresh", "01 - E1.mp3", "02 - E2.mp3")
+	svc.refreshCatalog(known, notify)
+	require.Len(t, notices, 1, "exactly one announcement for the new work")
+	assert.Contains(t, notices[0], "Fresh")
+	assert.Contains(t, notices[0], "/library")
 
-	// feed exists
-	_, err := os.Stat(filepath.Join(svc.AudioDir, "feeds", "books.xml"))
-	require.NoError(t, err)
+	// already announced → not repeated
+	svc.refreshCatalog(known, notify)
+	assert.Len(t, notices, 1, "no repeat announcement")
 }
 
-func TestWatcherWaitsWhileFileGrows(t *testing.T) {
-	svc, puts := newWatcherTestService(t)
+func TestRefreshCatalogSeasonsInNotice(t *testing.T) {
+	svc, _ := newFakeR2Service(t)
+	known := map[string]bool{}
+	svc.refreshCatalog(known, nil) // seed empty
 
-	catDir := filepath.Join(svc.AudioDir, "originals", "books")
-	require.NoError(t, os.MkdirAll(catDir, 0o750))
-	require.NoError(t, os.WriteFile(filepath.Join(catDir, "feed.yaml"), []byte("normalize: false"), 0o600))
-	path := filepath.Join(catDir, "big.mp3")
-	require.NoError(t, os.WriteFile(path, []byte("part1"), 0o600))
-
-	seen, cooldown := map[string]*seenFile{}, map[string]time.Time{}
-	svc.scanOnce(t.Context(), seen, cooldown, nil)
-
-	// file keeps growing between scans — must not be published
-	require.NoError(t, os.WriteFile(path, []byte("part1part2"), 0o600))
-	svc.scanOnce(t.Context(), seen, cooldown, nil)
-	assert.Equal(t, 0, *puts, "growing file must wait")
-
-	// now stable for two scans
-	svc.scanOnce(t.Context(), seen, cooldown, nil)
-	svc.scanOnce(t.Context(), seen, cooldown, nil)
-	assert.Equal(t, 1, *puts)
-}
-
-func TestWatcherIgnoresJunk(t *testing.T) {
-	svc, puts := newWatcherTestService(t)
-
-	catDir := filepath.Join(svc.AudioDir, "originals", "books")
-	require.NoError(t, os.MkdirAll(filepath.Join(catDir, "subdir"), 0o750))
-	require.NoError(t, os.WriteFile(filepath.Join(catDir, "feed.yaml"), []byte("title: x"), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(catDir, "cover.jpg"), []byte("img"), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(catDir, "notes.txt"), []byte("txt"), 0o600))
-
-	seen, cooldown := map[string]*seenFile{}, map[string]time.Time{}
-	svc.scanOnce(t.Context(), seen, cooldown, nil)
-	svc.scanOnce(t.Context(), seen, cooldown, nil)
-	svc.scanOnce(t.Context(), seen, cooldown, nil)
-	assert.Equal(t, 0, *puts, "non-audio files ignored")
-	assert.Empty(t, seen)
-}
-
-func TestWatcherCooldownAfterFailure(t *testing.T) {
-	svc, puts := newWatcherTestService(t)
-
-	catDir := filepath.Join(svc.AudioDir, "originals", "books")
-	require.NoError(t, os.MkdirAll(catDir, 0o750))
-	require.NoError(t, os.WriteFile(filepath.Join(catDir, "feed.yaml"), []byte("normalize: false"), 0o600))
-	path := filepath.Join(catDir, "bad.mp3")
-	require.NoError(t, os.WriteFile(path, []byte("audio"), 0o000)) // unreadable → publish fails
+	writeWork(t, svc, "podcasts", "Seasoned",
+		"Season 01/01 - A.mp3", "Season 02/01 - B.mp3")
 
 	var notices []string
-	notify := func(s string) { notices = append(notices, s) }
-	seen, cooldown := map[string]*seenFile{}, map[string]time.Time{}
+	svc.refreshCatalog(known, func(s string) { notices = append(notices, s) })
+	require.Len(t, notices, 1)
+	assert.Contains(t, notices[0], "сезон")
+}
 
-	svc.scanOnce(t.Context(), seen, cooldown, notify)
-	svc.scanOnce(t.Context(), seen, cooldown, notify) // stable → attempt → fail
-	require.Len(t, notices, 1, "one failure notice")
-	assert.Contains(t, notices[0], "❌")
-	require.Contains(t, cooldown, path)
-
-	// scans during cooldown must not retry or re-notify
-	svc.scanOnce(t.Context(), seen, cooldown, notify)
-	svc.scanOnce(t.Context(), seen, cooldown, notify)
-	assert.Len(t, notices, 1, "no notification spam during cooldown")
-	assert.Equal(t, 0, *puts)
-
-	// fixing the file changes mtime/permissions → user re-touches → fresh chance
-	require.NoError(t, os.Chmod(path, 0o600))
-	require.NoError(t, os.WriteFile(path, []byte("audio-fixed"), 0o600))
-	svc.scanOnce(t.Context(), seen, cooldown, notify)          // sees change, resets
-	added := svc.scanOnce(t.Context(), seen, cooldown, notify) // stable → publish
-	assert.Equal(t, 1, *puts, "published after the fix")
-	assert.Equal(t, 1, added["books"], "recovery publish is reported to the caller")
-	// success is silent per-file now (summary is flushBursts' job); only the
-	// original ❌ failure notice remains — no new message on recovery
-	assert.Len(t, notices, 1, "recovery publish does not add a per-file notice")
-	assert.Contains(t, notices[0], "❌")
+func TestRefreshCatalogNoOriginalsDir(t *testing.T) {
+	svc, _ := newFakeR2Service(t)
+	// AudioDir exists but no originals/ subtree — must not panic or announce
+	require.NoError(t, os.RemoveAll(filepath.Join(svc.AudioDir, "originals")))
+	known := map[string]bool{}
+	var notices []string
+	svc.refreshCatalog(known, func(s string) { notices = append(notices, s) })
+	assert.Empty(t, notices)
 }

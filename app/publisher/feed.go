@@ -71,17 +71,43 @@ func LoadFeedConfig(dir, category string) FeedConfig {
 	return cfg
 }
 
-// Episode is one published audio file (state lives in a per-category JSON)
+// Episode is one published audio part of the active work (state lives in a
+// per-category JSON; File is the path relative to the work dir so parts in
+// different seasons never collide as a dedup key).
 type Episode struct {
-	File        string    `json:"file"` // original filename, dedup key
+	File        string    `json:"file"` // path relative to the work dir, dedup key
 	Title       string    `json:"title"`
-	Order       int       `json:"order"` // NN prefix for serial feeds, 0 if none
+	Work        string    `json:"work,omitempty"`   // slug of the work this part belongs to
+	Season      int       `json:"season,omitempty"` // season number, 0 = no seasons
+	Order       int       `json:"order"`            // NN prefix for serial feeds, 0 if none
 	R2Key       string    `json:"r2_key"`
 	PublicURL   string    `json:"public_url"`
 	MimeType    string    `json:"mime_type,omitempty"` // default audio/mpeg
 	SizeBytes   int64     `json:"size_bytes"`
 	DurationSec int       `json:"duration_sec"`
 	PublishedAt time.Time `json:"published_at"`
+}
+
+// WorkConfig is the optional per-work work.yaml in a work folder
+type WorkConfig struct {
+	Title string `yaml:"title"`
+	Cover string `yaml:"cover"`
+	Type  string `yaml:"type"` // finite (default) | streaming
+}
+
+// Finite reports whether the work is a bounded set of parts (default). A
+// streaming work is an open-ended archive (rolling window — follow-up #7).
+func (w WorkConfig) Finite() bool {
+	return !strings.EqualFold(strings.TrimSpace(w.Type), "streaming")
+}
+
+// LoadWorkConfig reads dir/work.yaml; missing file yields an empty config
+func LoadWorkConfig(dir string) WorkConfig {
+	cfg := WorkConfig{}
+	if data, err := os.ReadFile(filepath.Join(dir, "work.yaml")); err == nil { //nolint:gosec
+		_ = yaml.Unmarshal(data, &cfg)
+	}
+	return cfg
 }
 
 // audioMimeByExt maps supported extensions to enclosure MIME types
@@ -117,6 +143,34 @@ func parseTrackName(filename string) (order int, title string) {
 		}
 	}
 	return 0, base
+}
+
+var seasonNumRe = regexp.MustCompile(`(\d{1,3})`)
+
+// parseSeasonNum pulls a season number out of a subfolder name ("Сезон 01",
+// "Season 3", "S02" → 1/3/2). A season subfolder with no digits falls back to
+// 1 so it still sorts before any numbered season is unlikely but stays stable.
+func parseSeasonNum(dir string) int {
+	if m := seasonNumRe.FindString(dir); m != "" {
+		if n, err := strconv.Atoi(m); err == nil {
+			return n
+		}
+	}
+	return 1
+}
+
+// sortSerial orders parts by season, then track number, then path — the
+// natural listen order across a multi-season work.
+func sortSerial(eps []Episode) {
+	sort.Slice(eps, func(i, j int) bool {
+		if eps[i].Season != eps[j].Season {
+			return eps[i].Season < eps[j].Season
+		}
+		if eps[i].Order != eps[j].Order {
+			return eps[i].Order < eps[j].Order
+		}
+		return eps[i].File < eps[j].File
+	})
 }
 
 // episodeLeadPunct trims separators left after cutting a book/show prefix
@@ -174,6 +228,7 @@ type rssItem struct {
 	PubDate        string       `xml:"pubDate"`
 	Enclosure      rssEnclosure `xml:"enclosure"`
 	ItunesDuration string       `xml:"itunes:duration,omitempty"`
+	ItunesSeason   int          `xml:"itunes:season,omitempty"`
 	ItunesEpisode  int          `xml:"itunes:episode,omitempty"`
 }
 
@@ -196,12 +251,7 @@ func BuildFeedXML(cfg FeedConfig, episodes []Episode) ([]byte, error) {
 
 	serial := cfg.Type == "serial"
 	if serial {
-		sort.Slice(eps, func(i, j int) bool {
-			if eps[i].Order != eps[j].Order {
-				return eps[i].Order < eps[j].Order
-			}
-			return eps[i].File < eps[j].File
-		})
+		sortSerial(eps)
 	} else {
 		sort.Slice(eps, func(i, j int) bool { return eps[i].PublishedAt.After(eps[j].PublishedAt) })
 	}
@@ -241,6 +291,9 @@ func BuildFeedXML(cfg FeedConfig, episodes []Episode) ([]byte, error) {
 		}
 		if serial {
 			item.ItunesEpisode = i + 1
+			if ep.Season > 0 {
+				item.ItunesSeason = ep.Season
+			}
 		}
 		ch.Items = append(ch.Items, item)
 	}

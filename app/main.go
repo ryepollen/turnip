@@ -52,10 +52,11 @@ type options struct {
 
 	AdminPasswd string `long:"admin-passwd" env:"ADMIN_PASSWD" description:"admin password for protected endpoints"`
 
-	// one-shot publishing mode: upload a file into a category feed and exit
-	// (does not open bolt, safe to run next to the live container)
-	Publish         string `long:"publish" description:"publish an audio file to R2 and exit"`
-	PublishCategory string `long:"publish-category" description:"category for --publish"`
+	// one-shot activation mode: upload a work (folder of parts) into its
+	// category feed and exit (does not open bolt, safe to run next to the live
+	// container — useful for large works that would take hours over the bot)
+	Activate         string `long:"activate" description:"activate a work (folder slug) in a category feed and exit"`
+	ActivateCategory string `long:"activate-category" description:"category for --activate"`
 
 	Dbg bool `long:"dbg" env:"DEBUG" description:"debug mode"`
 }
@@ -85,20 +86,21 @@ func main() {
 
 	pubSvc := makePublisher(conf)
 
-	// one-shot publish: runs before bolt is opened, so it works next to the
-	// live container (bolt holds an exclusive file lock)
-	if opts.Publish != "" {
+	// one-shot activate: runs before bolt is opened, so it works next to the
+	// live container (bolt holds an exclusive file lock). Uploads a whole work
+	// into its category feed, evicting whatever was active before.
+	if opts.Activate != "" {
 		if pubSvc == nil {
 			log.Fatalf("[ERROR] publishing not configured: need R2_* env and FEED_SECRET")
 		}
-		if opts.PublishCategory == "" {
-			log.Fatalf("[ERROR] --publish requires --publish-category")
+		if opts.ActivateCategory == "" {
+			log.Fatalf("[ERROR] --activate requires --activate-category")
 		}
-		ep, pubErr := pubSvc.PublishFile(context.Background(), opts.Publish, opts.PublishCategory)
-		if pubErr != nil {
-			log.Fatalf("[ERROR] publish failed: %v", pubErr)
+		progress := func(done, total int) { fmt.Printf("\ruploading %d/%d…", done, total) }
+		if actErr := pubSvc.Activate(context.Background(), opts.ActivateCategory, opts.Activate, progress); actErr != nil {
+			log.Fatalf("[ERROR] activate failed: %v", actErr)
 		}
-		fmt.Printf("published: %s\naudio:     %s\nfeed:      %s\n", ep.Title, ep.PublicURL, pubSvc.FeedURL(opts.PublishCategory))
+		fmt.Printf("\nactivated: %s\nfeed:      %s\n", opts.Activate, pubSvc.FeedURL(opts.ActivateCategory))
 		return
 	}
 

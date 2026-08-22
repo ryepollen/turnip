@@ -1,8 +1,6 @@
 package publisher
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,55 +141,41 @@ type fakeDuration struct{}
 
 func (fakeDuration) File(string) int { return 90 }
 
-func TestServicePublishAndRegenerate(t *testing.T) {
-	var puts int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPut {
-			puts++
-			w.Header().Set("ETag", `"e"`)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	cfg := R2Config{AccountID: "acc", AccessKeyID: "k", SecretKey: "s", Bucket: "turnip", PublicBaseURL: "https://pub.example"}
-	r2, err := newR2StoreForEndpoint(strings.TrimPrefix(srv.URL, "http://"), cfg)
+func TestBuildFeedXMLSerialSeasonOrder(t *testing.T) {
+	// two seasons, interleaved on disk — feed must order by (season, track)
+	eps := []Episode{
+		{File: "S02/01 - A.mp3", Title: "S2E1", Season: 2, Order: 1, R2Key: "k/s2e1", PublicURL: "https://pub/s2e1.mp3"},
+		{File: "S01/02 - B.mp3", Title: "S1E2", Season: 1, Order: 2, R2Key: "k/s1e2", PublicURL: "https://pub/s1e2.mp3"},
+		{File: "S01/01 - C.mp3", Title: "S1E1", Season: 1, Order: 1, R2Key: "k/s1e1", PublicURL: "https://pub/s1e1.mp3"},
+	}
+	data, err := BuildFeedXML(FeedConfig{Title: "Show", Type: "serial"}, eps)
 	require.NoError(t, err)
+	xml := string(data)
 
-	audioDir := t.TempDir()
-	svc := &Service{R2: r2, AudioDir: audioDir, Secret: "s3cr3t", Duration: fakeDuration{}, BaseURL: "http://vm:8080"}
+	i11 := strings.Index(xml, "<title>S1E1</title>")
+	i12 := strings.Index(xml, "<title>S1E2</title>")
+	i21 := strings.Index(xml, "<title>S2E1</title>")
+	require.True(t, i11 > 0 && i12 > 0 && i21 > 0)
+	assert.True(t, i11 < i12 && i12 < i21, "order must be season then track")
+	assert.Contains(t, xml, "<itunes:season>1</itunes:season>")
+	assert.Contains(t, xml, "<itunes:season>2</itunes:season>")
+}
 
-	src := filepath.Join(t.TempDir(), "01 - Глава первая.mp3")
-	require.NoError(t, os.WriteFile(src, []byte("audio"), 0o600))
+func TestLoadWorkConfig(t *testing.T) {
+	// missing work.yaml → empty config, finite by default
+	assert.True(t, LoadWorkConfig(t.TempDir()).Finite())
 
-	ep, err := svc.PublishFile(t.Context(), src, "books")
-	require.NoError(t, err)
-	assert.Equal(t, "Глава первая", ep.Title)
-	assert.Equal(t, 1, ep.Order)
-	assert.Equal(t, 90, ep.DurationSec)
-	assert.Equal(t, "a/s3cr3t/books/01 - Глава первая.mp3", ep.R2Key)
-	assert.Equal(t, 1, puts)
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "work.yaml"),
+		[]byte("title: Моя книга\ntype: streaming"), 0o600))
+	wc := LoadWorkConfig(dir)
+	assert.Equal(t, "Моя книга", wc.Title)
+	assert.False(t, wc.Finite(), "type: streaming is not finite")
+}
 
-	// idempotent: same file again → no second upload
-	ep2, err := svc.PublishFile(t.Context(), src, "books")
-	require.NoError(t, err)
-	assert.Equal(t, ep.R2Key, ep2.R2Key)
-	assert.Equal(t, 1, puts, "no re-upload for a known file")
-
-	// feed.xml generated and lists the episode
-	feedData, err := os.ReadFile(filepath.Join(audioDir, "feeds", "books.xml"))
-	require.NoError(t, err)
-	assert.Contains(t, string(feedData), "Глава первая")
-	assert.Contains(t, string(feedData), "https://pub.example/a/s3cr3t/books/01%20-%20%D0%93")
-
-	// subscription URL
-	assert.Equal(t, "http://vm:8080/holzweg/s3cr3t/books.xml", svc.FeedURL("books"))
-
-	cats, err := svc.Categories()
-	require.NoError(t, err)
-	assert.Equal(t, []string{"books"}, cats)
-
-	// path traversal guard
-	_, err = svc.PublishFile(t.Context(), src, "../evil")
-	require.Error(t, err)
+func TestParseSeasonNum(t *testing.T) {
+	assert.Equal(t, 1, parseSeasonNum("Сезон 01"))
+	assert.Equal(t, 3, parseSeasonNum("Season 3"))
+	assert.Equal(t, 2, parseSeasonNum("S02"))
+	assert.Equal(t, 1, parseSeasonNum("bonus"), "no digits → fallback 1")
 }
