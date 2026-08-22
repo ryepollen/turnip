@@ -238,6 +238,11 @@ type appNoteItem struct {
 	DurationMin int      `json:"duration_min"`
 	Tags        []string `json:"tags"`
 	HasNotion   bool     `json:"has_notion"`
+	// playlist origin: set when this note came from an expanded YouTube playlist,
+	// so the UI can badge/group items that arrived together (empty = standalone).
+	PlaylistID    string `json:"playlist_id,omitempty"`
+	PlaylistTitle string `json:"playlist_title,omitempty"`
+	PlaylistIndex int    `json:"playlist_index,omitempty"`
 }
 
 // GET /wegweiser/api/notes — the /md transcript catalog (drives ⬇/📓/🗑)
@@ -259,13 +264,16 @@ func (s *Server) appNotesCtrl(w http.ResponseWriter, r *http.Request) {
 				tags = []string{}
 			}
 			items = append(items, appNoteItem{
-				SourceID:    it.SourceID,
-				Title:       it.Meta.Title,
-				URL:         it.Meta.URL,
-				Date:        it.Meta.Date,
-				DurationMin: it.Meta.DurationMin,
-				Tags:        tags,
-				HasNotion:   contains(it.Meta.Processed, "notes"),
+				SourceID:      it.SourceID,
+				Title:         it.Meta.Title,
+				URL:           it.Meta.URL,
+				Date:          it.Meta.Date,
+				DurationMin:   it.Meta.DurationMin,
+				Tags:          tags,
+				HasNotion:     contains(it.Meta.Processed, "notes"),
+				PlaylistID:    it.Meta.PlaylistID,
+				PlaylistTitle: it.Meta.PlaylistTitle,
+				PlaylistIndex: it.Meta.PlaylistIndex,
 			})
 		}
 	}

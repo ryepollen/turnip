@@ -254,19 +254,20 @@ type PlaylistItem struct {
 	Title string
 }
 
-// ExpandPlaylistItems is like ExpandPlaylist but also returns each video's
-// title, so a triage list can show names instead of bare ids. On cookie errors
+// ExpandPlaylistItems is like ExpandPlaylist but also returns each video's title
+// (so a triage list can show names instead of bare ids) and the playlist's own
+// title (so notes can be badged with their playlist of origin). On cookie errors
 // it retries without cookies.
-func (d *Downloader) ExpandPlaylistItems(ctx context.Context, playlistURL string) ([]PlaylistItem, error) {
-	items, err := d.expandPlaylistItems(ctx, playlistURL, true)
+func (d *Downloader) ExpandPlaylistItems(ctx context.Context, playlistURL string) ([]PlaylistItem, string, error) {
+	items, plTitle, err := d.expandPlaylistItems(ctx, playlistURL, true)
 	if err != nil && d.cookiesFile != "" && IsCookieError(err.Error()) {
 		log.Printf("[WARN] cookies expired, retrying ExpandPlaylistItems without cookies")
 		return d.expandPlaylistItems(ctx, playlistURL, false)
 	}
-	return items, err
+	return items, plTitle, err
 }
 
-func (d *Downloader) expandPlaylistItems(ctx context.Context, playlistURL string, useCookies bool) ([]PlaylistItem, error) {
+func (d *Downloader) expandPlaylistItems(ctx context.Context, playlistURL string, useCookies bool) ([]PlaylistItem, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
@@ -274,8 +275,10 @@ func (d *Downloader) expandPlaylistItems(ctx context.Context, playlistURL string
 	if useCookies && d.cookiesFile != "" {
 		args = append(args, "--cookies", d.cookiesFile)
 	}
-	// one line per entry: "<id>\t<title>"; a tab keeps titles-with-spaces intact
-	args = append(args, "--flat-playlist", "--no-download", "--print", "%(id)s\t%(title)s", playlistURL)
+	// one line per entry: "<id>\t<title>\t<playlist_title>"; tabs keep
+	// titles-with-spaces intact. playlist_title repeats on every line, we take the
+	// first non-empty one.
+	args = append(args, "--flat-playlist", "--no-download", "--print", "%(id)s\t%(title)s\t%(playlist_title)s", playlistURL)
 
 	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
 	var stderrBuf bytes.Buffer
@@ -284,29 +287,33 @@ func (d *Downloader) expandPlaylistItems(ctx context.Context, playlistURL string
 	output, err := cmd.Output()
 	if err != nil {
 		if stderrStr := stderrBuf.String(); stderrStr != "" {
-			return nil, fmt.Errorf("failed to expand playlist: %w\n%s", err, stderrStr)
+			return nil, "", fmt.Errorf("failed to expand playlist: %w\n%s", err, stderrStr)
 		}
-		return nil, fmt.Errorf("failed to expand playlist: %w", err)
+		return nil, "", fmt.Errorf("failed to expand playlist: %w", err)
 	}
 
-	items := parseFlatPlaylistItems(string(output))
+	items, plTitle := parseFlatPlaylistItems(string(output))
 	if len(items) == 0 {
-		return nil, fmt.Errorf("no videos found in playlist")
+		return nil, "", fmt.Errorf("no videos found in playlist")
 	}
-	return items, nil
+	return items, plTitle, nil
 }
 
-// parseFlatPlaylistItems turns tab-separated "<id>\t<title>" lines into an
-// ordered, de-duplicated slice, keeping only 11-char video ids. A missing title
-// falls back to the id so the row is never blank.
-func parseFlatPlaylistItems(raw string) []PlaylistItem {
+// parseFlatPlaylistItems turns tab-separated "<id>\t<title>[\t<playlist_title>]"
+// lines into an ordered, de-duplicated slice, keeping only 11-char video ids, and
+// returns the playlist title (first non-empty, non-"NA" value seen). A missing
+// video title falls back to the id so the row is never blank.
+func parseFlatPlaylistItems(raw string) (items []PlaylistItem, playlistTitle string) {
 	seen := map[string]bool{}
-	var items []PlaylistItem
 	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
 		line = strings.TrimRight(line, "\r")
-		id, title, _ := strings.Cut(line, "\t")
+		id, rest, _ := strings.Cut(line, "\t")
+		title, plTitle, _ := strings.Cut(rest, "\t")
 		id = strings.TrimSpace(id)
 		title = strings.TrimSpace(title)
+		if plTitle = strings.TrimSpace(plTitle); playlistTitle == "" && plTitle != "" && plTitle != "NA" {
+			playlistTitle = plTitle
+		}
 		if len(id) != 11 || seen[id] {
 			continue
 		}
@@ -316,7 +323,7 @@ func parseFlatPlaylistItems(raw string) []PlaylistItem {
 		}
 		items = append(items, PlaylistItem{ID: id, Title: title})
 	}
-	return items
+	return items, playlistTitle
 }
 
 // parseFlatPlaylistIDs turns "yt-dlp --flat-playlist --print id" output (one id

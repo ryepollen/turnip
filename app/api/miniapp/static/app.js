@@ -164,12 +164,24 @@ function renderHistory(data) {
   }).join('');
 }
 
+// plBadge marks a note that came from an expanded playlist: 🎬 + short playlist
+// name (falls back to id) + its 1-based position, so items from one playlist are
+// visibly grouped in the notes list. Empty when the note is standalone.
+function plBadge(it) {
+  if (!it.playlist_id) return '';
+  let name = it.playlist_title || it.playlist_id;
+  if (name.length > 24) name = name.slice(0, 23) + '…';
+  const pos = it.playlist_index ? ' #' + it.playlist_index : '';
+  return badge('playlist', '🎬 ' + name + pos);
+}
+
 function renderNotes(data) {
   if (!data.items.length) return '<div class="empty">No transcripts</div>';
   return data.items.map((it) => {
     const meta = metaLine([
       esc(it.date),
       it.duration_min ? esc(it.duration_min + 'm') : '',
+      plBadge(it),
       (it.tags && it.tags.length) ? esc(it.tags.join(', ')) : '',
       it.has_notion ? badge('notion', '📓') : '',
     ]);

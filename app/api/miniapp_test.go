@@ -224,8 +224,12 @@ func (f *fakeJobStore) CountNotesJobs(string) (int, error)        { return 0, ni
 func (f *fakeJobStore) HasActiveNotesJob(string) (bool, error)    { return f.active, nil }
 func (f *fakeJobStore) ResetProcessingNotesJobs() (int, error)    { return 0, nil }
 func (f *fakeJobStore) DeleteOldNotesJobs(time.Time) (int, error) { return 0, nil }
-func (f *fakeJobStore) SetNotesPaused(p bool) error               { f.paused = p; return nil }
-func (f *fakeJobStore) NotesPaused() (bool, error)                { return f.paused, nil }
+func (f *fakeJobStore) IncrNotesBatch(string, int, int) (ytstore.NotesBatchRecord, bool, error) {
+	return ytstore.NotesBatchRecord{}, false, nil
+}
+func (f *fakeJobStore) DeleteOldNotesBatches(time.Time) (int, error) { return 0, nil }
+func (f *fakeJobStore) SetNotesPaused(p bool) error                  { f.paused = p; return nil }
+func (f *fakeJobStore) NotesPaused() (bool, error)                   { return f.paused, nil }
 
 func TestMiniAppActions(t *testing.T) {
 	const token = "123456:test-bot-token"

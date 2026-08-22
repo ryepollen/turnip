@@ -37,23 +37,29 @@ const (
 // bolt (not in memory) so jobs survive container restarts; telegram message ids
 // are stored so the worker can keep editing the same status message afterwards.
 type NotesJobRecord struct {
-	ID          string    `json:"id"` // {unix_nanos padded}-{sourceID}, key order = FIFO
-	URL         string    `json:"url"`
-	Title       string    `json:"title,omitempty"` // human label for the queue view; from triage titles or backfilled from transcript frontmatter
-	SourceID    string    `json:"source_id"`
-	Source      string    `json:"source"`                   // "youtube" | "article"
-	Level       string    `json:"level"`                    // "md" | "notes"
-	SumLength   string    `json:"summary_length,omitempty"` // "" (normal) | "short" | "long", L2 only
-	ReuseAudio  string    `json:"reuse_audio,omitempty"`
-	Priority    int       `json:"priority,omitempty"` // higher = claimed first; bulk=0, user=1
-	Status      string    `json:"status"`
-	Error       string    `json:"error,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	ChatID      int64     `json:"chat_id,omitempty"`
-	StatusMsgID int       `json:"status_msg_id,omitempty"` // for batch jobs this is the shared counter message
-	OrigMsgID   int       `json:"orig_msg_id,omitempty"`
-	BatchID     string    `json:"batch_id,omitempty"` // non-empty = member of a page-all batch reporting into one counter
+	ID         string `json:"id"` // {unix_nanos padded}-{sourceID}, key order = FIFO
+	URL        string `json:"url"`
+	Title      string `json:"title,omitempty"` // human label for the queue view; from triage titles or backfilled from transcript frontmatter
+	SourceID   string `json:"source_id"`
+	Source     string `json:"source"`                   // "youtube" | "article"
+	Level      string `json:"level"`                    // "md" | "notes"
+	SumLength  string `json:"summary_length,omitempty"` // "" (normal) | "short" | "long", L2 only
+	ReuseAudio string `json:"reuse_audio,omitempty"`
+	// playlist origin: set when the job came from an expanded YouTube playlist, so
+	// the resulting note's frontmatter (and the Mini App) can badge/group items
+	// that arrived together. Empty PlaylistID = not from a playlist.
+	PlaylistID    string    `json:"playlist_id,omitempty"`
+	PlaylistTitle string    `json:"playlist_title,omitempty"`
+	PlaylistIndex int       `json:"playlist_index,omitempty"` // 1-based position within the playlist
+	Priority      int       `json:"priority,omitempty"`       // higher = claimed first; bulk=0, user=1
+	Status        string    `json:"status"`
+	Error         string    `json:"error,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	ChatID        int64     `json:"chat_id,omitempty"`
+	StatusMsgID   int       `json:"status_msg_id,omitempty"` // for batch jobs this is the shared counter message
+	OrigMsgID     int       `json:"orig_msg_id,omitempty"`
+	BatchID       string    `json:"batch_id,omitempty"` // non-empty = member of a page-all batch reporting into one counter
 }
 
 // NotesBatchRecord tracks a "page-all" group of notes/audio jobs that report
@@ -963,15 +969,19 @@ func (s *BoltDB) DeleteOldNotesBatches(cutoff time.Time) (count int, err error) 
 // drop every open menu ("⏱ Меню просрочено"). Only primitives are stored: the
 // telebot message is reconstructed from ChatID/OrigMsgID on take.
 type PendingActionRecord struct {
-	Token     string    `json:"token"`
-	Kind      string    `json:"kind"` // "yt" | "article" | "podcast" | "podcast_show" | "triage"
-	VideoIDs  []string  `json:"video_ids,omitempty"`
-	Titles    []string  `json:"titles,omitempty"` // parallel to VideoIDs, for the triage list
-	Done      []string  `json:"done,omitempty"`   // video IDs already queued from a triage list
-	URL       string    `json:"url,omitempty"`
-	ChatID    int64     `json:"chat_id"`
-	OrigMsgID int       `json:"orig_msg_id,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	Token    string   `json:"token"`
+	Kind     string   `json:"kind"` // "yt" | "article" | "podcast" | "podcast_show" | "triage"
+	VideoIDs []string `json:"video_ids,omitempty"`
+	Titles   []string `json:"titles,omitempty"` // parallel to VideoIDs, for the triage list
+	Done     []string `json:"done,omitempty"`   // video IDs already queued from a triage list
+	URL      string   `json:"url,omitempty"`
+	// playlist origin (set when this menu/triage came from an expanded playlist);
+	// VideoIDs order = playlist order, so a video's index is its slice position.
+	PlaylistID    string    `json:"playlist_id,omitempty"`
+	PlaylistTitle string    `json:"playlist_title,omitempty"`
+	ChatID        int64     `json:"chat_id"`
+	OrigMsgID     int       `json:"orig_msg_id,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // SavePendingAction stores a pending inline-menu action keyed by its token

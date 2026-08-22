@@ -127,6 +127,7 @@ body {
 }
 .badge.notion { color: var(--accent); border-color: var(--accent); }
 .badge.deleted { color: var(--stamp); border-color: var(--stamp); }
+.badge.playlist { color: var(--warn); border-color: var(--warn); }
 
 /* action buttons */
 .actions {

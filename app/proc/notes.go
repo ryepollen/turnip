@@ -35,6 +35,12 @@ type NoteMeta struct {
 	Lang        string   `yaml:"lang"`
 	Tags        []string `yaml:"tags"`
 	Processed   []string `yaml:"processed"` // levels already run: "md", "notes"
+	// playlist origin: recorded when the transcript came from a video that was part
+	// of an expanded YouTube playlist. Lets the Mini App badge/group items that
+	// arrived from the same playlist and order them by playlist position.
+	PlaylistID    string `yaml:"playlist_id,omitempty"`
+	PlaylistTitle string `yaml:"playlist_title,omitempty"`
+	PlaylistIndex int    `yaml:"playlist_index,omitempty"`
 }
 
 // hasProcessed reports whether level is already recorded in Processed
@@ -677,6 +683,10 @@ func (n *NotesService) ensureL1(ctx context.Context, job ytstore.NotesJobRecord,
 		DurationMin: seed.DurationMin,
 		Lang:        DetectLanguage(body),
 		Tags:        []string{},
+
+		PlaylistID:    job.PlaylistID,
+		PlaylistTitle: job.PlaylistTitle,
+		PlaylistIndex: job.PlaylistIndex,
 	}
 	if meta.Date == "" {
 		meta.Date = time.Now().Format("2006-01-02")

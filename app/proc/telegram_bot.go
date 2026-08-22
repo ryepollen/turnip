@@ -65,6 +65,29 @@ type pendingAction struct {
 	url         string
 	originalMsg *tb.Message
 	created     time.Time
+	// playlist origin: set when videoIDs came from an expanded YouTube playlist, so
+	// the notes produced from this menu can be badged/grouped by their playlist.
+	// videoIDs order = playlist order, so a video's index is its slice position.
+	playlistID    string
+	playlistTitle string
+}
+
+// playlistRef carries a note's playlist origin down through enqueue calls. A nil
+// *playlistRef means "not from a playlist"; Index is the 1-based position.
+type playlistRef struct {
+	ID    string
+	Title string
+	Index int
+}
+
+// playlistRefAt returns the playlist origin for the i-th video in this menu (nil
+// when the menu isn't from a playlist). videoIDs order = playlist order, so the
+// 1-based index is i+1.
+func (pa *pendingAction) playlistRefAt(i int) *playlistRef {
+	if pa.playlistID == "" {
+		return nil
+	}
+	return &playlistRef{ID: pa.playlistID, Title: pa.playlistTitle, Index: i + 1}
 }
 
 const (
@@ -298,12 +321,14 @@ func (t *TelegramBot) storePendingAction(pa *pendingAction) string {
 	token := randToken()
 
 	rec := ytstore.PendingActionRecord{
-		Token:     token,
-		Kind:      pa.kind,
-		VideoIDs:  pa.videoIDs,
-		Titles:    pa.titles,
-		URL:       pa.url,
-		CreatedAt: time.Now().UTC(),
+		Token:         token,
+		Kind:          pa.kind,
+		VideoIDs:      pa.videoIDs,
+		Titles:        pa.titles,
+		URL:           pa.url,
+		PlaylistID:    pa.playlistID,
+		PlaylistTitle: pa.playlistTitle,
+		CreatedAt:     time.Now().UTC(),
 	}
 	if pa.originalMsg != nil {
 		rec.OrigMsgID = pa.originalMsg.ID
@@ -331,10 +356,12 @@ func (t *TelegramBot) takePendingAction(token string) *pendingAction {
 		return nil
 	}
 	pa := &pendingAction{
-		kind:     rec.Kind,
-		videoIDs: rec.VideoIDs,
-		url:      rec.URL,
-		created:  rec.CreatedAt,
+		kind:          rec.Kind,
+		videoIDs:      rec.VideoIDs,
+		url:           rec.URL,
+		playlistID:    rec.PlaylistID,
+		playlistTitle: rec.PlaylistTitle,
+		created:       rec.CreatedAt,
 	}
 	if rec.OrigMsgID != 0 {
 		pa.originalMsg = &tb.Message{ID: rec.OrigMsgID, Chat: &tb.Chat{ID: rec.ChatID}}
@@ -784,15 +811,23 @@ var playlistIDRe = regexp.MustCompile(`[?&]list=([a-zA-Z0-9_-]+)`)
 // youtube playlist id, else "". Auto-generated radio/mix lists (RD…) are
 // ignored — they are effectively infinite.
 func extractPlaylistURL(text string) string {
+	if id := extractPlaylistID(text); id != "" {
+		return "https://www.youtube.com/playlist?list=" + id
+	}
+	return ""
+}
+
+// extractPlaylistID returns the playlist id from text (skipping RD… radio/mix
+// lists), else "". Used to badge notes with their playlist of origin.
+func extractPlaylistID(text string) string {
 	m := playlistIDRe.FindStringSubmatch(text)
 	if m == nil {
 		return ""
 	}
-	id := m[1]
-	if strings.HasPrefix(id, "RD") {
-		return ""
+	if id := m[1]; !strings.HasPrefix(id, "RD") {
+		return id
 	}
-	return "https://www.youtube.com/playlist?list=" + id
+	return ""
 }
 
 // handlePlaylistLink expands a playlist into video IDs and offers the same
@@ -800,7 +835,7 @@ func extractPlaylistURL(text string) string {
 // a couple of seconds), so it owns its own status message.
 func (t *TelegramBot) handlePlaylistLink(ctx context.Context, m *tb.Message, plURL string) {
 	status, _ := t.Bot.Send(m.Chat, "⏳ Читаю плейлист...")
-	items, err := t.Downloader.ExpandPlaylistItems(ctx, plURL)
+	items, plTitle, err := t.Downloader.ExpandPlaylistItems(ctx, plURL)
 	if err != nil {
 		if ytfeed.IsCookieError(err.Error()) {
 			_, _ = t.Bot.Edit(status, "❌ YouTube cookies expired. Run update-cookies.sh to fix.")
@@ -822,11 +857,12 @@ func (t *TelegramBot) handlePlaylistLink(ctx context.Context, m *tb.Message, plU
 	for i, it := range items {
 		ids[i], titles[i] = it.ID, it.Title
 	}
+	plID := extractPlaylistID(plURL)
 
 	// big playlists open a triage list (pick per video) instead of the blunt
 	// 4-button menu, which would fan one action out to every video at once
 	if len(ids) > triageThreshold {
-		token := t.storePendingAction(&pendingAction{kind: "triage", videoIDs: ids, titles: titles, originalMsg: m})
+		token := t.storePendingAction(&pendingAction{kind: "triage", videoIDs: ids, titles: titles, originalMsg: m, playlistID: plID, playlistTitle: plTitle})
 		rec, ok := t.loadTriage(token)
 		if !ok {
 			_, _ = t.Bot.Edit(status, "❌ Не смог открыть список")
@@ -840,7 +876,7 @@ func (t *TelegramBot) handlePlaylistLink(ctx context.Context, m *tb.Message, plU
 		return
 	}
 
-	token := t.storePendingAction(&pendingAction{kind: "yt", videoIDs: ids, originalMsg: m})
+	token := t.storePendingAction(&pendingAction{kind: "yt", videoIDs: ids, originalMsg: m, playlistID: plID, playlistTitle: plTitle})
 	prompt := fmt.Sprintf("🎬 Плейлист: %d видео. Что сделать?", total)
 	if capped {
 		prompt = fmt.Sprintf("🎬 Плейлист: %d видео, обработаю первые %d. Что сделать?", total, maxPlaylistItems)
@@ -1400,15 +1436,15 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 				if i == 0 {
 					origMsg = pa.originalMsg
 				}
-				t.enqueueNotesJob(st, origMsg, "https://www.youtube.com/watch?v="+videoID, action, "", notesPriorityUser)
+				t.enqueueNotesJob(st, origMsg, "https://www.youtube.com/watch?v="+videoID, action, "", notesPriorityUser, pa.playlistRefAt(i))
 			}
 		case "audio_notes":
 			t.startAudioProcessing(chat, statusMsg, pa)
 			// notes jobs get their own status messages; the audio flow owns
 			// statusMsg and the original message deletion
-			for _, videoID := range pa.videoIDs {
+			for i, videoID := range pa.videoIDs {
 				st, _ := t.Bot.Send(chat, "⏳ Конспект в очереди...")
-				t.enqueueNotesJob(st, nil, "https://www.youtube.com/watch?v="+videoID, "notes", "", notesPriorityUser)
+				t.enqueueNotesJob(st, nil, "https://www.youtube.com/watch?v="+videoID, "notes", "", notesPriorityUser, pa.playlistRefAt(i))
 			}
 		case "vo":
 			if !IsVotCliAvailable() {
@@ -1450,7 +1486,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 		case "vo":
 			t.enqueueVoiceoverJob(chat, statusMsg, pa.originalMsg, pa.url)
 		case "md", "notes":
-			t.enqueueNotesJob(statusMsg, pa.originalMsg, pa.url, action, "", notesPriorityUser)
+			t.enqueueNotesJob(statusMsg, pa.originalMsg, pa.url, action, "", notesPriorityUser, nil)
 		default:
 			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
 		}
@@ -1484,7 +1520,7 @@ func (t *TelegramBot) handleActionCallback(c *tb.Callback) {
 			_, _ = t.Bot.Edit(statusMsg, "⏳ Adding to reader…")
 			go t.processRead(context.Background(), chat, statusMsg, pa.originalMsg, pa.url)
 		case "md", "notes":
-			t.enqueueNotesJob(statusMsg, pa.originalMsg, pa.url, action, "", notesPriorityUser)
+			t.enqueueNotesJob(statusMsg, pa.originalMsg, pa.url, action, "", notesPriorityUser, nil)
 		default:
 			_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("❌ Unknown action: %s", action))
 		}
@@ -1599,7 +1635,7 @@ func (t *TelegramBot) handleListEntryActionCallback(c *tb.Callback) {
 			return
 		}
 		statusMsg, _ := t.Bot.Send(c.Message.Chat, "⏳ В очереди...")
-		t.enqueueNotesJob(statusMsg, nil, entry.Link.Href, "notes", "", notesPriorityUser)
+		t.enqueueNotesJob(statusMsg, nil, entry.Link.Href, "notes", "", notesPriorityUser, nil)
 		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Поставил в очередь"})
 	}
 }
@@ -1976,7 +2012,7 @@ func (t *TelegramBot) handleNotesCommand(m *tb.Message, level string) {
 			if i == 0 {
 				origMsg = m
 			}
-			t.enqueueNotesJob(statusMsg, origMsg, "https://www.youtube.com/watch?v="+videoID, level, length, notesPriorityUser)
+			t.enqueueNotesJob(statusMsg, origMsg, "https://www.youtube.com/watch?v="+videoID, level, length, notesPriorityUser, nil)
 		}
 		return
 	}
@@ -1988,7 +2024,7 @@ func (t *TelegramBot) handleNotesCommand(m *tb.Message, level string) {
 	}
 
 	statusMsg, _ := t.Bot.Send(m.Chat, "⏳ В очереди...")
-	t.enqueueNotesJob(statusMsg, m, rawURL, level, length, notesPriorityUser)
+	t.enqueueNotesJob(statusMsg, m, rawURL, level, length, notesPriorityUser, nil)
 }
 
 // parseSummaryLength extracts a standalone short|long word (any case) from the
@@ -2019,7 +2055,9 @@ const (
 // RSS feed bucket. priority orders the claim (see notesPriority* constants).
 // The optional title gives the queue view a human label right away (triage and
 // the /md list know it up front); single links backfill it during processing.
-func (t *TelegramBot) enqueueNotesJob(statusMsg, originalMsg *tb.Message, rawURL, level, length string, priority int, title ...string) {
+// pl carries the playlist origin (nil = not from a playlist) so the resulting
+// note's frontmatter and the Mini App can badge/group items from one playlist.
+func (t *TelegramBot) enqueueNotesJob(statusMsg, originalMsg *tb.Message, rawURL, level, length string, priority int, pl *playlistRef, title ...string) {
 	if t.NotesSvc == nil || statusMsg == nil {
 		return
 	}
@@ -2044,6 +2082,9 @@ func (t *TelegramBot) enqueueNotesJob(statusMsg, originalMsg *tb.Message, rawURL
 		Priority:    priority,
 		ChatID:      statusMsg.Chat.ID,
 		StatusMsgID: statusMsg.ID,
+	}
+	if pl != nil {
+		rec.PlaylistID, rec.PlaylistTitle, rec.PlaylistIndex = pl.ID, pl.Title, pl.Index
 	}
 	if originalMsg != nil {
 		rec.OrigMsgID = originalMsg.ID
@@ -2138,7 +2179,7 @@ func (t *TelegramBot) reportNotesBatch(job ytstore.NotesJobRecord, doneDelta, fa
 // a live counter, instead of a per-item "⏳ Queued…". Notes/MD items go through
 // the durable notes queue tagged with the batch id; audio items run in one
 // sequential goroutine. Each id is marked done in the triage record (list ✓).
-func (t *TelegramBot) triageQueueBatch(chat *tb.Chat, token, itemAction, label string, ids, titles []string) {
+func (t *TelegramBot) triageQueueBatch(chat *tb.Chat, token, itemAction, label string, ids, titles []string, refs []*playlistRef) {
 	batchID := randToken()
 	st, err := t.Bot.Send(chat, fmt.Sprintf("%s — партия из %d\n⏳ %d в очереди", label, len(ids), len(ids)))
 	if err != nil {
@@ -2156,7 +2197,11 @@ func (t *TelegramBot) triageQueueBatch(chat *tb.Chat, token, itemAction, label s
 			log.Printf("[WARN] mark triage done %s/%s: %v", token, id, terr)
 		}
 		if itemAction == "nt" {
-			t.enqueueNotesBatchItem(st, batchID, "https://www.youtube.com/watch?v="+id, "notes", titles[i])
+			var pl *playlistRef
+			if i < len(refs) {
+				pl = refs[i]
+			}
+			t.enqueueNotesBatchItem(st, batchID, "https://www.youtube.com/watch?v="+id, "notes", titles[i], pl)
 		}
 	}
 	if itemAction == "au" {
@@ -2166,8 +2211,9 @@ func (t *TelegramBot) triageQueueBatch(chat *tb.Chat, token, itemAction, label s
 
 // enqueueNotesBatchItem puts one page-all video into the notes queue as a member
 // of batchID: it shares the batch's status message and reports only terminal
-// state into the counter (background priority, like all triage items).
-func (t *TelegramBot) enqueueNotesBatchItem(statusMsg *tb.Message, batchID, rawURL, level, title string) {
+// state into the counter (background priority, like all triage items). pl carries
+// the playlist origin (nil = none) so the note is badged with its playlist.
+func (t *TelegramBot) enqueueNotesBatchItem(statusMsg *tb.Message, batchID, rawURL, level, title string, pl *playlistRef) {
 	if t.NotesSvc == nil {
 		return
 	}
@@ -2182,6 +2228,9 @@ func (t *TelegramBot) enqueueNotesBatchItem(statusMsg *tb.Message, batchID, rawU
 		ChatID:      statusMsg.Chat.ID,
 		StatusMsgID: statusMsg.ID,
 		BatchID:     batchID,
+	}
+	if pl != nil {
+		rec.PlaylistID, rec.PlaylistTitle, rec.PlaylistIndex = pl.ID, pl.Title, pl.Index
 	}
 	if source == "youtube" || source == "podcast" {
 		reuse := filepath.Join(t.FilesLocation, t.makeFileName(sourceID)+".mp3")

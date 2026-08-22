@@ -434,6 +434,46 @@ func TestExtractPlaylistURL(t *testing.T) {
 	}
 }
 
+func TestExtractPlaylistID(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"bare playlist", "https://www.youtube.com/playlist?list=PLabc123", "PLabc123"},
+		{"watch with list", "https://www.youtube.com/watch?v=xxx&list=PLabc123", "PLabc123"},
+		{"radio mix ignored", "https://www.youtube.com/watch?v=xxx&list=RDabc123", ""},
+		{"no list param", "https://youtu.be/abc", ""},
+		{"extra params", "https://m.youtube.com/playlist?list=PL_x-9&si=zzz", "PL_x-9"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, extractPlaylistID(tt.in))
+		})
+	}
+}
+
+func TestPendingActionPlaylistRefAt(t *testing.T) {
+	// no playlist origin → nil at any index
+	pa := &pendingAction{kind: "yt", videoIDs: []string{"a", "b"}}
+	assert.Nil(t, pa.playlistRefAt(0))
+
+	// with origin → 1-based index, id/title carried
+	pa = &pendingAction{kind: "yt", videoIDs: []string{"a", "b"}, playlistID: "PLx", playlistTitle: "Mix"}
+	assert.Equal(t, &playlistRef{ID: "PLx", Title: "Mix", Index: 1}, pa.playlistRefAt(0))
+	assert.Equal(t, &playlistRef{ID: "PLx", Title: "Mix", Index: 2}, pa.playlistRefAt(1))
+}
+
+func TestPendingTriagePlaylistRef(t *testing.T) {
+	// pasted multi-link batch (no playlist) → nil
+	rec := pendingTriage{videoIDs: []string{"a", "b", "c"}}
+	assert.Nil(t, rec.playlistRef(2))
+
+	// playlist triage → absolute position is index+1
+	rec = pendingTriage{videoIDs: []string{"a", "b", "c"}, playlistID: "PLx", playlistTitle: "Show"}
+	assert.Equal(t, &playlistRef{ID: "PLx", Title: "Show", Index: 3}, rec.playlistRef(2))
+}
+
 func TestCookieStale(t *testing.T) {
 	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
 	tests := []struct {

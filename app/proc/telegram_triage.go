@@ -33,10 +33,22 @@ func triageItemTitle(rec pendingTriage, i int) string {
 
 // pendingTriage is the subset of a stored triage record the renderer needs.
 type pendingTriage struct {
-	token    string
-	videoIDs []string
-	titles   []string
-	done     map[string]bool
+	token         string
+	videoIDs      []string
+	titles        []string
+	done          map[string]bool
+	playlistID    string // set when the list came from an expanded playlist
+	playlistTitle string
+}
+
+// playlistRef returns the playlist origin for the i-th video (nil when the list
+// isn't a playlist — e.g. a pasted multi-link batch). videoIDs order = playlist
+// order, so the 1-based index is i+1.
+func (r pendingTriage) playlistRef(i int) *playlistRef {
+	if r.playlistID == "" {
+		return nil
+	}
+	return &playlistRef{ID: r.playlistID, Title: r.playlistTitle, Index: i + 1}
 }
 
 // loadTriage reads a triage pending action from bolt (non-destructive — the list
@@ -55,7 +67,10 @@ func (t *TelegramBot) loadTriage(token string) (pendingTriage, bool) {
 	for _, d := range rec.Done {
 		done[d] = true
 	}
-	return pendingTriage{token: token, videoIDs: rec.VideoIDs, titles: rec.Titles, done: done}, true
+	return pendingTriage{
+		token: token, videoIDs: rec.VideoIDs, titles: rec.Titles, done: done,
+		playlistID: rec.PlaylistID, playlistTitle: rec.PlaylistTitle,
+	}, true
 }
 
 // buildTriageMessage renders one page of the triage list: a numbered list with a
@@ -191,7 +206,7 @@ func (t *TelegramBot) handleTriageActionCallback(c *tb.Callback) {
 			_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Уже в очереди"})
 			return
 		}
-		t.triageQueueOne(chat, token, action, id, triageItemTitle(rec, idx))
+		t.triageQueueOne(chat, token, action, id, triageItemTitle(rec, idx), rec.playlistRef(idx))
 	case "pgau", "pgnt":
 		itemAction, emoji := "au", "🎵"
 		if action == "pgnt" {
@@ -203,6 +218,7 @@ func (t *TelegramBot) handleTriageActionCallback(c *tb.Callback) {
 			end = len(rec.videoIDs)
 		}
 		var ids, titles []string
+		var refs []*playlistRef
 		for i := start; i < end; i++ {
 			id := rec.videoIDs[i]
 			if rec.done[id] {
@@ -217,13 +233,14 @@ func (t *TelegramBot) handleTriageActionCallback(c *tb.Callback) {
 			}
 			ids = append(ids, id)
 			titles = append(titles, triageItemTitle(rec, i))
+			refs = append(refs, rec.playlistRef(i))
 		}
 		if len(ids) == 0 {
 			_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Всё на странице уже в ленте/очереди"})
 			return
 		}
 		// one shared status message with a live counter, not N "⏳ Queued…"
-		t.triageQueueBatch(chat, token, itemAction, fmt.Sprintf("%s стр %d", emoji, page+1), ids, titles)
+		t.triageQueueBatch(chat, token, itemAction, fmt.Sprintf("%s стр %d", emoji, page+1), ids, titles, refs)
 	default:
 		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Bad action"})
 		return
@@ -244,7 +261,7 @@ func (t *TelegramBot) handleTriageActionCallback(c *tb.Callback) {
 // marks it done in bolt (which also refreshes the list's TTL so an active triage
 // session is not garbage-collected mid-work). Audio uses the existing download
 // flow; md/nt go through the notes queue.
-func (t *TelegramBot) triageQueueOne(chat *tb.Chat, token, action, videoID, title string) {
+func (t *TelegramBot) triageQueueOne(chat *tb.Chat, token, action, videoID, title string, pl *playlistRef) {
 	videoURL := "https://www.youtube.com/watch?v=" + videoID
 	switch action {
 	case "au":
@@ -267,7 +284,7 @@ func (t *TelegramBot) triageQueueOne(chat *tb.Chat, token, action, videoID, titl
 		st, _ := t.Bot.Send(chat, "⏳ Queued…")
 		// triage items come from a big playlist/batch: background priority so a
 		// single user link queued meanwhile jumps ahead of the remaining items
-		t.enqueueNotesJob(st, nil, videoURL, level, "", notesPriorityBulk, title)
+		t.enqueueNotesJob(st, nil, videoURL, level, "", notesPriorityBulk, pl, title)
 	}
 	if _, _, err := t.Store.TouchPendingActionDone(token, videoID, time.Now().UTC()); err != nil {
 		log.Printf("[WARN] mark triage done %s/%s: %v", token, videoID, err)
