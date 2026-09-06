@@ -249,8 +249,13 @@ func (t *TelegramBot) handleLibActionCallback(c *tb.Callback) {
 }
 
 // runActivate uploads a work into its category feed with a live progress
-// message, then refreshes the catalog view.
+// message, then refreshes the catalog view. In variant A remote mode the upload
+// is delegated to the Mac agent via the queue instead.
 func (t *TelegramBot) runActivate(c *tb.Callback, w publisher.CatWork, filter string, page int) {
+	if t.ActQueue != nil {
+		t.enqueueActivation(c, publisher.OpActivate, w, filter, page)
+		return
+	}
 	status, _ := t.Bot.Send(c.Message.Chat, fmt.Sprintf("⏳ Активирую «%s» (0/%d)…", w.Title, w.Parts))
 	step := w.Parts / 10
 	if step < 1 {
@@ -280,8 +285,14 @@ func (t *TelegramBot) runActivate(c *tb.Callback, w publisher.CatWork, filter st
 	t.refreshLibraryView(c, filter, page)
 }
 
-// runDeactivate empties a category feed and refreshes the catalog view
+// runDeactivate empties a category feed and refreshes the catalog view. In
+// variant A remote mode the R2 eviction is done by the VM finalize watcher after
+// the queued request is picked up.
 func (t *TelegramBot) runDeactivate(c *tb.Callback, w publisher.CatWork, filter string, page int) {
+	if t.ActQueue != nil {
+		t.enqueueActivation(c, publisher.OpDeactivate, w, filter, page)
+		return
+	}
 	status, _ := t.Bot.Send(c.Message.Chat, fmt.Sprintf("⏹ Снимаю «%s»…", w.Title))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
@@ -304,6 +315,63 @@ func (t *TelegramBot) refreshLibraryView(c *tb.Callback, filter string, page int
 		return
 	}
 	_, _ = t.Bot.Edit(c.Message, msg, markup)
+}
+
+// enqueueActivation is the variant A remote path: it drops an activate/deactivate
+// request in the queue for the Mac agent and pins a status message that the VM
+// finalize watcher edits (via ActivationDone/Failed) once the work is uploaded
+// and the feed regenerated. No upload happens in-process here.
+func (t *TelegramBot) enqueueActivation(c *tb.Callback, op publisher.ActivationOp, w publisher.CatWork, filter string, page int) {
+	wait := fmt.Sprintf("⏳ «%s» → в очередь на заливку (жду мак)…", w.Title)
+	if op == publisher.OpDeactivate {
+		wait = fmt.Sprintf("⏹ Снимаю «%s»… (жду мак)", w.Title)
+	}
+	status, _ := t.Bot.Send(c.Message.Chat, wait)
+	req := publisher.ActivationRequest{Op: op, Category: w.Category, Work: w.Slug}
+	if status != nil {
+		req.ChatID = status.Chat.ID
+		req.StatusMsgID = status.ID
+	}
+	if _, err := t.ActQueue.Enqueue(req); err != nil {
+		if status != nil {
+			_, _ = t.Bot.Edit(status, fmt.Sprintf("⚠️ не поставил «%s» в очередь: %v", w.Title, err))
+		}
+		return
+	}
+	t.refreshLibraryView(c, filter, page)
+}
+
+// statusMsg reconstructs the pinned status message from a request's chat+message
+// ids (nil when the request carried none — e.g. a queue entry from the CLI).
+func (t *TelegramBot) statusMsg(req publisher.ActivationRequest) *tb.Message {
+	if req.ChatID == 0 || req.StatusMsgID == 0 {
+		return nil
+	}
+	return &tb.Message{ID: req.StatusMsgID, Chat: &tb.Chat{ID: req.ChatID}}
+}
+
+// ActivationDone implements publisher.FinalizeNotifier: the VM finalize watcher
+// calls it after a remote activation/deactivation lands, editing the status
+// message the bot pinned when it enqueued the request.
+func (t *TelegramBot) ActivationDone(req publisher.ActivationRequest, feedURL string, episodes int) {
+	msg := t.statusMsg(req)
+	if msg == nil {
+		return
+	}
+	if req.Op == publisher.OpDeactivate {
+		_, _ = t.Bot.Edit(msg, fmt.Sprintf("⏹ «%s» снята — лента «%s» пуста", req.Work, req.Category))
+		return
+	}
+	_, _ = t.Bot.Edit(msg, fmt.Sprintf("▶ «%s» в ленте (%d частей)\nЛента: %s", req.Work, episodes, feedURL))
+}
+
+// ActivationFailed implements publisher.FinalizeNotifier for the error path.
+func (t *TelegramBot) ActivationFailed(req publisher.ActivationRequest, reason string) {
+	msg := t.statusMsg(req)
+	if msg == nil {
+		return
+	}
+	_, _ = t.Bot.Edit(msg, fmt.Sprintf("⚠️ «%s»: %s", req.Work, reason))
 }
 
 // parseKVCallback parses "k=v|k=v" callback data into a map

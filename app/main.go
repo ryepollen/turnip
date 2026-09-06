@@ -194,6 +194,19 @@ func main() {
 	var readSvc *proc.ReadService
 	var deleteFeedEntry func(ytfeed.Entry) error
 
+	// variant A remote activation (config-gated, default off): when on, the bot
+	// enqueues ▶/⏹ requests instead of uploading in-process, and the VM finalize
+	// watcher applies state+feed once the Mac agent has uploaded to R2. actQueue is
+	// nil in the default single-machine mode, which keeps both the bot and the
+	// watcher on the in-process path — deploying this code is a no-op until the flag
+	// is flipped at cutover. finalizeNotifier lets the watcher edit the bot's status
+	// message; it is set after the bot comes up.
+	var actQueue *publisher.ActivationQueue
+	var finalizeNotifier publisher.FinalizeNotifier
+	if pubSvc != nil && conf.Audio.RemoteActivation {
+		actQueue = publisher.NewActivationQueue(conf.Audio.Location)
+	}
+
 	// Initialize Telegram Bot for manual video additions
 	if conf.TelegramBot.Enabled && opts.TelegramToken != "" && conf.TelegramBot.AllowedUserID != 0 {
 		log.Printf("[INFO] starting telegram bot for user %d, feed: %s", conf.TelegramBot.AllowedUserID, conf.TelegramBot.FeedName)
@@ -235,6 +248,7 @@ func main() {
 			ReadSvc:       readSvc,
 			Media:         mediaOffloader,
 			Pub:           pubSvc,
+			ActQueue:      actQueue,
 		})
 		if err != nil {
 			log.Printf("[ERROR] failed to create telegram bot: %v", err)
@@ -245,6 +259,7 @@ func main() {
 			}
 			ownerNotify = tgBot.NotifyOwner
 			deleteFeedEntry = tgBot.DeleteEntry // Mini App reuses the /del path
+			finalizeNotifier = tgBot            // variant A: watcher edits the bot's status message
 			go func() {
 				if err := tgBot.Run(context.Background()); err != nil {
 					log.Printf("[ERROR] telegram bot failed: %v", err)
@@ -260,6 +275,13 @@ func main() {
 	// uploaded to R2 and added to the category feed automatically
 	if pubSvc != nil {
 		go pubSvc.Watch(context.Background(), time.Minute, ownerNotify)
+		// variant A finalize watcher: the Mac agent uploads a work's parts to R2
+		// and marks the request done; the VM applies state+feed locally. Only wired
+		// when remote_activation is on (actQueue non-nil) — the same flag flips the
+		// bot from in-process upload to enqueue, so the two halves turn on together.
+		if actQueue != nil {
+			go pubSvc.WatchDone(context.Background(), actQueue, 5*time.Second, finalizeNotifier)
+		}
 	}
 
 	if opts.AdminPasswd == "" {

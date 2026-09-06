@@ -60,6 +60,10 @@ type Conf struct {
 
 	Audio struct {
 		Location string `yaml:"location"` // root of the publishing library, default "var/audio"
+		// RemoteActivation is variant A: the bot enqueues an activation request, the
+		// Mac agent (which holds the iCloud archive) uploads the work's parts to R2,
+		// and the VM finalizes state+feed. Off (default) = the VM uploads in-process.
+		RemoteActivation bool `yaml:"remote_activation"`
 	} `yaml:"audio"`
 
 	Notes struct {
@@ -67,9 +71,9 @@ type Conf struct {
 		MDLocation       string `yaml:"md_location"`
 		WhisperModel     string `yaml:"whisper_model"`
 		WhisperBaseURL   string `yaml:"whisper_base_url"` // OpenAI-compatible ASR; default Groq
-		LLMModel         string `yaml:"llm_model"`       // strong model for summary/refs/digest
-		LLMCleanModel    string `yaml:"llm_clean_model"` // cheap model for the bulk cleanup pass
-		LLMBaseURL       string `yaml:"llm_base_url"`    // OpenAI-compatible; default Groq
+		LLMModel         string `yaml:"llm_model"`        // strong model for summary/refs/digest
+		LLMCleanModel    string `yaml:"llm_clean_model"`  // cheap model for the bulk cleanup pass
+		LLMBaseURL       string `yaml:"llm_base_url"`     // OpenAI-compatible; default Groq
 		NotionParentPage string `yaml:"notion_parent_page"`
 		Concurrency      int    `yaml:"concurrency"`
 		ChunkSeconds     int    `yaml:"chunk_seconds"`

@@ -262,21 +262,15 @@ func (p *Service) Catalog() ([]CatWork, error) {
 // then the category state + feed swap over, then the previously active work's R2
 // objects are freed. The upload-first ordering means a mid-run failure leaves the
 // old active work still serving. progress (nil-safe) ticks (done, total).
+//
+// This is the single-machine path (VM reads the audio bytes and uploads them). In
+// variant A the upload moves to the Mac agent and the VM runs Finalize instead;
+// both share commitActive so the state/feed/evict half stays identical.
 func (p *Service) Activate(ctx context.Context, category, work string, progress func(done, total int)) error {
-	if err := validCategory(category); err != nil {
+	parts, err := p.gatherForActivate(category, work)
+	if err != nil {
 		return err
 	}
-	if work == "" || strings.ContainsAny(work, `/\`) || work == ".." {
-		return fmt.Errorf("bad work name %q", work)
-	}
-	parts, err := p.gatherParts(category, work)
-	if err != nil {
-		return fmt.Errorf("work %q not found in %s: %w", work, category, err)
-	}
-	if len(parts) == 0 {
-		return fmt.Errorf("work %q has no audio parts", work)
-	}
-
 	old, err := p.loadState(category)
 	if err != nil {
 		return err
@@ -285,8 +279,8 @@ func (p *Service) Activate(ctx context.Context, category, work string, progress 
 	total := len(parts)
 	eps := make([]Episode, 0, total)
 	for i, pt := range parts {
+		key := p.partKey(category, work, pt)
 		relKey := filepath.ToSlash(filepath.Join(work, pt.rel))
-		key := fmt.Sprintf("a/%s/%s/%s", p.Secret, category, relKey)
 
 		src, perr := p.prepareForUpload(ctx, pt.abs, category, relKey)
 		if perr != nil {
@@ -303,32 +297,100 @@ func (p *Service) Activate(ctx context.Context, category, work string, progress 
 				return err
 			}
 		}
-		eps = append(eps, Episode{
-			File:        pt.rel,
-			Title:       pt.title,
-			Work:        work,
-			Season:      pt.season,
-			Order:       pt.order,
-			R2Key:       key,
-			PublicURL:   publicURL,
-			MimeType:    mimeForFile(pt.rel),
-			SizeBytes:   fi.Size(),
-			DurationSec: p.durationOf(pt.abs),
-			PublishedAt: time.Now().UTC(),
-		})
+		eps = append(eps, p.newEpisode(work, pt, key, publicURL, fi.Size()))
 		if progress != nil {
 			progress(i+1, total)
 		}
 	}
+	return p.commitActive(ctx, category, work, old, eps)
+}
 
+// Finalize is the VM half of variant A: the Mac agent has already uploaded the
+// work's parts to R2, so the VM only rebuilds the episode list (sizes read via
+// R2 HEAD, not local bytes), swaps the category's active work, and evicts the
+// previous one. It errors if any part is missing from R2 — that means the Mac
+// upload was incomplete, so the old work must keep serving.
+func (p *Service) Finalize(ctx context.Context, category, work string) error {
+	parts, err := p.gatherForActivate(category, work)
+	if err != nil {
+		return err
+	}
+	old, err := p.loadState(category)
+	if err != nil {
+		return err
+	}
+
+	eps := make([]Episode, 0, len(parts))
+	for _, pt := range parts {
+		key := p.partKey(category, work, pt)
+		size, serr := p.R2.Size(ctx, key)
+		if serr != nil {
+			return fmt.Errorf("check R2 for %s: %w", pt.rel, serr)
+		}
+		if size == 0 {
+			return fmt.Errorf("part not yet in R2 (upload incomplete): %s", pt.rel)
+		}
+		eps = append(eps, p.newEpisode(work, pt, key, p.R2.PublicURL(key), size))
+	}
+	return p.commitActive(ctx, category, work, old, eps)
+}
+
+// gatherForActivate validates the category/work names and returns the work's
+// parts in listen order, erroring on a missing or empty work.
+func (p *Service) gatherForActivate(category, work string) ([]partRef, error) {
+	if err := validCategory(category); err != nil {
+		return nil, err
+	}
+	if work == "" || strings.ContainsAny(work, `/\`) || work == ".." {
+		return nil, fmt.Errorf("bad work name %q", work)
+	}
+	parts, err := p.gatherParts(category, work)
+	if err != nil {
+		return nil, fmt.Errorf("work %q not found in %s: %w", work, category, err)
+	}
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("work %q has no audio parts", work)
+	}
+	return parts, nil
+}
+
+// partKey is the deterministic R2 key for a part: a/{secret}/{category}/{work}/{rel}.
+// Both the VM (Activate/Finalize) and the Mac agent derive keys this way, so they
+// always agree on where a part lives.
+func (p *Service) partKey(category, work string, pt partRef) string {
+	relKey := filepath.ToSlash(filepath.Join(work, pt.rel))
+	return fmt.Sprintf("a/%s/%s/%s", p.Secret, category, relKey)
+}
+
+// newEpisode builds one feed episode from a part and its known R2 key/URL/size.
+func (p *Service) newEpisode(work string, pt partRef, key, publicURL string, size int64) Episode {
+	return Episode{
+		File:        pt.rel,
+		Title:       pt.title,
+		Work:        work,
+		Season:      pt.season,
+		Order:       pt.order,
+		R2Key:       key,
+		PublicURL:   publicURL,
+		MimeType:    mimeForFile(pt.rel),
+		SizeBytes:   size,
+		DurationSec: p.durationOf(pt.abs),
+		PublishedAt: time.Now().UTC(),
+	}
+}
+
+// commitActive persists a freshly-built episode list as the category's active
+// work, regenerates the feed, then frees the previously active work's now-
+// unreferenced R2 objects. Callers guarantee every episode key already exists in
+// R2 before this runs, so the old work keeps serving until the atomic state swap.
+// Re-running with the same work is idempotent (old == new → nothing evicted).
+func (p *Service) commitActive(ctx context.Context, category, work string, old CategoryState, eps []Episode) error {
 	if err := p.saveState(category, CategoryState{ActiveWork: work, Episodes: eps}); err != nil {
 		return err
 	}
 	if err := p.RegenerateFeed(category); err != nil {
 		return err
 	}
-
-	// free the previously active work's R2 objects (keys no longer referenced)
 	if old.ActiveWork != "" && old.ActiveWork != work {
 		newKeys := make(map[string]bool, len(eps))
 		for _, e := range eps {

@@ -169,19 +169,37 @@ func (q *ActivationQueue) Claim(id string) (ActivationRequest, error) {
 // Complete marks a claimed request done (upload to R2 succeeded).
 func (q *ActivationQueue) Complete(id string) error { return q.move(reqClaimed, reqDone, id) }
 
-// Fail marks a claimed request failed, recording the reason in a sibling .err
-// sidecar so both Go and the shell agent carry it without touching the JSON.
+// writeFailReason records a failure reason in a sibling .err sidecar so both Go
+// and the shell agent carry it without touching the JSON payload.
+func (q *ActivationQueue) writeFailReason(id, reason string) error {
+	if reason == "" {
+		return nil
+	}
+	errPath := filepath.Join(q.dir, reqFailed, id+".err")
+	if err := os.MkdirAll(filepath.Dir(errPath), 0o750); err != nil {
+		return fmt.Errorf("failed to create %s dir: %w", reqFailed, err)
+	}
+	if err := os.WriteFile(errPath, []byte(reason), 0o640); err != nil { //nolint:gosec
+		return fmt.Errorf("failed to write error sidecar: %w", err)
+	}
+	return nil
+}
+
+// Fail marks a claimed request failed (the Mac agent's upload step errored).
 func (q *ActivationQueue) Fail(id, reason string) error {
-	if reason != "" {
-		errPath := filepath.Join(q.dir, reqFailed, id+".err")
-		if err := os.MkdirAll(filepath.Dir(errPath), 0o750); err != nil {
-			return fmt.Errorf("failed to create %s dir: %w", reqFailed, err)
-		}
-		if err := os.WriteFile(errPath, []byte(reason), 0o640); err != nil { //nolint:gosec
-			return fmt.Errorf("failed to write error sidecar: %w", err)
-		}
+	if err := q.writeFailReason(id, reason); err != nil {
+		return err
 	}
 	return q.move(reqClaimed, reqFailed, id)
+}
+
+// Reject moves a done request to failed when the VM's finalize step errors (the
+// Mac uploaded, but building state/feed failed — e.g. a part is missing in R2).
+func (q *ActivationQueue) Reject(id, reason string) error {
+	if err := q.writeFailReason(id, reason); err != nil {
+		return err
+	}
+	return q.move(reqDone, reqFailed, id)
 }
 
 // FailReason reads the error sidecar for a failed request ("" if none).

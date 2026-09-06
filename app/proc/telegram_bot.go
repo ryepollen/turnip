@@ -47,6 +47,10 @@ type TelegramBot struct {
 	Apple            *AppleResolver     // apple podcasts links resolution
 	Media            MediaOffloader     // nil = episodes stay on local disk
 	Pub              *publisher.Service // nil = publishing platform off
+	// ActQueue non-nil = variant A remote activation: ▶/⏹ enqueue a request for the
+	// Mac agent to upload to R2, and the VM finalize watcher edits the status back.
+	// nil = the bot activates in-process (uploads from the VM itself).
+	ActQueue *publisher.ActivationQueue
 
 	r2WarnMu   sync.Mutex
 	lastR2Warn time.Time
@@ -129,6 +133,7 @@ type TelegramBotParams struct {
 	ReadSvc       *ReadService
 	Media         MediaOffloader
 	Pub           *publisher.Service
+	ActQueue      *publisher.ActivationQueue
 }
 
 // NewTelegramBot creates a new bot for receiving YouTube URLs
@@ -168,6 +173,7 @@ func NewTelegramBot(params TelegramBotParams) (*TelegramBot, error) {
 		ReadSvc:       params.ReadSvc,
 		Media:         params.Media,
 		Pub:           params.Pub,
+		ActQueue:      params.ActQueue,
 	}
 
 	// Initialize TTS if enabled

@@ -140,3 +140,18 @@ func (s *R2Store) Exists(ctx context.Context, key string) (bool, error) {
 	}
 	return info.Size > 0, nil
 }
+
+// Size returns the byte size of an object, or 0 (no error) when it is absent —
+// letting callers distinguish "not uploaded yet" (0) from a transport failure.
+// The VM's finalize step uses this to size episodes the Mac agent uploaded.
+func (s *R2Store) Size(ctx context.Context, key string) (int64, error) {
+	info, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
+	if err != nil {
+		errResp := minio.ToErrorResponse(err)
+		if errResp.Code == "NoSuchKey" || errResp.StatusCode == 404 {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("failed to stat %s: %w", key, err)
+	}
+	return info.Size, nil
+}
