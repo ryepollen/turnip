@@ -14,9 +14,12 @@ import (
 	"time"
 )
 
-// DurationProvider reads audio duration in seconds (implemented by duration.Service)
+// DurationProvider reads audio duration in seconds (implemented by duration.Service).
+// File reads a local path (in-process Activate); URL streams from R2 over HTTP so
+// the remote-activation Finalize path never needs the originals' bytes on the VM.
 type DurationProvider interface {
 	File(fname string) int
+	URL(url string) int
 }
 
 // Service is a library of sleeping works with one active work per subscription.
@@ -297,7 +300,7 @@ func (p *Service) Activate(ctx context.Context, category, work string, progress 
 				return err
 			}
 		}
-		eps = append(eps, p.newEpisode(work, pt, key, publicURL, fi.Size()))
+		eps = append(eps, p.newEpisode(work, pt, key, publicURL, fi.Size(), p.durationOf(src)))
 		if progress != nil {
 			progress(i+1, total)
 		}
@@ -330,7 +333,8 @@ func (p *Service) Finalize(ctx context.Context, category, work string) error {
 		if size == 0 {
 			return fmt.Errorf("part not yet in R2 (upload incomplete): %s", pt.rel)
 		}
-		eps = append(eps, p.newEpisode(work, pt, key, p.R2.PublicURL(key), size))
+		url := p.R2.PublicURL(key)
+		eps = append(eps, p.newEpisode(work, pt, key, url, size, p.durationURLOf(url)))
 	}
 	return p.commitActive(ctx, category, work, old, eps)
 }
@@ -362,8 +366,9 @@ func (p *Service) partKey(category, work string, pt partRef) string {
 	return fmt.Sprintf("a/%s/%s/%s", p.Secret, category, relKey)
 }
 
-// newEpisode builds one feed episode from a part and its known R2 key/URL/size.
-func (p *Service) newEpisode(work string, pt partRef, key, publicURL string, size int64) Episode {
+// newEpisode builds one feed episode from a part and its known R2 key/URL/size and
+// a caller-computed duration (local File for Activate, R2 URL for Finalize).
+func (p *Service) newEpisode(work string, pt partRef, key, publicURL string, size int64, durationSec int) Episode {
 	return Episode{
 		File:        pt.rel,
 		Title:       pt.title,
@@ -374,7 +379,7 @@ func (p *Service) newEpisode(work string, pt partRef, key, publicURL string, siz
 		PublicURL:   publicURL,
 		MimeType:    mimeForFile(pt.rel),
 		SizeBytes:   size,
-		DurationSec: p.durationOf(pt.abs),
+		DurationSec: durationSec,
 		PublishedAt: time.Now().UTC(),
 	}
 }
@@ -525,12 +530,22 @@ func (p *Service) Categories() ([]string, error) {
 	return cats, nil
 }
 
-// durationOf is nil-safe around the duration provider
+// durationOf is nil-safe around the duration provider (local file)
 func (p *Service) durationOf(path string) int {
 	if p.Duration == nil {
 		return 0
 	}
 	return p.Duration.File(path)
+}
+
+// durationURLOf is nil-safe around the duration provider's HTTP probe. Finalize
+// uses it because the parts live in R2, not on the VM — the whole point of
+// variant A is that the VM keeps no audio bytes.
+func (p *Service) durationURLOf(url string) int {
+	if p.Duration == nil {
+		return 0
+	}
+	return p.Duration.URL(url)
 }
 
 // validCategory guards against path traversal in category names

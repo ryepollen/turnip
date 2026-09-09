@@ -88,6 +88,52 @@ func writeWork(t *testing.T, svc *Service, category, work string, parts ...strin
 	}
 }
 
+// spyDuration records which duration path was taken so a test can prove Finalize
+// reads from R2 (URL) and never touches the originals' bytes (File).
+type spyDuration struct {
+	fileCalls int
+	urlCalls  int
+}
+
+func (s *spyDuration) File(string) int { s.fileCalls++; return 42 }
+func (s *spyDuration) URL(string) int  { s.urlCalls++; return 90 }
+
+// TestFinalizeReadsR2NotOriginals is the invariant that makes variant-A stubbing
+// safe: once a work's parts are in R2, Finalize rebuilds the episode list from R2
+// alone — even if the local originals are blanked to 0-byte manifest stubs.
+func TestFinalizeReadsR2NotOriginals(t *testing.T) {
+	svc, fake := newFakeR2Service(t)
+	spy := &spyDuration{}
+	svc.Duration = spy
+	writeWork(t, svc, "books", "Work", "01 - One.mp3", "02 - Two.mp3")
+
+	// model the Mac agent having uploaded the parts by running the in-process
+	// Activate once to populate R2 + state (this path legitimately probes local files)
+	require.NoError(t, svc.Activate(t.Context(), "books", "Work", nil))
+	require.Equal(t, 2, spy.fileCalls, "in-process Activate probes local files")
+
+	// variant A after stubbing: blank the originals to 0 bytes, keeping only names
+	workDir := filepath.Join(svc.categoryDir("books"), "Work")
+	for _, rel := range []string{"01 - One.mp3", "02 - Two.mp3"} {
+		require.NoError(t, os.WriteFile(filepath.Join(workDir, rel), nil, 0o600))
+	}
+	spy.fileCalls, spy.urlCalls = 0, 0
+
+	// Finalize (the remote-activation VM half) must rebuild purely from R2
+	require.NoError(t, svc.Finalize(t.Context(), "books", "Work"))
+	assert.Zero(t, spy.fileCalls, "Finalize must not read the originals' bytes")
+	assert.Equal(t, 2, spy.urlCalls, "Finalize reads duration from the R2 URL")
+
+	eps, err := svc.EpisodeList("books")
+	require.NoError(t, err)
+	require.Len(t, eps, 2)
+	for _, e := range eps {
+		assert.Equal(t, 90, e.DurationSec, "duration comes from the R2 URL probe, not local ffprobe")
+		assert.NotZero(t, e.SizeBytes, "size still resolved via R2 HEAD")
+	}
+	assert.True(t, fake.has("a/s3cr3t/books/Work/01 - One.mp3"))
+}
+
 func TestServiceActivateAndRegenerate(t *testing.T) {
 	svc, fake := newFakeR2Service(t)
 	writeWork(t, svc, "books", "TheBook",

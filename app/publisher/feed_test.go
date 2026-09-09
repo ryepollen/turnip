@@ -140,6 +140,7 @@ func TestEpisodeGUIDStable(t *testing.T) {
 type fakeDuration struct{}
 
 func (fakeDuration) File(string) int { return 90 }
+func (fakeDuration) URL(string) int  { return 90 }
 
 func TestBuildFeedXMLSerialSeasonOrder(t *testing.T) {
 	// two seasons, interleaved on disk — feed must order by (season, track)
