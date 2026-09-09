@@ -39,13 +39,17 @@ func (c FeedConfig) NormalizeEnabled() bool {
 }
 
 // normalizeDefaultFor decides the loudnorm default when feed.yaml is silent.
-// Books come from a single publisher already mastered to a consistent level, so
-// re-encoding every chapter only burns CPU (30+ min/file on the small VM) and can
-// leave a loudness step at the seam; mixed content (courses, podcasts) still wins
-// from a uniform -16 LUFS across sources. An explicit normalize: in feed.yaml
-// always overrides this.
-func normalizeDefaultFor(category string) bool {
-	return category != "books"
+// Off for every category (decision B, 2026-09-09). loudnorm needs the raw bytes +
+// ffmpeg, but under variant A the VM holds 0-byte stub originals and never reads
+// them: the Mac agent uploads parts to R2 and the VM only runs Finalize (sizes/
+// duration via R2 HEAD/stream). So prepareForUpload is off the active path — a
+// courses/podcasts "on" default would just be a promise the pipeline can't keep.
+// An explicit normalize: true in feed.yaml still opts in on the legacy in-process
+// Activate path. Fallback if uniform -16 LUFS becomes wanted: path A — move this
+// loudnorm step into the Mac activate-agent, gated on a Normalize flag carried in
+// the ActivationRequest (see prepareForUpload).
+func normalizeDefaultFor(_ string) bool {
+	return false
 }
 
 // LoadFeedConfig reads dir/feed.yaml; missing file yields defaults with the

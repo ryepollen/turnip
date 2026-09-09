@@ -35,12 +35,11 @@ func TestLoadFeedConfigDefaults(t *testing.T) {
 	assert.Equal(t, "books", cfg.Title)
 	assert.Equal(t, "ru", cfg.Language)
 	assert.Equal(t, "serial", cfg.Type)
-	// books are a single pre-mastered source → normalization off by default
+	// normalize is off by default for every category (decision B): under variant A
+	// the VM never reads the bytes, so loudnorm can't run on the active path
 	assert.False(t, cfg.NormalizeEnabled(), "books default to normalize off")
-
-	// mixed content (courses etc.) keeps loudnorm on by default
-	assert.True(t, LoadFeedConfig(t.TempDir(), "courses").NormalizeEnabled(),
-		"non-book categories default to normalize on")
+	assert.False(t, LoadFeedConfig(t.TempDir(), "courses").NormalizeEnabled(),
+		"courses/podcasts also default to normalize off in variant A")
 
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "feed.yaml"),

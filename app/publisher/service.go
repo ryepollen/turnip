@@ -438,6 +438,14 @@ func (p *Service) Deactivate(ctx context.Context, category string) error {
 // prepareForUpload returns the local path to upload for a part: the loudnorm-
 // normalized copy (cached under processed/) when normalization is on for the
 // category and the file is an mp3, otherwise the original untouched.
+//
+// Only the in-process Activate path reaches this. Under variant A (RemoteActivation)
+// the Mac agent uploads raw and the VM runs Finalize, which never calls this — so
+// loudnorm is off for every category in that mode (decision B, 2026-09-09; defaults
+// in normalizeDefaultFor). Path A, if uniform -16 LUFS is later wanted without
+// pulling bytes back to the VM: replicate this single ffmpeg call in the Mac
+// activate-agent, gated on a Normalize flag stamped into the ActivationRequest by
+// the bot (LoadFeedConfig(...).NormalizeEnabled()).
 func (p *Service) prepareForUpload(ctx context.Context, srcPath, category, relKey string) (string, error) {
 	cfg := LoadFeedConfig(p.categoryDir(category), category)
 	if !cfg.NormalizeEnabled() || !strings.EqualFold(filepath.Ext(srcPath), ".mp3") {
