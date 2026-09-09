@@ -1,13 +1,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	log "github.com/go-pkgz/lgr"
 	"github.com/go-pkgz/rest"
 
+	"github.com/umputun/feed-master/app/publisher"
 	ytfeed "github.com/umputun/feed-master/app/youtube/feed"
 )
 
@@ -160,3 +163,120 @@ func (s *Server) appQueuePauseCtrl(w http.ResponseWriter, r *http.Request) {
 // miniappUserPriority marks Mini App enqueues as user-initiated so a tapped
 // link jumps ahead of a bulk playlist batch, matching the bot's tap behaviour.
 const miniappUserPriority = 1
+
+// POST /wegweiser/api/library/activate {"category":"books","work":"slug"} — make a
+// work live in its category feed (the ▶ Listen button, mirrors the bot's /library).
+func (s *Server) appLibraryActivateCtrl(w http.ResponseWriter, r *http.Request) {
+	s.libraryAction(w, r, publisher.OpActivate)
+}
+
+// POST /wegweiser/api/library/deactivate {"category":"books","work":"slug"} — empty
+// a category feed (the ⏹ Stop button).
+func (s *Server) appLibraryDeactivateCtrl(w http.ResponseWriter, r *http.Request) {
+	s.libraryAction(w, r, publisher.OpDeactivate)
+}
+
+// libraryAction validates the work against the live catalog, then either enqueues a
+// request for the Mac agent (variant A, when ActQueue is set) or runs the op
+// in-process. It mirrors the bot's runActivate/runDeactivate so the web and the bot
+// drive the same single-active model: activating a work evicts the previous one from
+// that category's feed. Long uploads never block the request — the caller polls the
+// catalog to see the Active flag flip.
+func (s *Server) libraryAction(w http.ResponseWriter, r *http.Request, op publisher.ActivationOp) {
+	var body struct {
+		Category string `json:"category"`
+		Work     string `json:"work"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		rest.SendErrorJSON(w, r, log.Default(), http.StatusBadRequest, err, "bad request")
+		return
+	}
+	if body.Category == "" || body.Work == "" {
+		rest.SendErrorJSON(w, r, log.Default(), http.StatusBadRequest,
+			fmt.Errorf("category and work required"), "bad request")
+		return
+	}
+	if s.Pub == nil {
+		rest.SendErrorJSON(w, r, log.Default(), http.StatusServiceUnavailable,
+			fmt.Errorf("publishing not configured"), "library unavailable")
+		return
+	}
+
+	// validate against the catalog: the scan only ever returns real work folders, so
+	// a match rules out both a stale UI and a path-traversal attempt in one step
+	cw, ok, err := s.findCatWork(body.Category, body.Work)
+	if err != nil {
+		rest.SendErrorJSON(w, r, log.Default(), http.StatusInternalServerError, err, "failed to scan library")
+		return
+	}
+	if !ok {
+		rest.SendErrorJSON(w, r, log.Default(), http.StatusNotFound,
+			fmt.Errorf("work %q not in %s", body.Work, body.Category), "not found")
+		return
+	}
+	switch op {
+	case publisher.OpActivate:
+		if cw.Active {
+			rest.SendErrorJSON(w, r, log.Default(), http.StatusConflict,
+				fmt.Errorf("«%s» already live", cw.Title), "already active")
+			return
+		}
+	case publisher.OpDeactivate:
+		if !cw.Active {
+			rest.SendErrorJSON(w, r, log.Default(), http.StatusConflict,
+				fmt.Errorf("«%s» not live", cw.Title), "not active")
+			return
+		}
+	}
+
+	// variant A: hand off to the Mac agent through the queue (the VM holds 0-byte stub
+	// originals and can't read the audio). No Telegram status message — the web polls.
+	if s.ActQueue != nil {
+		if _, eqErr := s.ActQueue.Enqueue(publisher.ActivationRequest{
+			Op: op, Category: cw.Category, Work: cw.Slug,
+		}); eqErr != nil {
+			rest.SendErrorJSON(w, r, log.Default(), http.StatusInternalServerError, eqErr, "failed to enqueue")
+			return
+		}
+		rest.RenderJSON(w, rest.JSON{"status": "ok", "queued": true, "op": string(op), "work": cw.Slug})
+		return
+	}
+
+	// single-machine mode: run detached, log the outcome; the web polls for the flip
+	go s.runLibraryOp(op, cw)
+	rest.RenderJSON(w, rest.JSON{"status": "ok", "started": true, "op": string(op), "work": cw.Slug})
+}
+
+// findCatWork loads the catalog and returns the work matching category+slug.
+func (s *Server) findCatWork(category, slug string) (publisher.CatWork, bool, error) {
+	works, err := s.Pub.Catalog()
+	if err != nil {
+		return publisher.CatWork{}, false, err
+	}
+	for _, w := range works {
+		if w.Category == category && w.Slug == slug {
+			return w, true, nil
+		}
+	}
+	return publisher.CatWork{}, false, nil
+}
+
+// runLibraryOp performs an in-process activate/deactivate detached from the request
+// (only reached when the queue is off), logging the outcome. Activation of a whole
+// work can be gigabytes, so it gets a generous ceiling.
+func (s *Server) runLibraryOp(op publisher.ActivationOp, cw publisher.CatWork) {
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
+	defer cancel()
+	var err error
+	switch op {
+	case publisher.OpActivate:
+		err = s.Pub.Activate(ctx, cw.Category, cw.Slug, nil)
+	case publisher.OpDeactivate:
+		err = s.Pub.Deactivate(ctx, cw.Category)
+	}
+	if err != nil {
+		log.Printf("[WARN] mini app library %s «%s» (%s) failed: %v", op, cw.Title, cw.Category, err)
+		return
+	}
+	log.Printf("[INFO] mini app library %s «%s» (%s) done", op, cw.Title, cw.Category)
+}

@@ -128,6 +128,10 @@ body {
 .badge.notion { color: var(--accent); border-color: var(--accent); }
 .badge.deleted { color: var(--stamp); border-color: var(--stamp); }
 .badge.playlist { color: var(--warn); border-color: var(--warn); }
+.badge.live { color: var(--ok); border-color: var(--ok); }
+
+/* library category filter — a wrap of small toggle buttons above the works */
+.libfilter { display: flex; flex-wrap: wrap; gap: 6px; }
 
 /* action buttons */
 .actions {

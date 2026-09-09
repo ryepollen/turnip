@@ -28,6 +28,7 @@ func (s *Server) miniappRoutes(router *routegroup.Bundle) {
 		r.HandleFunc("GET /refs", s.appRefsCtrl)
 		r.HandleFunc("GET /status", s.appStatusCtrl)
 		r.HandleFunc("GET /feeds", s.appFeedsCtrl)
+		r.HandleFunc("GET /library", s.appLibraryCtrl)
 		r.HandleFunc("GET /notes/file", s.appNotesFileCtrl)
 		r.HandleFunc("GET /read/file", s.appReadFileCtrl)
 
@@ -37,6 +38,8 @@ func (s *Server) miniappRoutes(router *routegroup.Bundle) {
 		r.HandleFunc("POST /notes/delete", s.appNotesDeleteCtrl)
 		r.HandleFunc("POST /read/delete", s.appReadDeleteCtrl)
 		r.HandleFunc("POST /queue/pause", s.appQueuePauseCtrl)
+		r.HandleFunc("POST /library/activate", s.appLibraryActivateCtrl)
+		r.HandleFunc("POST /library/deactivate", s.appLibraryDeactivateCtrl)
 	})
 }
 
@@ -483,6 +486,50 @@ func (s *Server) appFeedsCtrl(w http.ResponseWriter, r *http.Request) {
 	rest.RenderJSON(w, struct {
 		Feeds []appPubFeed `json:"feeds"`
 	}{Feeds: items})
+}
+
+// appLibWork is one work in the publishing library (a filesystem scan of the
+// audio archive), sleeping or active, with its category's subscription URL.
+type appLibWork struct {
+	Category string `json:"category"`
+	Slug     string `json:"slug"`
+	Title    string `json:"title"`
+	Parts    int    `json:"parts"`
+	Seasons  int    `json:"seasons"`
+	Finite   bool   `json:"finite"`
+	Active   bool   `json:"active"`
+	FeedURL  string `json:"feed_url"`
+}
+
+// GET /wegweiser/api/library — the whole library catalog: every work, dormant and
+// active, so the tab can browse and ▶/⏹ them (drives Listen/Stop). remote reports
+// whether activation goes through the Mac-agent queue (variant A), so the UI can
+// word the wait ("queued, waiting for Mac") instead of promising an instant swap.
+func (s *Server) appLibraryCtrl(w http.ResponseWriter, r *http.Request) {
+	out := struct {
+		Works  []appLibWork `json:"works"`
+		Remote bool         `json:"remote"`
+	}{Works: []appLibWork{}, Remote: s.ActQueue != nil}
+	if s.Pub != nil {
+		works, err := s.Pub.Catalog()
+		if err != nil {
+			rest.SendErrorJSON(w, r, log.Default(), http.StatusInternalServerError, err, "failed to scan library")
+			return
+		}
+		for _, cw := range works {
+			out.Works = append(out.Works, appLibWork{
+				Category: cw.Category,
+				Slug:     cw.Slug,
+				Title:    cw.Title,
+				Parts:    cw.Parts,
+				Seasons:  cw.Seasons,
+				Finite:   cw.Finite,
+				Active:   cw.Active,
+				FeedURL:  s.Pub.FeedURL(cw.Category),
+			})
+		}
+	}
+	rest.RenderJSON(w, out)
 }
 
 // safeID guards a source id used as a filename against traversal

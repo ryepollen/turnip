@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/umputun/feed-master/app/config"
 	"github.com/umputun/feed-master/app/proc"
+	"github.com/umputun/feed-master/app/publisher"
 	ytfeed "github.com/umputun/feed-master/app/youtube/feed"
 	ytstore "github.com/umputun/feed-master/app/youtube/store"
 )
@@ -112,7 +115,7 @@ func appTestServer(t *testing.T) (*Server, func(method, path string, auth bool) 
 
 func TestMiniAppEndpoints_Unauthorized(t *testing.T) {
 	_, do := appTestServer(t)
-	for _, p := range []string{"/summary", "/feed", "/history", "/notes", "/read", "/refs", "/status", "/feeds"} {
+	for _, p := range []string{"/summary", "/feed", "/history", "/notes", "/read", "/refs", "/status", "/feeds", "/library"} {
 		t.Run(p, func(t *testing.T) {
 			rec := do(http.MethodGet, "/wegweiser/api"+p, false)
 			assert.Equal(t, http.StatusUnauthorized, rec.Code)
@@ -300,6 +303,179 @@ func TestMiniAppActions(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec2.Code)
 		assert.False(t, js.paused)
 	})
+}
+
+// libFixture lays down a temp originals/ tree and a Server whose publisher scans
+// it. nil R2 is safe: Catalog/gatherParts/loadState/FeedURL touch no bytes, and the
+// enqueue path only writes a JSON request file — so activation never uploads here.
+func libFixture(t *testing.T, remote bool) (*Server, func(method, path string, body any) *httptest.ResponseRecorder, *publisher.ActivationQueue) {
+	t.Helper()
+	const token = "123456:test-bot-token"
+	tmp := t.TempDir()
+
+	// two dormant works under books, one part each (empty files — gatherParts only
+	// checks the extension), plus a live active work recorded in state
+	for _, w := range []string{"Dune", "Solaris"} {
+		dir := filepath.Join(tmp, "originals", "books", w)
+		require.NoError(t, os.MkdirAll(dir, 0o750))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "01 - Intro.mp3"), []byte{}, 0o600))
+	}
+	// mark Solaris active via state so the catalog flips its Active flag
+	stateDir := filepath.Join(tmp, "state")
+	require.NoError(t, os.MkdirAll(stateDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "books.json"),
+		[]byte(`{"active_work":"Solaris","episodes":[]}`), 0o600))
+
+	pub := &publisher.Service{AudioDir: tmp, Secret: "sekret", BaseURL: "https://x.test"}
+	srv := &Server{
+		BotToken:      token,
+		AllowedUserID: 5504926420,
+		Conf:          config.Conf{},
+		Pub:           pub,
+	}
+	var q *publisher.ActivationQueue
+	if remote {
+		q = publisher.NewActivationQueue(tmp)
+		srv.ActQueue = q
+	}
+	handler := srv.router()
+
+	do := func(method, path string, body any) *httptest.ResponseRecorder {
+		var r *http.Request
+		if body != nil {
+			b, _ := json.Marshal(body)
+			r = httptest.NewRequest(method, path, bytes.NewReader(b))
+		} else {
+			r = httptest.NewRequest(method, path, http.NoBody)
+		}
+		r.Header.Set(initDataHeader, signInitData(token, map[string]string{
+			"auth_date": strconv.FormatInt(time.Now().Unix(), 10),
+			"user":      `{"id":5504926420,"first_name":"Pol"}`,
+		}))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, r)
+		return rec
+	}
+	return srv, do, q
+}
+
+func TestMiniAppLibraryList(t *testing.T) {
+	_, do, _ := libFixture(t, true)
+	rec := do(http.MethodGet, "/wegweiser/api/library", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out struct {
+		Works  []appLibWork `json:"works"`
+		Remote bool         `json:"remote"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.True(t, out.Remote)
+	require.Len(t, out.Works, 2)
+	// sorted by title within category: Dune before Solaris
+	assert.Equal(t, "Dune", out.Works[0].Slug)
+	assert.Equal(t, "books", out.Works[0].Category)
+	assert.Equal(t, 1, out.Works[0].Parts)
+	assert.False(t, out.Works[0].Active)
+	assert.Equal(t, "Solaris", out.Works[1].Slug)
+	assert.True(t, out.Works[1].Active)
+	assert.Contains(t, out.Works[0].FeedURL, "/holzweg/sekret/books.xml")
+}
+
+func TestMiniAppLibraryActivateQueued(t *testing.T) {
+	_, do, q := libFixture(t, true)
+
+	// activating a dormant work enqueues a request for the Mac agent
+	rec := do(http.MethodPost, "/wegweiser/api/library/activate",
+		map[string]string{"category": "books", "work": "Dune"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out struct {
+		Queued bool   `json:"queued"`
+		Op     string `json:"op"`
+		Work   string `json:"work"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.True(t, out.Queued)
+	assert.Equal(t, "activate", out.Op)
+	assert.Equal(t, "Dune", out.Work)
+
+	pending, err := q.ListPending()
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	assert.Equal(t, publisher.OpActivate, pending[0].Op)
+	assert.Equal(t, "books", pending[0].Category)
+	assert.Equal(t, "Dune", pending[0].Work)
+	assert.Zero(t, pending[0].ChatID) // web actions carry no Telegram status message
+}
+
+func TestMiniAppLibraryGuards(t *testing.T) {
+	_, do, q := libFixture(t, true)
+
+	t.Run("unknown work -> 404", func(t *testing.T) {
+		rec := do(http.MethodPost, "/wegweiser/api/library/activate",
+			map[string]string{"category": "books", "work": "Nope"})
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("activate already-active -> 409", func(t *testing.T) {
+		rec := do(http.MethodPost, "/wegweiser/api/library/activate",
+			map[string]string{"category": "books", "work": "Solaris"})
+		assert.Equal(t, http.StatusConflict, rec.Code)
+	})
+
+	t.Run("deactivate dormant -> 409", func(t *testing.T) {
+		rec := do(http.MethodPost, "/wegweiser/api/library/deactivate",
+			map[string]string{"category": "books", "work": "Dune"})
+		assert.Equal(t, http.StatusConflict, rec.Code)
+	})
+
+	t.Run("missing fields -> 400", func(t *testing.T) {
+		rec := do(http.MethodPost, "/wegweiser/api/library/activate",
+			map[string]string{"category": "books"})
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("deactivate active enqueues", func(t *testing.T) {
+		rec := do(http.MethodPost, "/wegweiser/api/library/deactivate",
+			map[string]string{"category": "books", "work": "Solaris"})
+		require.Equal(t, http.StatusOK, rec.Code)
+		pending, err := q.ListPending()
+		require.NoError(t, err)
+		require.Len(t, pending, 1)
+		assert.Equal(t, publisher.OpDeactivate, pending[0].Op)
+	})
+}
+
+func TestMiniAppLibraryNilPub(t *testing.T) {
+	const token = "123456:test-bot-token"
+	srv := &Server{BotToken: token, AllowedUserID: 5504926420, Conf: config.Conf{}}
+	handler := srv.router()
+
+	// GET returns 200 with an empty catalog when publishing is off
+	req := httptest.NewRequest(http.MethodGet, "/wegweiser/api/library", http.NoBody)
+	req.Header.Set(initDataHeader, signInitData(token, map[string]string{
+		"auth_date": strconv.FormatInt(time.Now().Unix(), 10),
+		"user":      `{"id":5504926420,"first_name":"Pol"}`,
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out struct {
+		Works  []appLibWork `json:"works"`
+		Remote bool         `json:"remote"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.Empty(t, out.Works)
+	assert.False(t, out.Remote)
+
+	// POST is 503 when publishing is off
+	b, _ := json.Marshal(map[string]string{"category": "books", "work": "Dune"})
+	reqP := httptest.NewRequest(http.MethodPost, "/wegweiser/api/library/activate", bytes.NewReader(b))
+	reqP.Header.Set(initDataHeader, signInitData(token, map[string]string{
+		"auth_date": strconv.FormatInt(time.Now().Unix(), 10),
+		"user":      `{"id":5504926420,"first_name":"Pol"}`,
+	}))
+	recP := httptest.NewRecorder()
+	handler.ServeHTTP(recP, reqP)
+	assert.Equal(t, http.StatusServiceUnavailable, recP.Code)
 }
 
 func TestMiniAppShell(t *testing.T) {

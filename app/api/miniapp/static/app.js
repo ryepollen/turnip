@@ -109,10 +109,11 @@ const TABS = [
   { key: 'read', label: 'Reader', paged: true },
   { key: 'queue', label: 'Queue', paged: false },
   { key: 'refs', label: 'References', paged: false },
+  { key: 'library', label: 'Library', paged: false },
   { key: 'feeds', label: 'Editions', paged: false },
 ];
 
-const state = { tab: 'feed', offset: 0, refType: null };
+const state = { tab: 'feed', offset: 0, refType: null, libFilter: null, libRemote: false };
 
 /* ------- rendering ------- */
 
@@ -279,6 +280,50 @@ function renderFeeds(data) {
   )).join('');
 }
 
+// renderLibrary shows the dormant-works catalogue: category filter tabs, then one
+// row per work with ▶ Listen / ⏹ Stop / 🔗 Feed. It mirrors the bot's /library —
+// one active work per category, activating evicts the previous from that feed. When
+// data.remote is set (variant A) actions enqueue for the Mac agent; the Active flag
+// only flips once the agent finishes uploading, so the row re-renders on reload.
+function renderLibrary(data) {
+  state.libRemote = !!data.remote;
+  const works = data.works || [];
+  if (!works.length) return '<div class="empty">Library is empty</div>';
+
+  const cats = [];
+  works.forEach((w) => { if (cats.indexOf(w.category) < 0) cats.push(w.category); });
+  const filter = state.libFilter;
+  const tabs = '<div class="row libfilter">' +
+    '<button class="btn' + (filter ? '' : ' primary') + '" data-act="lib-filter" data-cat="">All</button>' +
+    cats.map((c) =>
+      '<button class="btn' + (filter === c ? ' primary' : '') + '" data-act="lib-filter" data-cat="' + esc(c) + '">' + esc(c) + '</button>'
+    ).join('') + '</div>';
+
+  const shown = filter ? works.filter((w) => w.category === filter) : works;
+  if (!shown.length) return tabs + '<div class="empty">Nothing in this category</div>';
+
+  const body = shown.map((w) => {
+    const parts = w.parts + (w.parts === 1 ? ' part' : ' parts');
+    const meta = metaLine([
+      esc(w.category),
+      esc(parts),
+      w.seasons ? esc(w.seasons + (w.seasons === 1 ? ' season' : ' seasons')) : '',
+      w.finite ? '' : badge('playlist', 'streaming'),
+      w.active ? badge('live', '▶ live') : '',
+    ]);
+    const acts = w.active
+      ? '<button class="btn danger" data-act="lib-off" data-cat="' + esc(w.category) + '" data-work="' + esc(w.slug) + '" data-t="' + esc(w.title) + '">⏹ Stop</button>' +
+        (w.feed_url ? '<button class="btn" data-act="open" data-url="' + esc(w.feed_url) + '">🔗 Feed</button>' : '')
+      : '<button class="btn primary" data-act="lib-on" data-cat="' + esc(w.category) + '" data-work="' + esc(w.slug) + '" data-t="' + esc(w.title) + '">▶ Listen</button>';
+    return row(
+      '<div class="head"><div class="title">' + esc(w.title) + '</div></div>' +
+      '<div class="meta">' + meta + '</div>' +
+      '<div class="actions">' + acts + '</div>'
+    );
+  }).join('');
+  return tabs + body;
+}
+
 /* ------- pager ------- */
 
 function renderPager(total) {
@@ -328,6 +373,9 @@ async function loadTab() {
           const d = await apiGet('/refs'); l.innerHTML = renderRefsSummary(d);
         }
         break;
+      }
+      case 'library': {
+        const d = await apiGet('/library'); l.innerHTML = renderLibrary(d); break;
       }
       case 'feeds': {
         const d = await apiGet('/feeds'); l.innerHTML = renderFeeds(d); break;
@@ -394,6 +442,34 @@ async function handleAction(act, el) {
       state.refType = el.getAttribute('data-type'); loadTab(); break;
     case 'ref-back':
       state.refType = null; loadTab(); break;
+    case 'lib-filter':
+      state.libFilter = el.getAttribute('data-cat') || null; loadTab(); break;
+    case 'lib-on': {
+      const cat = el.getAttribute('data-cat');
+      const work = el.getAttribute('data-work');
+      const title = el.getAttribute('data-t') || work;
+      confirmThen('Make "' + title + '" the live ' + cat + ' work? This replaces whatever is currently in that feed.', async () => {
+        try {
+          const r = await apiPost('/library/activate', { category: cat, work: work });
+          toast(r.queued ? '▶ Queued — uploading on the Mac' : '▶ Activating…');
+          haptic('success'); loadTab();
+        } catch (e) { toast(e.message); haptic('error'); }
+      });
+      break;
+    }
+    case 'lib-off': {
+      const cat = el.getAttribute('data-cat');
+      const work = el.getAttribute('data-work');
+      const title = el.getAttribute('data-t') || work;
+      confirmThen('Take "' + title + '" off the ' + cat + ' feed?', async () => {
+        try {
+          const r = await apiPost('/library/deactivate', { category: cat, work: work });
+          toast(r.queued ? '⏹ Queued' : '⏹ Deactivating…');
+          haptic('success'); loadTab();
+        } catch (e) { toast(e.message); haptic('error'); }
+      });
+      break;
+    }
     case 'prev':
       state.offset = Math.max(0, state.offset - PAGE); loadTab(); break;
     case 'next':
@@ -414,6 +490,7 @@ function selectTab(key) {
   state.tab = key;
   state.offset = 0;
   state.refType = null;
+  state.libFilter = null;
   buildTabs();
   loadTab();
 }

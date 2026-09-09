@@ -59,7 +59,12 @@ type Server struct {
 	NotesSvc      *proc.NotesService
 	ReadSvc       *proc.ReadService
 	Pub           *publisher.Service
-	AppStore      MiniAppStore // history/refs/jobs reads (satisfied by youtube/store.BoltDB)
+	// ActQueue is the variant A activation handoff. When set (remote_activation on),
+	// the Library tab's ▶/⏹ enqueue a request for the Mac agent instead of uploading
+	// in-process — the VM holds 0-byte stub originals and can't read the audio bytes.
+	// nil = single-machine mode, where the tab drives Pub.Activate/Deactivate directly.
+	ActQueue *publisher.ActivationQueue
+	AppStore MiniAppStore // history/refs/jobs reads (satisfied by youtube/store.BoltDB)
 	// DeleteFeedEntry removes a feed episode the same way /del does (file + R2 +
 	// bucket + history). Wired to the bot's DeleteEntry; nil when the bot is off.
 	DeleteFeedEntry func(entry ytfeed.Entry) error

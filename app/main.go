@@ -302,6 +302,7 @@ func main() {
 		NotesSvc:        notesSvc,
 		ReadSvc:         readSvc,
 		Pub:             pubSvc,
+		ActQueue:        actQueue, // variant A: Library tab enqueues ▶/⏹ for the Mac agent
 		AppStore:        ytStore,
 		DeleteFeedEntry: deleteFeedEntry,
 	}
