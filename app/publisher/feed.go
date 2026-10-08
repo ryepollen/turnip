@@ -25,9 +25,11 @@ type FeedConfig struct {
 	Author      string `yaml:"author"`
 	Normalize   *bool  `yaml:"normalize"` // loudnorm to -16 LUFS; default depends on category (see normalizeDefaultFor)
 	// EpisodeStrip is a book/show prefix trimmed off each episode title in the
-	// feed only. Files keep their full self-describing names on disk/iCloud (the
-	// ferry is flat and drops the book folder), while Overcast shows the short
-	// tail: filename "NN - Автор. «Книга». Часть N" → episode title "Часть N".
+	// feed only. Files keep their full self-describing names on disk/iCloud (a
+	// part must still say what it is outside its work folder — Files app, player
+	// queue, a download; the retired flat inbox ferry was the original reason, and
+	// renaming would change the R2 key and so the GUID), while Overcast shows the
+	// short tail: filename "NN - Автор. «Книга». Часть N" → episode title "Часть N".
 	EpisodeStrip string `yaml:"episode_strip"`
 }
 
