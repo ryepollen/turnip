@@ -90,7 +90,14 @@ type Episode struct {
 	SizeBytes   int64     `json:"size_bytes"`
 	DurationSec int       `json:"duration_sec"`
 	PublishedAt time.Time `json:"published_at"`
+	Image       string    `json:"image,omitempty"` // work cover URL → item itunes:image, "" = none
 }
+
+// WorkCoverFile is the per-work cover picked up next to the parts (tune_get
+// writes it into every work folder). It rides to R2 beside the parts under the
+// same work prefix and shows as episode artwork; the channel cover (feed.yaml)
+// stays fixed — activation only swaps the episode list, never the channel.
+const WorkCoverFile = "cover.jpg"
 
 // WorkConfig is the optional per-work work.yaml in a work folder
 type WorkConfig struct {
@@ -234,6 +241,7 @@ type rssItem struct {
 	ItunesDuration string       `xml:"itunes:duration,omitempty"`
 	ItunesSeason   int          `xml:"itunes:season,omitempty"`
 	ItunesEpisode  int          `xml:"itunes:episode,omitempty"`
+	ItunesImage    *rssImage    `xml:"itunes:image,omitempty"`
 }
 
 type rssGUID struct {
@@ -292,6 +300,9 @@ func BuildFeedXML(cfg FeedConfig, episodes []Episode) ([]byte, error) {
 		}
 		if ep.DurationSec > 0 {
 			item.ItunesDuration = formatFeedDuration(ep.DurationSec)
+		}
+		if ep.Image != "" {
+			item.ItunesImage = &rssImage{Href: ep.Image}
 		}
 		if serial {
 			item.ItunesEpisode = i + 1
