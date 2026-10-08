@@ -1,3 +1,9 @@
 .envrc
 CLAUDE.md
-scripts/
+# scripts/ is whitelist-only: activate-agent.sh / update-cookies.sh / env.local
+# carry the VM's origin IP (hidden behind Cloudflare) and must never reach the
+# public repo, even via a careless `git add -A`.
+scripts/*
+!scripts/manifest-publish.sh
+!scripts/publish.env.example
+!scripts/env.local.example
