@@ -48,8 +48,9 @@ type Service struct {
 // episodes (parts) currently published to R2 for it. Empty ActiveWork = the
 // subscription is dormant (valid but empty feed).
 type CategoryState struct {
-	ActiveWork string    `json:"active_work"` // work slug, "" = nothing active
-	Episodes   []Episode `json:"episodes"`    // parts of the active work published in R2
+	ActiveWork string    `json:"active_work"`         // work slug, "" = nothing active
+	Episodes   []Episode `json:"episodes"`            // parts of the active work published in R2
+	CoverKey   string    `json:"cover_key,omitempty"` // R2 key of the active work's cover, evicted with it
 }
 
 // CatWork is one work in the library catalog (a filesystem scan, no persistence)
@@ -305,7 +306,7 @@ func (p *Service) Activate(ctx context.Context, category, work string, progress 
 			progress(i+1, total)
 		}
 	}
-	return p.commitActive(ctx, category, work, old, eps)
+	return p.commitActive(ctx, category, work, old, eps, p.uploadLocalCover(ctx, category, work))
 }
 
 // Finalize is the VM half of variant A: the Mac agent has already uploaded the
@@ -336,7 +337,7 @@ func (p *Service) Finalize(ctx context.Context, category, work string) error {
 		url := p.R2.PublicURL(key)
 		eps = append(eps, p.newEpisode(work, pt, key, url, size, p.durationURLOf(url)))
 	}
-	return p.commitActive(ctx, category, work, old, eps)
+	return p.commitActive(ctx, category, work, old, eps, p.remoteCover(ctx, category, work))
 }
 
 // gatherForActivate validates the category/work names and returns the work's
@@ -366,6 +367,46 @@ func (p *Service) partKey(category, work string, pt partRef) string {
 	return fmt.Sprintf("a/%s/%s/%s", p.Secret, category, relKey)
 }
 
+// coverKey is the deterministic R2 key of a work's cover: same prefix as its
+// parts, so the Mac agent and the VM agree on it like they do on part keys.
+func (p *Service) coverKey(category, work string) string {
+	return fmt.Sprintf("a/%s/%s/%s", p.Secret, category, filepath.ToSlash(filepath.Join(work, WorkCoverFile)))
+}
+
+// remoteCover (variant A, Finalize): the cover is optional — the Mac agent may
+// or may not have uploaded one. Returns its key if present in R2, else "".
+// A failed HEAD only costs the artwork, never the activation.
+func (p *Service) remoteCover(ctx context.Context, category, work string) string {
+	key := p.coverKey(category, work)
+	ok, err := p.R2.Exists(ctx, key)
+	if err != nil {
+		log.Printf("[WARN] cover check %s: %v", key, err)
+		return ""
+	}
+	if !ok {
+		return ""
+	}
+	return key
+}
+
+// uploadLocalCover (in-process Activate): uploads the work folder's cover.jpg
+// next to the parts when the VM holds real bytes. A 0-byte manifest stub or a
+// missing file falls back to whatever is already in R2. Best-effort: "" on error.
+func (p *Service) uploadLocalCover(ctx context.Context, category, work string) string {
+	key := p.coverKey(category, work)
+	local := filepath.Join(p.categoryDir(category), work, WorkCoverFile)
+	if fi, err := os.Stat(local); err == nil && fi.Size() > 0 {
+		if ok, _ := p.R2.Exists(ctx, key); !ok {
+			if _, uerr := p.R2.Upload(ctx, local, key, "image/jpeg"); uerr != nil {
+				log.Printf("[WARN] cover upload %s: %v", key, uerr)
+				return ""
+			}
+		}
+		return key
+	}
+	return p.remoteCover(ctx, category, work)
+}
+
 // newEpisode builds one feed episode from a part and its known R2 key/URL/size and
 // a caller-computed duration (local File for Activate, R2 URL for Finalize).
 func (p *Service) newEpisode(work string, pt partRef, key, publicURL string, size int64, durationSec int) Episode {
@@ -389,8 +430,14 @@ func (p *Service) newEpisode(work string, pt partRef, key, publicURL string, siz
 // unreferenced R2 objects. Callers guarantee every episode key already exists in
 // R2 before this runs, so the old work keeps serving until the atomic state swap.
 // Re-running with the same work is idempotent (old == new → nothing evicted).
-func (p *Service) commitActive(ctx context.Context, category, work string, old CategoryState, eps []Episode) error {
-	if err := p.saveState(category, CategoryState{ActiveWork: work, Episodes: eps}); err != nil {
+func (p *Service) commitActive(ctx context.Context, category, work string, old CategoryState, eps []Episode, coverKey string) error {
+	if coverKey != "" {
+		coverURL := p.R2.PublicURL(coverKey)
+		for i := range eps {
+			eps[i].Image = coverURL
+		}
+	}
+	if err := p.saveState(category, CategoryState{ActiveWork: work, Episodes: eps, CoverKey: coverKey}); err != nil {
 		return err
 	}
 	if err := p.RegenerateFeed(category); err != nil {
@@ -406,6 +453,11 @@ func (p *Service) commitActive(ctx context.Context, category, work string, old C
 				if derr := p.R2.Delete(ctx, e.R2Key); derr != nil {
 					log.Printf("[WARN] activate: failed to delete old key %s: %v", e.R2Key, derr)
 				}
+			}
+		}
+		if old.CoverKey != "" && old.CoverKey != coverKey {
+			if derr := p.R2.Delete(ctx, old.CoverKey); derr != nil {
+				log.Printf("[WARN] activate: failed to delete old cover %s: %v", old.CoverKey, derr)
 			}
 		}
 	}
@@ -426,6 +478,11 @@ func (p *Service) Deactivate(ctx context.Context, category string) error {
 	for _, e := range st.Episodes {
 		if derr := p.R2.Delete(ctx, e.R2Key); derr != nil {
 			log.Printf("[WARN] deactivate: failed to delete %s: %v", e.R2Key, derr)
+		}
+	}
+	if st.CoverKey != "" {
+		if derr := p.R2.Delete(ctx, st.CoverKey); derr != nil {
+			log.Printf("[WARN] deactivate: failed to delete cover %s: %v", st.CoverKey, derr)
 		}
 	}
 	if err := p.saveState(category, CategoryState{}); err != nil {
