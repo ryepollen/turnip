@@ -42,6 +42,10 @@ type Service struct {
 	Secret   string // path secret shared by R2 keys and feed URLs
 	Duration DurationProvider
 	BaseURL  string // VM base url for building feed links
+	// Resident flags web-ingest mode (variant B): parts are uploaded straight to
+	// R2 from the browser at ingest, so originals/ is a 0-byte stub skeleton and
+	// Activate must never read local bytes — it delegates to Finalize.
+	Resident bool
 }
 
 // CategoryState is the per-category registry: which work is live and the
@@ -270,6 +274,11 @@ func (p *Service) Catalog() ([]CatWork, error) {
 // variant A the upload moves to the Mac agent and the VM runs Finalize instead;
 // both share commitActive so the state/feed/evict half stays identical.
 func (p *Service) Activate(ctx context.Context, category, work string, progress func(done, total int)) error {
+	if p.Resident {
+		// web ingest already placed the bytes in R2; the local tree is stubs,
+		// so "activate" is purely the VM half — sizes/durations read from R2
+		return p.Finalize(ctx, category, work)
+	}
 	parts, err := p.gatherForActivate(category, work)
 	if err != nil {
 		return err

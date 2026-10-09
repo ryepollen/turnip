@@ -113,7 +113,12 @@ const TABS = [
   { key: 'feeds', label: 'Editions', paged: false },
 ];
 
-const state = { tab: 'feed', offset: 0, refType: null, libFilter: null, libRemote: false };
+const state = {
+  tab: 'feed', offset: 0, refType: null, libFilter: null, libRemote: false,
+  // web ingest («➕ New work»): the picked File objects live here between
+  // renders; upBusy guards the tab against re-renders mid-upload
+  upOpen: false, upFiles: [], upBusy: false, upCats: [],
+};
 
 /* ------- rendering ------- */
 
@@ -285,10 +290,128 @@ function renderFeeds(data) {
 // one active work per category, activating evicts the previous from that feed. When
 // data.remote is set (variant A) actions enqueue for the Mac agent; the Active flag
 // only flips once the agent finishes uploading, so the row re-renders on reload.
+// ---- web ingest: «➕ New work» — files go browser→R2 with presigned PUTs ----
+
+const AUDIO_EXT = /\.(mp3|m4a|m4b|aac|ogg)$/i;
+
+function renderUploadZone() {
+  if (!state.upOpen) {
+    return '<div class="row"><button class="btn primary wide" data-act="up-toggle">➕ New work — upload to R2</button></div>';
+  }
+  const cats = state.upCats.length ? state.upCats : ['books', 'podcasts', 'courses'];
+  const catOpts = cats.map((c) => '<option value="' + esc(c) + '">' + esc(c) + '</option>').join('');
+  const files = state.upFiles.map((f, i) =>
+    '<div class="meta upfile"><span class="upname">' + esc(f.name) + '</span> ' +
+    '<span class="upst" id="upst-' + i + '">' + (AUDIO_EXT.test(f.name) ? '' : '❌ not audio') + '</span></div>'
+  ).join('');
+  return row(
+    '<div class="head"><div class="title">➕ New work</div></div>' +
+    '<div class="meta">Files land straight in R2; the work appears dormant in this list. Parts play in filename order — name them «NN - Title.mp3».</div>' +
+    '<div class="actions"><select id="up-cat" class="btn">' + catOpts + '</select>' +
+    '<input id="up-work" class="btn upwork" type="text" placeholder="Work name (folder in the archive)"></div>' +
+    '<div id="up-drop" class="dropzone">drop audio files here<br>or</div>' +
+    '<div class="actions"><input id="up-files" type="file" multiple accept=".mp3,.m4a,.m4b,.aac,.ogg,audio/*"></div>' +
+    (files ? '<div id="up-list">' + files + '</div>' : '<div id="up-list"></div>') +
+    '<div class="actions">' +
+    '<button class="btn primary wide" data-act="up-go"' + (state.upFiles.length ? '' : ' disabled') + '>⬆ Upload ' +
+    (state.upFiles.length ? state.upFiles.length + ' file(s)' : '') + '</button>' +
+    '<button class="btn" data-act="up-toggle">✕</button></div>'
+  );
+}
+
+function upAddFiles(fileList) {
+  const have = {};
+  state.upFiles.forEach((f) => { have[f.name] = true; });
+  Array.from(fileList || []).forEach((f) => { if (!have[f.name]) { state.upFiles.push(f); have[f.name] = true; } });
+  state.upFiles.sort((a, b) => a.name.localeCompare(b.name));
+  loadTab();
+}
+
+function putWithProgress(url, file, contentType, onPct) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url);
+    if (contentType) xhr.setRequestHeader('Content-Type', contentType);
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onPct(Math.round((e.loaded * 100) / e.total)); };
+    xhr.onload = () => { if (xhr.status >= 200 && xhr.status < 300) resolve(); else reject(new Error('HTTP ' + xhr.status)); };
+    xhr.onerror = () => reject(new Error('network error'));
+    xhr.send(file);
+  });
+}
+
+// apiPostRaw is apiPost without throwing on non-2xx — commit needs the 409 body
+async function apiPostRaw(path, body) {
+  const res = await fetch(API + path, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(body || {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  return { status: res.status, data: data };
+}
+
+async function doUpload() {
+  const catEl = document.getElementById('up-cat');
+  const workEl = document.getElementById('up-work');
+  const cat = catEl ? catEl.value : '';
+  const work = workEl ? workEl.value.trim() : '';
+  if (!work) { toast('Name the work first'); return; }
+  const bad = state.upFiles.filter((f) => !AUDIO_EXT.test(f.name));
+  if (bad.length) { toast('Not audio: ' + bad[0].name); return; }
+  if (!state.upFiles.length) return;
+
+  state.upBusy = true;
+  const setSt = (i, text) => { const el = document.getElementById('upst-' + i); if (el) el.textContent = text; };
+  try {
+    const sign = await apiPost('/library/upload/sign', {
+      category: cat, work: work, files: state.upFiles.map((f) => ({ name: f.name })),
+    });
+    const byName = {};
+    (sign.files || []).forEach((s) => { byName[s.name] = s; });
+
+    let failed = 0;
+    for (let i = 0; i < state.upFiles.length; i++) {
+      const f = state.upFiles[i];
+      const s = byName[f.name];
+      if (!s) { setSt(i, '❌ not signed'); failed++; continue; }
+      try {
+        setSt(i, '⏳ 0%');
+        await putWithProgress(s.url, f, s.content_type, (pct) => setSt(i, '⏳ ' + pct + '%'));
+        setSt(i, '✅');
+      } catch (e) {
+        setSt(i, '❌ ' + e.message); failed++;
+      }
+    }
+    if (failed) { toast(failed + ' file(s) failed — fix and ⬆ again'); haptic('error'); return; }
+
+    const commit = await apiPostRaw('/library/upload/commit', {
+      category: cat, work: work, files: state.upFiles.map((f) => f.name),
+    });
+    if (commit.status === 409 && commit.data.missing) {
+      commit.data.missing.forEach((name) => {
+        const i = state.upFiles.findIndex((f) => f.name === name);
+        if (i >= 0) setSt(i, '❌ missing in R2');
+      });
+      toast('Some parts did not land — ⬆ again'); haptic('error'); return;
+    }
+    if (commit.status !== 200) { toast(commit.data.error || ('HTTP ' + commit.status)); haptic('error'); return; }
+
+    toast('✅ «' + work + '» is in the library (' + commit.data.parts + ' parts)');
+    haptic('success');
+    state.upOpen = false; state.upFiles = [];
+    loadTab();
+  } catch (e) {
+    toast(e.message); haptic('error');
+  } finally {
+    state.upBusy = false;
+  }
+}
+
 function renderLibrary(data) {
   state.libRemote = !!data.remote;
+  state.upCats = data.categories || [];
   const works = data.works || [];
-  if (!works.length) return '<div class="empty">Library is empty</div>';
+  if (!works.length) return renderUploadZone() + '<div class="empty">Library is empty</div>';
 
   const cats = [];
   works.forEach((w) => { if (cats.indexOf(w.category) < 0) cats.push(w.category); });
@@ -300,7 +423,7 @@ function renderLibrary(data) {
     ).join('') + '</div>';
 
   const shown = filter ? works.filter((w) => w.category === filter) : works;
-  if (!shown.length) return tabs + '<div class="empty">Nothing in this category</div>';
+  if (!shown.length) return renderUploadZone() + tabs + '<div class="empty">Nothing in this category</div>';
 
   const body = shown.map((w) => {
     const parts = w.parts + (w.parts === 1 ? ' part' : ' parts');
@@ -321,7 +444,7 @@ function renderLibrary(data) {
       '<div class="actions">' + acts + '</div>'
     );
   }).join('');
-  return tabs + body;
+  return renderUploadZone() + tabs + body;
 }
 
 /* ------- pager ------- */
@@ -404,6 +527,8 @@ async function loadPulse() {
 /* ------- actions ------- */
 
 async function handleAction(act, el) {
+  // an in-flight upload owns the Library DOM: block anything that re-renders it
+  if (state.upBusy && act !== 'open') { toast('Upload in progress'); return; }
   switch (act) {
     case 'open':
       openLink(el.getAttribute('data-url')); break;
@@ -444,6 +569,14 @@ async function handleAction(act, el) {
       state.refType = null; loadTab(); break;
     case 'lib-filter':
       state.libFilter = el.getAttribute('data-cat') || null; loadTab(); break;
+    case 'up-toggle':
+      if (state.upBusy) { toast('Upload in progress'); break; }
+      state.upOpen = !state.upOpen;
+      if (!state.upOpen) state.upFiles = [];
+      loadTab(); break;
+    case 'up-go':
+      if (state.upBusy) break;
+      doUpload(); break;
     case 'lib-on': {
       const cat = el.getAttribute('data-cat');
       const work = el.getAttribute('data-work');
@@ -487,6 +620,7 @@ function buildTabs() {
 }
 
 function selectTab(key) {
+  if (state.upBusy) { toast('Upload in progress — stay on Library'); return; }
   state.tab = key;
   state.offset = 0;
   state.refType = null;
@@ -500,6 +634,23 @@ document.addEventListener('click', (ev) => {
   if (tabEl) { selectTab(tabEl.getAttribute('data-tab')); return; }
   const actEl = ev.target.closest('[data-act]');
   if (actEl) { handleAction(actEl.getAttribute('data-act'), actEl); }
+});
+
+// web-ingest file sources: the picker and the desktop drag-and-drop zone
+document.addEventListener('change', (ev) => {
+  if (ev.target && ev.target.id === 'up-files') { upAddFiles(ev.target.files); }
+});
+document.addEventListener('dragover', (ev) => {
+  const z = ev.target.closest && ev.target.closest('#up-drop');
+  if (z) { ev.preventDefault(); z.classList.add('over'); }
+});
+document.addEventListener('dragleave', (ev) => {
+  const z = ev.target.closest && ev.target.closest('#up-drop');
+  if (z) z.classList.remove('over');
+});
+document.addEventListener('drop', (ev) => {
+  const z = ev.target.closest && ev.target.closest('#up-drop');
+  if (z) { ev.preventDefault(); z.classList.remove('over'); upAddFiles(ev.dataTransfer.files); }
 });
 
 function init() {

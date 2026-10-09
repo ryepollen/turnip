@@ -133,6 +133,25 @@ body {
 /* library category filter — a wrap of small toggle buttons above the works */
 .libfilter { display: flex; flex-wrap: wrap; gap: 6px; }
 
+/* web ingest («➕ New work») — files go browser→R2 */
+.dropzone {
+  margin-top: 8px;
+  padding: 18px 10px;
+  border: 2px dashed var(--line-strong);
+  border-radius: 4px;
+  text-align: center;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+.dropzone.over { border-color: var(--accent); color: var(--accent); background: var(--paper-2); }
+.upwork { flex: 1; min-width: 160px; }
+input.upwork::placeholder { color: var(--ink-soft); opacity: .7; }
+#up-files { font-size: 12px; max-width: 100%; }
+.upfile { display: flex; justify-content: space-between; gap: 8px; margin-top: 4px; }
+.upfile .upname { overflow-wrap: anywhere; }
+.upfile .upst { white-space: nowrap; color: var(--accent); }
+select.btn { appearance: auto; }
+
 /* action buttons */
 .actions {
   margin-top: 7px;

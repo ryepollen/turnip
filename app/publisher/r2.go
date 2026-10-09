@@ -144,6 +144,18 @@ func (s *R2Store) Exists(ctx context.Context, key string) (bool, error) {
 // Size returns the byte size of an object, or 0 (no error) when it is absent —
 // letting callers distinguish "not uploaded yet" (0) from a transport failure.
 // The VM's finalize step uses this to size episodes the Mac agent uploaded.
+// PresignPut signs a URL that lets a browser PUT one object straight to R2 —
+// the web-ingest path: bytes go client→R2 and never through this server (whose
+// free egress budget they would otherwise burn). The bucket needs a one-time
+// CORS rule allowing PUT from the Mini App origin.
+func (s *R2Store) PresignPut(ctx context.Context, key string, expiry time.Duration) (string, error) {
+	u, err := s.client.PresignedPutObject(ctx, s.bucket, key, expiry)
+	if err != nil {
+		return "", fmt.Errorf("failed to presign %s: %w", key, err)
+	}
+	return u.String(), nil
+}
+
 func (s *R2Store) Size(ctx context.Context, key string) (int64, error) {
 	info, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
 	if err != nil {

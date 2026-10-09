@@ -64,6 +64,11 @@ type Conf struct {
 		// Mac agent (which holds the iCloud archive) uploads the work's parts to R2,
 		// and the VM finalizes state+feed. Off (default) = the VM uploads in-process.
 		RemoteActivation bool `yaml:"remote_activation"`
+		// Resident is variant B (web ingest): a work's parts land in R2 at ingest
+		// time via the Mini App upload page, originals/ holds only the 0-byte stub
+		// skeleton, and ▶ just rebuilds state+feed from R2 (Finalize) — no queue,
+		// no Mac agent, no machine on duty. Wins over RemoteActivation.
+		Resident bool `yaml:"resident"`
 	} `yaml:"audio"`
 
 	Notes struct {

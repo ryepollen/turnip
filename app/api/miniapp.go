@@ -40,6 +40,8 @@ func (s *Server) miniappRoutes(router *routegroup.Bundle) {
 		r.HandleFunc("POST /queue/pause", s.appQueuePauseCtrl)
 		r.HandleFunc("POST /library/activate", s.appLibraryActivateCtrl)
 		r.HandleFunc("POST /library/deactivate", s.appLibraryDeactivateCtrl)
+		r.HandleFunc("POST /library/upload/sign", s.appLibraryUploadSignCtrl)
+		r.HandleFunc("POST /library/upload/commit", s.appLibraryUploadCommitCtrl)
 	})
 }
 
@@ -507,14 +509,18 @@ type appLibWork struct {
 // word the wait ("queued, waiting for Mac") instead of promising an instant swap.
 func (s *Server) appLibraryCtrl(w http.ResponseWriter, r *http.Request) {
 	out := struct {
-		Works  []appLibWork `json:"works"`
-		Remote bool         `json:"remote"`
-	}{Works: []appLibWork{}, Remote: s.ActQueue != nil}
+		Works      []appLibWork `json:"works"`
+		Remote     bool         `json:"remote"`
+		Categories []string     `json:"categories"` // valid ingest targets for the ➕ upload zone
+	}{Works: []appLibWork{}, Remote: s.ActQueue != nil, Categories: []string{}}
 	if s.Pub != nil {
 		works, err := s.Pub.Catalog()
 		if err != nil {
 			rest.SendErrorJSON(w, r, log.Default(), http.StatusInternalServerError, err, "failed to scan library")
 			return
+		}
+		if cats, cerr := s.Pub.CategoryDirs(); cerr == nil && cats != nil {
+			out.Categories = cats
 		}
 		for _, cw := range works {
 			out.Works = append(out.Works, appLibWork{

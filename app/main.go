@@ -203,8 +203,11 @@ func main() {
 	// message; it is set after the bot comes up.
 	var actQueue *publisher.ActivationQueue
 	var finalizeNotifier publisher.FinalizeNotifier
-	if pubSvc != nil && conf.Audio.RemoteActivation {
+	if pubSvc != nil && conf.Audio.RemoteActivation && !conf.Audio.Resident {
 		actQueue = publisher.NewActivationQueue(conf.Audio.Location)
+	}
+	if conf.Audio.RemoteActivation && conf.Audio.Resident {
+		log.Printf("[WARN] audio.remote_activation ignored: audio.resident wins (web ingest, no Mac agent)")
 	}
 
 	// Initialize Telegram Bot for manual video additions
@@ -338,13 +341,14 @@ func makePublisher(conf *config.Conf) *publisher.Service {
 		log.Printf("[ERROR] failed to init R2: %v", err)
 		return nil
 	}
-	log.Printf("[INFO] publisher enabled: bucket %s, audio dir %s", r2cfg.Bucket, conf.Audio.Location)
+	log.Printf("[INFO] publisher enabled: bucket %s, audio dir %s, resident=%v", r2cfg.Bucket, conf.Audio.Location, conf.Audio.Resident)
 	return &publisher.Service{
 		R2:       r2,
 		AudioDir: conf.Audio.Location,
 		Secret:   secret,
 		Duration: &duration.Service{},
 		BaseURL:  conf.System.BaseURL,
+		Resident: conf.Audio.Resident,
 	}
 }
 
