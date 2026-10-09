@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: replace USER and user@VM_IP, then install as
+     ~/Library/LaunchAgents/com.turnip.activate-agent.plist and load with
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.turnip.activate-agent.plist
+     Lesson learned (2026-10-08): ProcessType Background gives the agent's
+     network sockets scavenger QoS (ledbat) — uploads crawl when anything else
+     uses the link. Interactive avoids that. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.turnip.activate-agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/bash</string>
+        <string>/Users/USER/.turnip/activate-agent.sh</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>SECRETS_FILE</key>
+        <string>/Users/USER/.turnip/publish.env</string>
+        <key>VM</key>
+        <string>user@VM_IP</string>
+        <key>ARCHIVE</key>
+        <string>/Users/USER/Library/Mobile Documents/com~apple~CloudDocs/orchestra and choral</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>StandardOutPath</key>
+    <string>/Users/USER/.turnip/activate-agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/USER/.turnip/activate-agent.log</string>
+</dict>
+</plist>
