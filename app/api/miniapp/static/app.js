@@ -116,8 +116,11 @@ const TABS = [
 const state = {
   tab: 'feed', offset: 0, refType: null, libFilter: null, libRemote: false,
   // web ingest («➕ New work»): the picked File objects live here between
-  // renders; upBusy guards the tab against re-renders mid-upload
-  upOpen: false, upFiles: [], upBusy: false, upCats: [],
+  // renders; upBusy guards the tab against re-renders mid-upload. upCat/upWork
+  // mirror the form fields — adding files re-renders the tab, and without this
+  // the select snapped back to the first category and the name field wiped
+  // (that is exactly how «Витю видел» once landed in books).
+  upOpen: false, upFiles: [], upBusy: false, upCats: [], upCat: '', upWork: '',
 };
 
 /* ------- rendering ------- */
@@ -299,7 +302,9 @@ function renderUploadZone() {
     return '<div class="row"><button class="btn primary wide" data-act="up-toggle">➕ New work — upload to R2</button></div>';
   }
   const cats = state.upCats.length ? state.upCats : ['books', 'podcasts', 'courses'];
-  const catOpts = cats.map((c) => '<option value="' + esc(c) + '">' + esc(c) + '</option>').join('');
+  const catOpts = cats.map((c) =>
+    '<option value="' + esc(c) + '"' + (state.upCat === c ? ' selected' : '') + '>' + esc(c) + '</option>'
+  ).join('');
   const files = state.upFiles.map((f, i) =>
     '<div class="meta upfile"><span class="upname">' + esc(f.name) + '</span> ' +
     '<span class="upst" id="upst-' + i + '">' + (AUDIO_EXT.test(f.name) ? '' : '❌ not audio') + '</span></div>'
@@ -308,7 +313,7 @@ function renderUploadZone() {
     '<div class="head"><div class="title">➕ New work</div></div>' +
     '<div class="meta">Files land straight in R2; the work appears dormant in this list. Parts play in filename order — name them «NN - Title.mp3».</div>' +
     '<div class="actions"><select id="up-cat" class="btn">' + catOpts + '</select>' +
-    '<input id="up-work" class="btn upwork" type="text" placeholder="Work name (folder in the archive)"></div>' +
+    '<input id="up-work" class="btn upwork" type="text" placeholder="Work name (folder in the archive)" value="' + esc(state.upWork) + '"></div>' +
     '<div id="up-drop" class="dropzone">drop audio files here<br>or</div>' +
     '<div class="actions"><input id="up-files" type="file" multiple accept=".mp3,.m4a,.m4b,.aac,.ogg,audio/*"></div>' +
     (files ? '<div id="up-list">' + files + '</div>' : '<div id="up-list"></div>') +
@@ -319,7 +324,17 @@ function renderUploadZone() {
   );
 }
 
+// upSyncFields snapshots the form fields into state so the re-render that
+// follows any file add/remove puts them back instead of resetting the form.
+function upSyncFields() {
+  const catEl = document.getElementById('up-cat');
+  const workEl = document.getElementById('up-work');
+  if (catEl) state.upCat = catEl.value;
+  if (workEl) state.upWork = workEl.value;
+}
+
 function upAddFiles(fileList) {
+  upSyncFields();
   const have = {};
   state.upFiles.forEach((f) => { have[f.name] = true; });
   Array.from(fileList || []).forEach((f) => { if (!have[f.name]) { state.upFiles.push(f); have[f.name] = true; } });
@@ -572,7 +587,7 @@ async function handleAction(act, el) {
     case 'up-toggle':
       if (state.upBusy) { toast('Upload in progress'); break; }
       state.upOpen = !state.upOpen;
-      if (!state.upOpen) state.upFiles = [];
+      if (!state.upOpen) { state.upFiles = []; state.upCat = ''; state.upWork = ''; }
       loadTab(); break;
     case 'up-go':
       if (state.upBusy) break;
@@ -636,9 +651,16 @@ document.addEventListener('click', (ev) => {
   if (actEl) { handleAction(actEl.getAttribute('data-act'), actEl); }
 });
 
-// web-ingest file sources: the picker and the desktop drag-and-drop zone
+// web-ingest file sources: the picker and the desktop drag-and-drop zone.
+// Any edit of the category/name fields lands in state immediately, so every
+// re-render of the tab puts the form back exactly as the user left it.
 document.addEventListener('change', (ev) => {
-  if (ev.target && ev.target.id === 'up-files') { upAddFiles(ev.target.files); }
+  if (!ev.target) return;
+  if (ev.target.id === 'up-files') { upAddFiles(ev.target.files); return; }
+  if (ev.target.id === 'up-cat') state.upCat = ev.target.value;
+});
+document.addEventListener('input', (ev) => {
+  if (ev.target && ev.target.id === 'up-work') state.upWork = ev.target.value;
 });
 document.addEventListener('dragover', (ev) => {
   const z = ev.target.closest && ev.target.closest('#up-drop');
