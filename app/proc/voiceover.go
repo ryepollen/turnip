@@ -91,9 +91,11 @@ func (v *VoiceoverService) TranslateURL(ctx context.Context, mediaURL, outID str
 	videoURL := mediaURL
 	outputFile := filepath.Join(v.OutputDir, fmt.Sprintf("vo_%s_%d.mp3", outID, time.Now().Unix()))
 
-	// Build vot-cli command
-	// vot-cli --outdir /path/to --outfile name.mp3 --reslang ru "URL"
-	args := v.votArgs(filepath.Base(outputFile), videoURL)
+	// Build vot-cli command. vot-cli 2.x appends ".mp3" to --outfile itself,
+	// so the name goes in bare — passing "vo_x.mp3" produced "vo_x.mp3.mp3"
+	// and the success looked like "did not create output file".
+	// vot-cli --outdir /path/to --outfile name --reslang ru "URL"
+	args := v.votArgs(strings.TrimSuffix(filepath.Base(outputFile), ".mp3"), videoURL)
 
 	log.Printf("[INFO] running vot-cli with args: %v", maskVotArgs(args))
 
@@ -116,10 +118,19 @@ func (v *VoiceoverService) TranslateURL(ctx context.Context, mediaURL, outID str
 		return nil, fmt.Errorf("vot-cli failed: %w\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
 	}
 
-	// Check if file was created and has content
+	// Check if file was created and has content. Extension handling differs
+	// between vot-cli versions, so accept the exact name and the
+	// double-extension variant a stray version might still produce.
 	fileInfo, statErr := os.Stat(outputFile)
 	if os.IsNotExist(statErr) {
-		return nil, fmt.Errorf("vot-cli did not create output file at %s", outputFile)
+		if fi2, err2 := os.Stat(outputFile + ".mp3"); err2 == nil {
+			outputFile += ".mp3"
+			fileInfo, statErr = fi2, nil
+		}
+	}
+	if os.IsNotExist(statErr) {
+		return nil, fmt.Errorf("vot-cli did not create output file at %s\nstdout: %s\nstderr: %s",
+			outputFile, stdout.String(), stderr.String())
 	}
 	if statErr != nil {
 		return nil, fmt.Errorf("failed to stat output file: %w", statErr)
