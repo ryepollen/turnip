@@ -92,7 +92,7 @@ func (v *VoiceoverService) TranslateURL(ctx context.Context, mediaURL, outID str
 	outputFile := filepath.Join(v.OutputDir, fmt.Sprintf("vo_%s_%d.mp3", outID, time.Now().Unix()))
 
 	// Build vot-cli command
-	// vot-cli --output /path/to --output-file name.mp3 --reslang ru "URL"
+	// vot-cli --outdir /path/to --outfile name.mp3 --reslang ru "URL"
 	args := v.votArgs(filepath.Base(outputFile), videoURL)
 
 	log.Printf("[INFO] running vot-cli with args: %v", maskVotArgs(args))
@@ -141,10 +141,13 @@ func (v *VoiceoverService) TranslateURL(ctx context.Context, mediaURL, outID str
 // votArgs assembles the vot-cli argument list for one translation run. With a
 // lively-voices token the matching flag pair rides along; Yandex then uses
 // natural multi-voice dubbing on eligible (en→ru) videos.
+// Flag names follow vot-cli 2.x: the npm-installed CLI renamed
+// --output/--output-file to --outdir/--outfile, which silently broke /vo on
+// an image rebuild ("Unknown option '--output'").
 func (v *VoiceoverService) votArgs(outFile, videoURL string) []string {
 	args := []string{
-		"--output", v.OutputDir,
-		"--output-file", outFile,
+		"--outdir", v.OutputDir,
+		"--outfile", outFile,
 		"--reslang", v.TargetLang,
 	}
 	if v.LivelyToken != "" {
