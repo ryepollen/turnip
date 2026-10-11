@@ -29,9 +29,16 @@ type VoiceoverService struct {
 	OutputDir   string
 	TargetLang  string
 	CookiesFile string
+	// LivelyToken is a Yandex OAuth token enabling vot-cli «lively voices»
+	// (#66): natural multi-voice dubbing instead of the flat default. Empty =
+	// the flag is not passed and /vo behaves as before. Yandex applies lively
+	// voices to eligible videos only (en→ru).
+	LivelyToken string
 }
 
-// NewVoiceoverService creates a new voiceover service
+// NewVoiceoverService creates a new voiceover service. The lively-voices
+// token comes straight from the environment (VOT_API_TOKEN in secrets.env)
+// so no config plumbing is needed — absence simply keeps the old voices.
 func NewVoiceoverService(outputDir, targetLang, cookiesFile string) *VoiceoverService {
 	if targetLang == "" {
 		targetLang = "ru"
@@ -40,6 +47,7 @@ func NewVoiceoverService(outputDir, targetLang, cookiesFile string) *VoiceoverSe
 		OutputDir:   outputDir,
 		TargetLang:  targetLang,
 		CookiesFile: cookiesFile,
+		LivelyToken: os.Getenv("VOT_API_TOKEN"),
 	}
 }
 
@@ -85,14 +93,9 @@ func (v *VoiceoverService) TranslateURL(ctx context.Context, mediaURL, outID str
 
 	// Build vot-cli command
 	// vot-cli --output /path/to --output-file name.mp3 --reslang ru "URL"
-	args := []string{
-		"--output", v.OutputDir,
-		"--output-file", filepath.Base(outputFile),
-		"--reslang", v.TargetLang,
-		videoURL,
-	}
+	args := v.votArgs(filepath.Base(outputFile), videoURL)
 
-	log.Printf("[INFO] running vot-cli with args: %v", args)
+	log.Printf("[INFO] running vot-cli with args: %v", maskVotArgs(args))
 
 	// Use timeout context for vot-cli (30 minutes max for long videos)
 	cmdCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
@@ -133,6 +136,34 @@ func (v *VoiceoverService) TranslateURL(ctx context.Context, mediaURL, outID str
 		Duration: 0,  // Will be determined from file later
 		FileSize: fileInfo.Size(),
 	}, nil
+}
+
+// votArgs assembles the vot-cli argument list for one translation run. With a
+// lively-voices token the matching flag pair rides along; Yandex then uses
+// natural multi-voice dubbing on eligible (en→ru) videos.
+func (v *VoiceoverService) votArgs(outFile, videoURL string) []string {
+	args := []string{
+		"--output", v.OutputDir,
+		"--output-file", outFile,
+		"--reslang", v.TargetLang,
+	}
+	if v.LivelyToken != "" {
+		args = append(args, "--lively-voice", "--api-token", v.LivelyToken)
+	}
+	return append(args, videoURL)
+}
+
+// maskVotArgs hides the OAuth token in a copy of the args for logging — the
+// args line is the only place the token would otherwise reach the logs.
+func maskVotArgs(args []string) []string {
+	out := make([]string, len(args))
+	copy(out, args)
+	for i := range out {
+		if i > 0 && out[i-1] == "--api-token" {
+			out[i] = "***"
+		}
+	}
+	return out
 }
 
 // normalizeYouTubeURL converts mobile and other YouTube URL variants to standard format
