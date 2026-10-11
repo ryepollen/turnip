@@ -509,10 +509,11 @@ type appLibWork struct {
 // word the wait ("queued, waiting for Mac") instead of promising an instant swap.
 func (s *Server) appLibraryCtrl(w http.ResponseWriter, r *http.Request) {
 	out := struct {
-		Works      []appLibWork `json:"works"`
-		Remote     bool         `json:"remote"`
-		Categories []string     `json:"categories"` // valid ingest targets for the ➕ upload zone
-	}{Works: []appLibWork{}, Remote: s.ActQueue != nil, Categories: []string{}}
+		Works      []appLibWork           `json:"works"`
+		Remote     bool                   `json:"remote"`
+		Categories []string               `json:"categories"` // valid ingest targets for the ➕ upload zone
+		Ops        map[string]libOpStatus `json:"ops"`        // per-category ▶/⏹ status for ⏳/❌ rendering (#74)
+	}{Works: []appLibWork{}, Remote: s.ActQueue != nil, Categories: []string{}, Ops: s.libOpsSnapshot()}
 	if s.Pub != nil {
 		works, err := s.Pub.Catalog()
 		if err != nil {

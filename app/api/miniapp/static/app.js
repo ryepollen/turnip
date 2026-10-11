@@ -114,7 +114,7 @@ const TABS = [
 ];
 
 const state = {
-  tab: 'feed', offset: 0, refType: null, libFilter: null, libRemote: false,
+  tab: 'feed', offset: 0, refType: null, libFilter: null, libRemote: false, libOps: {},
   // web ingest («➕ New work»): the picked File objects live here between
   // renders; upBusy guards the tab against re-renders mid-upload. upCat/upWork
   // mirror the form fields — adding files re-renders the tab, and without this
@@ -425,6 +425,7 @@ async function doUpload() {
 function renderLibrary(data) {
   state.libRemote = !!data.remote;
   state.upCats = data.categories || [];
+  state.libOps = data.ops || {};
   const works = data.works || [];
   if (!works.length) return renderUploadZone() + '<div class="empty">Library is empty</div>';
 
@@ -441,6 +442,11 @@ function renderLibrary(data) {
   if (!shown.length) return renderUploadZone() + tabs + '<div class="empty">Nothing in this category</div>';
 
   const body = shown.map((w) => {
+    // the category's current/last ▶/⏹ operation: ⏳ while running (buttons of the
+    // whole category locked — single-active), ❌ + reason when the last one failed
+    const opc = state.libOps[w.category];
+    const catBusy = !!(opc && opc.running);
+    const mine = !!(opc && opc.work === w.slug);
     const parts = w.parts + (w.parts === 1 ? ' part' : ' parts');
     const meta = metaLine([
       esc(w.category),
@@ -448,18 +454,35 @@ function renderLibrary(data) {
       w.seasons ? esc(w.seasons + (w.seasons === 1 ? ' season' : ' seasons')) : '',
       w.finite ? '' : badge('playlist', 'streaming'),
       w.active ? badge('live', '▶ live') : '',
+      catBusy && mine ? badge('playlist', opc.op === 'activate' ? '⏳ activating…' : '⏳ stopping…') : '',
+      !catBusy && mine && opc.error ? badge('deleted', '❌ ' + opc.op + ' failed') : '',
     ]);
+    const failLine = (!catBusy && mine && opc.error)
+      ? '<div class="meta opfail">' + esc(opc.error.slice(0, 160)) + '</div>' : '';
+    const dis = catBusy ? ' disabled' : '';
     const acts = w.active
-      ? '<button class="btn danger" data-act="lib-off" data-cat="' + esc(w.category) + '" data-work="' + esc(w.slug) + '" data-t="' + esc(w.title) + '">⏹ Stop</button>' +
+      ? '<button class="btn danger" data-act="lib-off" data-cat="' + esc(w.category) + '" data-work="' + esc(w.slug) + '" data-t="' + esc(w.title) + '"' + dis + '>⏹ Stop</button>' +
         (w.feed_url ? '<button class="btn" data-act="open" data-url="' + esc(w.feed_url) + '">🔗 Feed</button>' : '')
-      : '<button class="btn primary" data-act="lib-on" data-cat="' + esc(w.category) + '" data-work="' + esc(w.slug) + '" data-t="' + esc(w.title) + '">▶ Listen</button>';
+      : '<button class="btn primary" data-act="lib-on" data-cat="' + esc(w.category) + '" data-work="' + esc(w.slug) + '" data-t="' + esc(w.title) + '"' + dis + '>▶ Listen</button>';
     return row(
       '<div class="head"><div class="title">' + esc(w.title) + '</div></div>' +
-      '<div class="meta">' + meta + '</div>' +
+      '<div class="meta">' + meta + '</div>' + failLine +
       '<div class="actions">' + acts + '</div>'
     );
   }).join('');
   return renderUploadZone() + tabs + body;
+}
+
+// scheduleLibPoll keeps reloading the Library tab every few seconds while a
+// ▶/⏹ operation is in flight, so ⏳ resolves into live/❌ without manual taps.
+let libPollTimer = null;
+function scheduleLibPoll() {
+  clearTimeout(libPollTimer);
+  const running = Object.keys(state.libOps || {}).some((k) => state.libOps[k] && state.libOps[k].running);
+  if (!running) return;
+  libPollTimer = setTimeout(() => {
+    if (state.tab === 'library' && !state.upBusy) loadTab();
+  }, 3000);
 }
 
 /* ------- pager ------- */
@@ -513,7 +536,7 @@ async function loadTab() {
         break;
       }
       case 'library': {
-        const d = await apiGet('/library'); l.innerHTML = renderLibrary(d); break;
+        const d = await apiGet('/library'); l.innerHTML = renderLibrary(d); scheduleLibPoll(); break;
       }
       case 'feeds': {
         const d = await apiGet('/feeds'); l.innerHTML = renderFeeds(d); break;

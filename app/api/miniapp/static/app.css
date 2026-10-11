@@ -133,6 +133,9 @@ body {
 /* library category filter — a wrap of small toggle buttons above the works */
 .libfilter { display: flex; flex-wrap: wrap; gap: 6px; }
 
+/* a failed ▶/⏹ shows its reason right on the work row (#74) */
+.opfail { color: var(--stamp); }
+
 /* web ingest («➕ New work») — files go browser→R2 */
 .dropzone {
   margin-top: 8px;

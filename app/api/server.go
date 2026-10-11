@@ -69,6 +69,13 @@ type Server struct {
 	// bucket + history). Wired to the bot's DeleteEntry; nil when the bot is off.
 	DeleteFeedEntry func(entry ytfeed.Entry) error
 
+	// libOps is the per-category status of the current/last ▶/⏹ operation (#74).
+	// The web has no Telegram status message, so without this registry an async
+	// runLibraryOp failure was visible only in server logs while the row just
+	// silently stayed dormant.
+	libOpsMu sync.Mutex
+	libOps   map[string]libOpStatus
+
 	httpServer *http.Server
 	cache      lcw.LoadingCache[[]byte]
 	templates  *template.Template

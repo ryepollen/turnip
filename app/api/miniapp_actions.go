@@ -164,6 +164,62 @@ func (s *Server) appQueuePauseCtrl(w http.ResponseWriter, r *http.Request) {
 // link jumps ahead of a bulk playlist batch, matching the bot's tap behaviour.
 const miniappUserPriority = 1
 
+// libOpStatus is the web's window into one category's async ▶/⏹ operation.
+// Finalize used to fail into server logs only, the row silently staying
+// dormant — twice this hid a real breakage before anyone noticed (#74).
+type libOpStatus struct {
+	Op       string    `json:"op"`
+	Work     string    `json:"work"`
+	Title    string    `json:"title"`
+	Running  bool      `json:"running"`
+	Error    string    `json:"error,omitempty"`
+	Started  time.Time `json:"started"`
+	Finished time.Time `json:"finished"`
+}
+
+// libOpStart registers a running operation for the work's category; false
+// means one is already in flight there (the server-side double-tap guard —
+// single-active makes one op per category the natural unit).
+func (s *Server) libOpStart(op publisher.ActivationOp, cw publisher.CatWork) bool {
+	s.libOpsMu.Lock()
+	defer s.libOpsMu.Unlock()
+	if cur, busy := s.libOps[cw.Category]; busy && cur.Running {
+		return false
+	}
+	if s.libOps == nil {
+		s.libOps = map[string]libOpStatus{}
+	}
+	s.libOps[cw.Category] = libOpStatus{
+		Op: string(op), Work: cw.Slug, Title: cw.Title, Running: true, Started: time.Now(),
+	}
+	return true
+}
+
+// libOpFinish closes the category's running operation, keeping the error (if
+// any) visible to the next catalog poll.
+func (s *Server) libOpFinish(category string, err error) {
+	s.libOpsMu.Lock()
+	defer s.libOpsMu.Unlock()
+	st := s.libOps[category]
+	st.Running = false
+	st.Finished = time.Now()
+	if err != nil {
+		st.Error = err.Error()
+	}
+	s.libOps[category] = st
+}
+
+// libOpsSnapshot copies the registry for the catalog response.
+func (s *Server) libOpsSnapshot() map[string]libOpStatus {
+	s.libOpsMu.Lock()
+	defer s.libOpsMu.Unlock()
+	out := make(map[string]libOpStatus, len(s.libOps))
+	for k, v := range s.libOps {
+		out[k] = v
+	}
+	return out
+}
+
 // POST /wegweiser/api/library/activate {"category":"books","work":"slug"} — make a
 // work live in its category feed (the ▶ Listen button, mirrors the bot's /library).
 func (s *Server) appLibraryActivateCtrl(w http.ResponseWriter, r *http.Request) {
@@ -242,7 +298,14 @@ func (s *Server) libraryAction(w http.ResponseWriter, r *http.Request, op publis
 		return
 	}
 
-	// single-machine mode: run detached, log the outcome; the web polls for the flip
+	// single-machine mode: run detached with a VISIBLE status — the catalog
+	// response carries ops, so the web shows ⏳ while it polls and ❌ with the
+	// reason on failure instead of a row that silently never flips (#74)
+	if !s.libOpStart(op, cw) {
+		rest.SendErrorJSON(w, r, log.Default(), http.StatusConflict,
+			fmt.Errorf("%s already running in %s", op, cw.Category), "operation in progress")
+		return
+	}
 	go s.runLibraryOp(op, cw)
 	rest.RenderJSON(w, rest.JSON{"status": "ok", "started": true, "op": string(op), "work": cw.Slug})
 }
@@ -274,6 +337,7 @@ func (s *Server) runLibraryOp(op publisher.ActivationOp, cw publisher.CatWork) {
 	case publisher.OpDeactivate:
 		err = s.Pub.Deactivate(ctx, cw.Category)
 	}
+	s.libOpFinish(cw.Category, err)
 	if err != nil {
 		log.Printf("[WARN] mini app library %s «%s» (%s) failed: %v", op, cw.Title, cw.Category, err)
 		return
