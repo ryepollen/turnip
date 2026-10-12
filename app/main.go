@@ -246,6 +246,7 @@ func main() {
 			BaseURL:       conf.System.BaseURL,
 			TTSEnabled:    conf.TelegramBot.TTSEnabled,
 			TTSVoice:      conf.TelegramBot.TTSVoice,
+			TTSProvider:   conf.TelegramBot.TTSProvider,
 			CookiesFile:   conf.YouTube.CookiesFile,
 			NotesSvc:      notesSvc,
 			ReadSvc:       readSvc,

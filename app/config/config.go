@@ -56,6 +56,11 @@ type Conf struct {
 		MaxItems        int    `yaml:"max_items"`
 		TTSEnabled      bool   `yaml:"tts_enabled"`
 		TTSVoice        string `yaml:"tts_voice"`
+		// TTSProvider picks the synthesis backend: "edge" (default; free, but
+		// Microsoft 403s datacenter IPs — dead from the VM, #81) or "yandex"
+		// (SpeechKit REST; reuses YANDEX_TRANSLATE_KEY, needs the
+		// ai.speechkit-tts.user role on that service account).
+		TTSProvider string `yaml:"tts_provider"`
 	} `yaml:"telegram_bot"`
 
 	Audio struct {

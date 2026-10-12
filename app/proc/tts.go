@@ -5,9 +5,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
+	log "github.com/go-pkgz/lgr"
 	"github.com/wujunwei928/edge-tts-go/edge_tts"
 )
 
@@ -19,9 +21,13 @@ func escapeXML(s string) string {
 	return s
 }
 
-// TTSProvider interface for text-to-speech services
+// TTSProvider interface for text-to-speech services. SynthesizeLongText is
+// part of the interface so callers never need to know the backend: Edge TTS is
+// 403-blocked for datacenter IPs (#81), so prod runs on Yandex SpeechKit while
+// Edge remains the local/default fallback.
 type TTSProvider interface {
 	Synthesize(ctx context.Context, text string) ([]byte, error)
+	SynthesizeLongText(ctx context.Context, text string, maxChunkSize int) ([]byte, error)
 }
 
 // EdgeTTS implements TTSProvider using Microsoft Edge TTS
@@ -65,8 +71,15 @@ func (e *EdgeTTS) SynthesizeToFile(ctx context.Context, text string, w io.Writer
 
 // SynthesizeLongText handles long text by splitting into chunks
 func (e *EdgeTTS) SynthesizeLongText(ctx context.Context, text string, maxChunkSize int) ([]byte, error) {
+	return synthesizeLongWith(ctx, e.Synthesize, text, maxChunkSize)
+}
+
+// synthesizeLongWith is the provider-agnostic chunking loop: split at sentence
+// boundaries, synthesize with retries, concatenate the audio (MP3 frames glue
+// cleanly), and pause between chunks to stay under rate limits.
+func synthesizeLongWith(ctx context.Context, synth func(context.Context, string) ([]byte, error), text string, maxChunkSize int) ([]byte, error) {
 	if maxChunkSize <= 0 {
-		maxChunkSize = 3000 // Edge TTS has ~3000 char limit per request
+		maxChunkSize = 3000 // Edge TTS has ~3000 char limit per request; SpeechKit allows 5000
 	}
 
 	chunks := splitTextIntoChunks(text, maxChunkSize)
@@ -89,7 +102,7 @@ func (e *EdgeTTS) SynthesizeLongText(ctx context.Context, text string, maxChunkS
 				time.Sleep(backoff)
 			}
 
-			audio, err = e.Synthesize(ctx, chunk)
+			audio, err = synth(ctx, chunk)
 			if err == nil {
 				break
 			}
@@ -106,6 +119,22 @@ func (e *EdgeTTS) SynthesizeLongText(ctx context.Context, text string, maxChunkS
 	}
 
 	return result.Bytes(), nil
+}
+
+// newTTSProvider picks the synthesis backend by config name. "yandex" needs the
+// translate service account's key (with the ai.speechkit-tts.user role added) —
+// already in the container env, no new secrets. Missing creds fall back to Edge
+// with a warning so local runs keep working.
+func newTTSProvider(provider, voice string) TTSProvider {
+	if strings.EqualFold(provider, "yandex") {
+		key := os.Getenv("YANDEX_TRANSLATE_KEY")
+		if key == "" {
+			log.Printf("[WARN] tts_provider=yandex but YANDEX_TRANSLATE_KEY is empty, falling back to Edge TTS")
+		} else {
+			return NewYandexTTS(key, voice)
+		}
+	}
+	return NewEdgeTTS(voice)
 }
 
 // splitTextIntoChunks splits text into chunks at sentence boundaries

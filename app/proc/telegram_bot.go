@@ -38,6 +38,7 @@ type TelegramBot struct {
 	CookiesFile      string
 	TTSEnabled       bool
 	TTS              TTSProvider
+	ttsProvider      string // backend name from config, for the lazy-init fallback
 	ArticleExtractor *ArticleExtractor
 	VoiceoverSvc     *VoiceoverService
 	SubtitleSvc      *SubtitleService
@@ -128,6 +129,7 @@ type TelegramBotParams struct {
 	BaseURL       string
 	TTSEnabled    bool
 	TTSVoice      string
+	TTSProvider   string // "edge" (default) or "yandex" (SpeechKit, see #81)
 	CookiesFile   string
 	NotesSvc      *NotesService
 	ReadSvc       *ReadService
@@ -176,11 +178,12 @@ func NewTelegramBot(params TelegramBotParams) (*TelegramBot, error) {
 		ActQueue:      params.ActQueue,
 	}
 
-	// Initialize TTS if enabled
+	// Initialize TTS if enabled (backend picked by tts_provider: edge|yandex)
 	if params.TTSEnabled {
-		tb.TTS = NewEdgeTTS(params.TTSVoice)
+		tb.TTS = newTTSProvider(params.TTSProvider, params.TTSVoice)
 		tb.ArticleExtractor = NewArticleExtractor()
 	}
+	tb.ttsProvider = params.TTSProvider
 
 	// Initialize voiceover service (for YouTube voice-over translation)
 	tb.VoiceoverSvc = NewVoiceoverService(params.FilesLocation, "ru", params.CookiesFile)
@@ -1799,12 +1802,7 @@ func (t *TelegramBot) processArticle(ctx context.Context, chat *tb.Chat, statusM
 	charCount := len([]rune(article.TextContent))
 	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🔊 Озвучиваю: %s (%d символов)...", article.Title, charCount))
 
-	edgeTTS, ok := t.TTS.(*EdgeTTS)
-	if !ok {
-		return fmt.Errorf("TTS provider is not EdgeTTS")
-	}
-
-	audioData, err := edgeTTS.SynthesizeLongText(ctx, article.TextContent, 3000)
+	audioData, err := t.TTS.SynthesizeLongText(ctx, article.TextContent, 3000)
 	if err != nil {
 		return fmt.Errorf("failed to synthesize speech: %w", err)
 	}
@@ -3041,11 +3039,7 @@ func (t *TelegramBot) podcastVoiceoverViaWhisper(ctx context.Context, statusMsg 
 	}
 
 	_, _ = t.Bot.Edit(statusMsg, fmt.Sprintf("🗣 Озвучиваю: %s...", ep.Title))
-	edgeTTS, ok := t.TTS.(*EdgeTTS)
-	if !ok {
-		return "", fmt.Errorf("TTS provider is not EdgeTTS")
-	}
-	audioData, err := edgeTTS.SynthesizeLongText(ctx, text, 3000)
+	audioData, err := t.TTS.SynthesizeLongText(ctx, text, 3000)
 	if err != nil {
 		return "", fmt.Errorf("failed to synthesize: %w", err)
 	}
@@ -3313,15 +3307,10 @@ func (t *TelegramBot) processVoiceoverViaSubtitles(ctx context.Context, statusMs
 	// Need TTS provider
 	if t.TTS == nil {
 		// Initialize TTS if not available
-		t.TTS = NewEdgeTTS("ru-RU-DmitryNeural")
+		t.TTS = newTTSProvider(t.ttsProvider, "")
 	}
 
-	edgeTTS, ok := t.TTS.(*EdgeTTS)
-	if !ok {
-		return "", 0, fmt.Errorf("TTS провайдер недоступен")
-	}
-
-	audioData, err := edgeTTS.SynthesizeLongText(ctx, text, 3000)
+	audioData, err := t.TTS.SynthesizeLongText(ctx, text, 3000)
 	if err != nil {
 		return "", 0, fmt.Errorf("не удалось озвучить: %w", err)
 	}
