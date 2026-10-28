@@ -60,9 +60,9 @@ type Server struct {
 	// (#75): PWA, userscript, iOS Shortcut, book_shelf ingest. Empty = only
 	// initData is accepted. Owner-equivalent — treat like a password.
 	APIToken string
-	NotesSvc      *proc.NotesService
-	ReadSvc       *proc.ReadService
-	Pub           *publisher.Service
+	NotesSvc *proc.NotesService
+	ReadSvc  *proc.ReadService
+	Pub      *publisher.Service
 	// ActQueue is the variant A activation handoff. When set (remote_activation on),
 	// the Library tab's ▶/⏹ enqueue a request for the Mac agent instead of uploading
 	// in-process — the VM holds 0-byte stub originals and can't read the audio bytes.
