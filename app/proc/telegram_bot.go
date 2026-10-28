@@ -766,6 +766,30 @@ func (t *TelegramBot) isAuthorized(user *tb.User) bool {
 	return int64(user.ID) == t.AllowedUserID
 }
 
+// QueueAudio downloads one YouTube video's audio into the feed, detached from
+// any chat flow — the web/userscript submit path (#78). The outcome lands in
+// the owner chat via NotifyOwner, so the browser button feels like the bot.
+func (t *TelegramBot) QueueAudio(rawURL string) error {
+	id := t.extractYouTubeVideoID(rawURL)
+	if id == "" {
+		return fmt.Errorf("not a youtube link")
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+		defer cancel()
+		res, err := t.processVideoItem(ctx, id)
+		switch {
+		case err != nil:
+			t.NotifyOwner(fmt.Sprintf("❌ из браузера: %s — %v", rawURL, err))
+		case res.Skipped:
+			t.NotifyOwner(fmt.Sprintf("⚠️ из браузера: «%s» уже в ленте", res.Title))
+		default:
+			t.NotifyOwner(fmt.Sprintf("✅ из браузера: «%s» (%s)", res.Title, t.formatDuration(res.Duration)))
+		}
+	}()
+	return nil
+}
+
 // videoResult holds the outcome of processing a single video (without Telegram UI).
 type videoResult struct {
 	VideoID  string

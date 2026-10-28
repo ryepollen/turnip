@@ -33,6 +33,7 @@ func (s *Server) miniappRoutes(router *routegroup.Bundle) {
 		r.HandleFunc("GET /read/file", s.appReadFileCtrl)
 
 		// actions — the same primitives the bot commands drive, over the visible list
+		r.HandleFunc("POST /submit", s.appSubmitCtrl)
 		r.HandleFunc("POST /feed/delete", s.appFeedDeleteCtrl)
 		r.HandleFunc("POST /notes/enqueue", s.appNotesEnqueueCtrl)
 		r.HandleFunc("POST /notes/delete", s.appNotesDeleteCtrl)

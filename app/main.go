@@ -193,6 +193,7 @@ func main() {
 	var notesSvc *proc.NotesService
 	var readSvc *proc.ReadService
 	var deleteFeedEntry func(ytfeed.Entry) error
+	var submitAudio func(string) error
 
 	// variant A remote activation (config-gated, default off): when on, the bot
 	// enqueues ▶/⏹ requests instead of uploading in-process, and the VM finalize
@@ -263,6 +264,7 @@ func main() {
 			}
 			ownerNotify = tgBot.NotifyOwner
 			deleteFeedEntry = tgBot.DeleteEntry // Mini App reuses the /del path
+			submitAudio = tgBot.QueueAudio      // web/userscript 🎵 (#78)
 			finalizeNotifier = tgBot            // variant A: watcher edits the bot's status message
 			go func() {
 				if err := tgBot.Run(context.Background()); err != nil {
@@ -310,6 +312,8 @@ func main() {
 		ActQueue:        actQueue, // variant A: Library tab enqueues ▶/⏹ for the Mac agent
 		AppStore:        ytStore,
 		DeleteFeedEntry: deleteFeedEntry,
+		SubmitAudio:     submitAudio,
+		Notify:          ownerNotify,
 	}
 	if pubSvc != nil {
 		server.PodSecret = pubSvc.Secret

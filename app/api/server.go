@@ -72,6 +72,11 @@ type Server struct {
 	// DeleteFeedEntry removes a feed episode the same way /del does (file + R2 +
 	// bucket + history). Wired to the bot's DeleteEntry; nil when the bot is off.
 	DeleteFeedEntry func(entry ytfeed.Entry) error
+	// SubmitAudio queues a YouTube link for audio download the way the bot's
+	// 🎵 does, detached (the web/userscript submit path, #78). nil = bot off.
+	SubmitAudio func(rawURL string) error
+	// Notify sends a line to the owner chat (bot's NotifyOwner); nil = silent.
+	Notify func(text string)
 
 	// libOps is the per-category status of the current/last ▶/⏹ operation (#74).
 	// The web has no Telegram status message, so without this registry an async
