@@ -56,6 +56,10 @@ type Server struct {
 	// surface over them, not a new store.
 	BotToken      string // telegram bot token, for initData verification
 	AllowedUserID int64  // the only user allowed into the Mini App
+	// APIToken is the standing secret for the Mini App API outside Telegram
+	// (#75): PWA, userscript, iOS Shortcut, book_shelf ingest. Empty = only
+	// initData is accepted. Owner-equivalent — treat like a password.
+	APIToken string
 	NotesSvc      *proc.NotesService
 	ReadSvc       *proc.ReadService
 	Pub           *publisher.Service

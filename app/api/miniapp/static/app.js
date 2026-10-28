@@ -10,17 +10,30 @@ const INIT_DATA = tg ? tg.initData : '';
 const API = '/wegweiser/api';
 const PAGE = 15;
 
+// Outside Telegram (the installed PWA, a plain browser tab) auth is a standing
+// token (#75), entered once and kept in this browser only. Inside Telegram the
+// signed initData still wins.
+const TOKEN_KEY = 'weg_token';
+let API_TOKEN = '';
+try { API_TOKEN = localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { /* private mode etc. */ }
+
 /* ------- tiny helpers ------- */
 
 function authHeaders(extra) {
-  const h = { 'X-Telegram-Init-Data': INIT_DATA };
+  const h = INIT_DATA
+    ? { 'X-Telegram-Init-Data': INIT_DATA }
+    : { 'X-Wegweiser-Token': API_TOKEN };
   if (extra) Object.assign(h, extra);
   return h;
 }
 
 async function apiGet(path) {
   const res = await fetch(API + path, { headers: authHeaders() });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
+  if (!res.ok) {
+    const err = new Error('HTTP ' + res.status);
+    err.status = res.status;
+    throw err;
+  }
   return res.json();
 }
 
@@ -543,8 +556,25 @@ async function loadTab() {
       }
     }
   } catch (e) {
+    // outside Telegram a 401 means the token is wrong or stale — reopen the gate
+    if (e.status === 401 && !INIT_DATA) { renderTokenGate('Token rejected — enter it again.'); return; }
     l.innerHTML = '<div class="err">Error: ' + esc(e.message) + '</div>';
   }
+}
+
+/* ------- token gate (the PWA's front door, #75) ------- */
+
+function renderTokenGate(note) {
+  $pager().innerHTML = '';
+  document.getElementById('pulse').textContent = '';
+  $list().innerHTML = row(
+    '<div class="head"><div class="title">🔑 Access token</div></div>' +
+    '<div class="meta">This is the Mini App outside Telegram. Paste the standing token (WEGWEISER_TOKEN) — it stays in this browser only.</div>' +
+    (note ? '<div class="meta opfail">' + esc(note) + '</div>' : '') +
+    '<div class="actions">' +
+    '<input id="token-input" class="btn upwork" type="password" placeholder="token">' +
+    '<button class="btn primary" data-act="token-save">Save</button></div>'
+  );
 }
 
 async function loadPulse() {
@@ -607,6 +637,14 @@ async function handleAction(act, el) {
       state.refType = null; loadTab(); break;
     case 'lib-filter':
       state.libFilter = el.getAttribute('data-cat') || null; loadTab(); break;
+    case 'token-save': {
+      const inp = document.getElementById('token-input');
+      const v = inp ? inp.value.trim() : '';
+      if (!v) { toast('Paste the token first'); break; }
+      try { localStorage.setItem(TOKEN_KEY, v); } catch (e) { toast('Storage unavailable'); break; }
+      location.reload();
+      break;
+    }
     case 'up-toggle':
       if (state.upBusy) { toast('Upload in progress'); break; }
       state.upOpen = !state.upOpen;
@@ -703,9 +741,8 @@ function init() {
     tg.ready();
     tg.expand();
   }
-  if (!INIT_DATA) {
-    document.getElementById('list').innerHTML =
-      '<div class="err">Open via the bot button in Telegram — no access signature here.</div>';
+  if (!INIT_DATA && !API_TOKEN) {
+    renderTokenGate();
     return;
   }
   buildTabs();

@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -106,12 +107,24 @@ func hmacSHA256(key, message []byte) []byte {
 // the single-user gate are the real guards.
 const initDataMaxAge = 48 * time.Hour
 
-// miniAuth gates the Mini App API to the one allowed user. It verifies the
-// initData signature with the bot token and checks the user id, answering 401
-// JSON on any failure. The static shell is served without this — data lives
-// only behind here.
+// apiTokenHeader carries the standing secret for non-Telegram clients (#75):
+// the PWA outside Telegram, the userscript bridge, iOS Shortcuts and
+// book_shelf's programmatic ingest. The token is owner-equivalent — same
+// trust model as the /holzweg feed secret, but for actions.
+const apiTokenHeader = "X-Wegweiser-Token"
+
+// miniAuth gates the Mini App API to the one allowed user: either a Telegram
+// initData signature (the Mini App inside Telegram) or the standing API token
+// (everything outside it). 401 JSON on any failure. The static shell is served
+// without this — data lives only behind here.
 func (s *Server) miniAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// the standing token first: cheap, and keeps working with the bot off
+		if tok := r.Header.Get(apiTokenHeader); tok != "" && s.APIToken != "" &&
+			subtle.ConstantTimeCompare([]byte(tok), []byte(s.APIToken)) == 1 {
+			next.ServeHTTP(w, r)
+			return
+		}
 		user, err := verifyInitData(r.Header.Get(initDataHeader), s.BotToken, initDataMaxAge, time.Now())
 		if err != nil {
 			rest.SendErrorJSON(w, r, log.Default(), http.StatusUnauthorized, err, "unauthorized")

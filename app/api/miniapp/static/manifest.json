@@ -1,0 +1,14 @@
+{
+  "name": "Wegweiser",
+  "short_name": "Wegweiser",
+  "description": "Личная картотека: лента, конспекты, читалка, библиотека",
+  "start_url": "/wegweiser",
+  "scope": "/wegweiser",
+  "display": "standalone",
+  "background_color": "#e6dfce",
+  "theme_color": "#1c1a17",
+  "icons": [
+    { "src": "/wegweiser/static/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/wegweiser/static/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

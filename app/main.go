@@ -303,6 +303,7 @@ func main() {
 		// Mini App «Wegweiser»: single-user web face over the bot's own services
 		BotToken:        opts.TelegramToken,
 		AllowedUserID:   conf.TelegramBot.AllowedUserID,
+		APIToken:        os.Getenv("WEGWEISER_TOKEN"), // standing token for PWA/userscript/ingest (#75)
 		NotesSvc:        notesSvc,
 		ReadSvc:         readSvc,
 		Pub:             pubSvc,

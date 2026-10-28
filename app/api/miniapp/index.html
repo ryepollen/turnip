@@ -4,6 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Wegweiser</title>
+  <!-- PWA (#75): installable outside Telegram, auth by standing token -->
+  <link rel="manifest" href="/wegweiser/static/manifest.json">
+  <meta name="theme-color" content="#1c1a17">
+  <link rel="apple-touch-icon" href="/wegweiser/static/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Wegweiser">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <link rel="stylesheet" href="/wegweiser/static/app.css">
 </head>

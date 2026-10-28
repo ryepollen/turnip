@@ -139,3 +139,49 @@ func TestMiniAuthMiddleware(t *testing.T) {
 		})
 	}
 }
+
+func TestMiniAuthStandingToken(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	srv := &Server{BotToken: "123456:test-bot-token", AllowedUserID: 5504926420, APIToken: "sekret-standing-token"}
+	handler := srv.miniAuth(ok)
+
+	tests := []struct {
+		name  string
+		token string
+		want  int
+	}{
+		{"correct token", "sekret-standing-token", http.StatusOK},
+		{"wrong token", "guess", http.StatusUnauthorized},
+		{"empty header falls through to initData and fails", "", http.StatusUnauthorized},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/wegweiser/api/status", http.NoBody)
+			if tt.token != "" {
+				req.Header.Set(apiTokenHeader, tt.token)
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, tt.want, rec.Code)
+		})
+	}
+
+	t.Run("token works with the bot disabled", func(t *testing.T) {
+		headless := &Server{APIToken: "sekret-standing-token"} // no BotToken at all
+		req := httptest.NewRequest(http.MethodGet, "/wegweiser/api/status", http.NoBody)
+		req.Header.Set(apiTokenHeader, "sekret-standing-token")
+		rec := httptest.NewRecorder()
+		headless.miniAuth(ok).ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code, "programmatic clients must not depend on Telegram being wired")
+	})
+
+	t.Run("unconfigured token never matches", func(t *testing.T) {
+		open := &Server{BotToken: "123456:test-bot-token"}
+		req := httptest.NewRequest(http.MethodGet, "/wegweiser/api/status", http.NoBody)
+		req.Header.Set(apiTokenHeader, "") // and server has none configured
+		rec := httptest.NewRecorder()
+		open.miniAuth(ok).ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "empty-vs-empty must not authenticate")
+	})
+}
