@@ -29,7 +29,10 @@ html, body {
 }
 
 body {
-  padding: 0 0 env(safe-area-inset-bottom);
+  /* standalone PWA draws under the iOS status bar (viewport-fit=cover +
+     translucent bar), so the safe-area padding is needed on both ends;
+     inside Telegram the insets are 0 and nothing changes */
+  padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
   max-width: 720px;
   margin: 0 auto;
 }
