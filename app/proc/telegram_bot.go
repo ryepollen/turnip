@@ -3084,17 +3084,17 @@ func (t *TelegramBot) appendNotionLinkToEntry(videoID, notionURL string) {
 		return // feed bucket may not exist yet — nothing to update
 	}
 	for _, e := range entries {
-		if e.VideoID != videoID {
+		// a voiceover of the same video sits in the feed as vo_{id} — link it too
+		if e.VideoID != videoID && e.VideoID != "vo_"+videoID {
 			continue
 		}
 		if strings.Contains(string(e.Media.Description), notionURL) {
-			return
+			continue
 		}
 		e.Media.Description += template.HTML("\n\n📓 Конспект: " + notionURL) //nolint:gosec // plain url, not user html
 		if err := t.Store.UpdateEntry(e); err != nil {
 			log.Printf("[WARN] failed to add notion link to entry %s: %v", videoID, err)
 		}
-		return
 	}
 }
 

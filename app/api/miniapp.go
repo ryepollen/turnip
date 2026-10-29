@@ -146,6 +146,7 @@ type appFeedItem struct {
 	Duration  string `json:"duration"`
 	Added     string `json:"added"` // pubDate == time added to the feed
 	Thumbnail string `json:"thumbnail,omitempty"`
+	Channel   string `json:"channel,omitempty"` // YouTube channel / author name
 	HasNotion bool   `json:"has_notion"`
 }
 
@@ -174,6 +175,21 @@ func (s *Server) appFeedCtrl(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		total = len(entries)
+		// transcripts that reached Notion, keyed by source id — the read-time
+		// fallback for entries whose description append missed the link (the
+		// voiceover vo_-prefixed ids never matched the plain video id)
+		notioned := map[string]bool{}
+		if s.NotesSvc != nil {
+			if notes, nerr := s.NotesSvc.List(); nerr == nil {
+				for _, n := range notes {
+					for _, lvl := range n.Meta.Processed {
+						if lvl == "notes" {
+							notioned[n.SourceID] = true
+						}
+					}
+				}
+			}
+		}
 		start, end := window(total, offset, limit)
 		for _, e := range entries[start:end] {
 			dur := e.DurationFmt
@@ -188,7 +204,9 @@ func (s *Server) appFeedCtrl(w http.ResponseWriter, r *http.Request) {
 				Duration:  dur,
 				Added:     e.Published.Format(time.RFC3339),
 				Thumbnail: e.Media.Thumbnail.URL,
-				HasNotion: strings.Contains(string(e.Media.Description), "📓 Конспект:"),
+				Channel:   e.Author.Name,
+				HasNotion: strings.Contains(string(e.Media.Description), "📓 Конспект:") ||
+					notioned[strings.TrimPrefix(e.VideoID, "vo_")],
 			})
 		}
 	}

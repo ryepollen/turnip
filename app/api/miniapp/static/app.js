@@ -156,6 +156,7 @@ function renderFeed(data) {
     const meta = metaLine([
       esc(fmtDate(it.added)),
       it.duration ? esc(it.duration) : '',
+      it.channel ? esc(it.channel) : '',
       it.has_notion ? badge('notion', '📓 Notion') : '',
     ]);
     const acts =
