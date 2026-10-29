@@ -48,6 +48,10 @@ async function apiPost(path, body) {
   return data;
 }
 
+function decodeSafe(s) {
+  try { return decodeURIComponent(s); } catch (e) { return s; }
+}
+
 function esc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -255,7 +259,7 @@ function renderQueue(data) {
   if (data.recent && data.recent.length) {
     html += data.recent.map((j) => {
       const mark = j.status === 'failed' ? '❌' : (j.status === 'done' ? '✅' : (j.status === 'processing' ? '⏳' : '•'));
-      const label = j.title || j.url;
+      const label = j.title || decodeSafe(j.url);
       const meta = metaLine([esc(j.level), esc(j.status), esc(fmtDate(j.updated)), j.error ? esc(j.error) : '']);
       return row(
         '<div class="head"><div class="title">' + mark + ' ' + esc(label) + '</div></div>' +
@@ -699,6 +703,7 @@ function buildTabs() {
 function selectTab(key) {
   if (state.upBusy) { toast('Upload in progress — stay on Library'); return; }
   state.tab = key;
+  try { localStorage.setItem('weg_tab', key); } catch (e) { /* fine */ }
   state.offset = 0;
   state.refType = null;
   state.libFilter = null;
@@ -746,6 +751,11 @@ function init() {
     renderTokenGate();
     return;
   }
+  // reopen on the tab you were on — reloads used to snap back to Feed
+  try {
+    const saved = localStorage.getItem('weg_tab');
+    if (saved && TABS.some((t) => t.key === saved)) state.tab = saved;
+  } catch (e) { /* fine */ }
   buildTabs();
   loadPulse();
   loadTab();

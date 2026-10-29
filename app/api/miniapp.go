@@ -467,6 +467,10 @@ func (s *Server) appStatusCtrl(w http.ResponseWriter, r *http.Request) {
 		}
 		out.Queued, out.Processing = q, p
 		out.Paused = s.NotesSvc.IsPaused()
+		// the web shows the WHOLE active queue (the bot's /status keeps its 5)
+		if active, finished, ferr := s.NotesSvc.QueueFull(8); ferr == nil {
+			recent = append(active, finished...)
+		}
 		for _, j := range recent {
 			out.Recent = append(out.Recent, appJob{
 				URL:     j.URL,

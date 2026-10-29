@@ -388,6 +388,37 @@ func (n *NotesService) QueueStatus() (queued, processing int, recent []ytstore.N
 	return queued, processing, recent, err
 }
 
+// QueueFull returns the complete active queue — every processing and queued
+// job — plus a tail of finished (done/failed) ones. The Mini App's Queue tab
+// shows the whole line, unlike the bot's compact 5-row /status.
+func (n *NotesService) QueueFull(finishedTail int) (active, finished []ytstore.NotesJobRecord, err error) {
+	if n.JobStore == nil {
+		return nil, nil, fmt.Errorf("очередь конспектов не настроена")
+	}
+	processing, err := n.JobStore.LoadNotesJobs(ytstore.NotesJobProcessing, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	queued, err := n.JobStore.LoadNotesJobs(ytstore.NotesJobQueued, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	active = append(processing, queued...)
+	all, err := n.JobStore.LoadNotesJobs("", len(active)+finishedTail+8)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, j := range all {
+		if j.Status == ytstore.NotesJobDone || j.Status == ytstore.NotesJobFailed {
+			finished = append(finished, j)
+			if len(finished) >= finishedTail {
+				break
+			}
+		}
+	}
+	return active, finished, nil
+}
+
 // SetPaused pauses or resumes the queue. Paused workers finish the in-flight
 // job but claim no new ones; the flag is persisted so it survives restarts.
 // Resuming kicks a worker so pickup is immediate, not poll-delayed.
