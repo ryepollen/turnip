@@ -91,7 +91,7 @@ func (s *Server) appNotesEnqueueCtrl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.NotesSvc.EnqueueURL(body.URL, body.Level, miniappUserPriority); err != nil {
-		rest.SendErrorJSON(w, r, log.Default(), http.StatusConflict, err, "failed to enqueue")
+		rest.SendErrorJSON(w, r, log.Default(), http.StatusConflict, err, err.Error())
 		return
 	}
 	rest.RenderJSON(w, rest.JSON{"status": "ok", "queued": body.URL})

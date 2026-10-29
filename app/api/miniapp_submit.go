@@ -56,7 +56,8 @@ func (s *Server) appSubmitCtrl(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.NotesSvc.EnqueueURL(link, body.Action, miniappUserPriority); err != nil {
-			rest.SendErrorJSON(w, r, log.Default(), http.StatusConflict, err, "failed to enqueue")
+			// the queue's own wording is user-facing ru («задача уже в очереди»)
+			rest.SendErrorJSON(w, r, log.Default(), http.StatusConflict, err, err.Error())
 			return
 		}
 	case "read":
