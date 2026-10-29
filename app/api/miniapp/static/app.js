@@ -48,6 +48,17 @@ async function apiPost(path, body) {
   return data;
 }
 
+// sourceLabel names the platform an entry came from, derived from its URL —
+// the title emoji codes the METHOD (audio/vo/dub/tts), this codes the origin.
+function sourceLabel(rawURL) {
+  try {
+    const h = new URL(rawURL).hostname.replace(/^www\./, '');
+    if (h === 'youtube.com' || h === 'youtu.be' || h === 'm.youtube.com') return 'YouTube';
+    if (h === 'podcasts.apple.com') return 'Apple Podcasts';
+    return h;
+  } catch (e) { return ''; }
+}
+
 function decodeSafe(s) {
   try { return decodeURIComponent(s); } catch (e) { return s; }
 }
@@ -157,10 +168,12 @@ function metaLine(parts) {
 function renderFeed(data) {
   if (!data.items.length) return '<div class="empty">Feed is empty</div>';
   return data.items.map((it) => {
+    const src = sourceLabel(it.url);
     const meta = metaLine([
       esc(fmtDate(it.added)),
       it.duration ? esc(it.duration) : '',
-      it.channel ? esc(it.channel) : '',
+      src ? esc(src) : '',
+      it.channel && it.channel !== src ? esc(it.channel) : '',
       it.has_notion ? badge('notion', '📓 Notion') : '',
     ]);
     const acts =
