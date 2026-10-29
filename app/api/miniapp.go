@@ -19,6 +19,7 @@ import (
 func (s *Server) miniappRoutes(router *routegroup.Bundle) {
 	router.Mount("/wegweiser/api").Route(func(r *routegroup.Bundle) {
 		r.Use(timeout(60 * time.Second))
+		r.Use(corsMini) // before auth: preflights carry no credentials
 		r.Use(s.miniAuth)
 		r.HandleFunc("GET /summary", s.appSummaryCtrl)
 		r.HandleFunc("GET /feed", s.appFeedCtrl)

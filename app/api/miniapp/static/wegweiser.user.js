@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wegweiser → turnip
 // @namespace    org.welcherweg
-// @version      1.0.0
+// @version      1.1.0
 // @description  One-click send of the current page to turnip: audio / notes / transcript / reader
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -11,15 +11,20 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM.xmlHttpRequest
+// @grant        GM.getValue
+// @grant        GM.setValue
 // @connect      welcherweg.org
 // @updateURL    https://welcherweg.org/wegweiser/static/wegweiser.user.js
 // @downloadURL  https://welcherweg.org/wegweiser/static/wegweiser.user.js
 // ==/UserScript==
 
 /* The browser side of #78: a small case-file bar in the corner. Buttons POST
-   {url, action} to /wegweiser/api/submit with the standing token (asked once,
-   kept in the userscript manager's storage). The server strips tracking params
-   too, but we clean before sending so the toast shows the canonical link. */
+   {url, action} to /wegweiser/api/submit with the standing token.
+   Manager APIs differ (Tampermonkey = sync GM_*, Safari Userscripts = async
+   GM.*), so every layer has fallbacks — storage down to localStorage,
+   transport down to plain fetch (the server speaks CORS for that) — and any
+   failure surfaces as a toast, never silence. */
 
 (function () {
   'use strict';
@@ -36,13 +41,25 @@
     } catch (e) { return raw; }
   }
 
-  async function token() {
-    let t = await GM_getValue('weg_token', '');
-    if (!t) {
-      t = (window.prompt('Wegweiser token (WEGWEISER_TOKEN):') || '').trim();
-      if (t) await GM_setValue('weg_token', t);
-    }
-    return t;
+  const store = {
+    async get(k) {
+      try { if (typeof GM_getValue === 'function') return GM_getValue(k, '') || ''; } catch (e) { /* next */ }
+      try { if (typeof GM !== 'undefined' && GM.getValue) return (await GM.getValue(k, '')) || ''; } catch (e) { /* next */ }
+      try { return localStorage.getItem('weg_' + k) || ''; } catch (e) { return ''; }
+    },
+    async set(k, v) {
+      try { if (typeof GM_setValue === 'function') { GM_setValue(k, v); return; } } catch (e) { /* next */ }
+      try { if (typeof GM !== 'undefined' && GM.setValue) { await GM.setValue(k, v); return; } } catch (e) { /* next */ }
+      try { localStorage.setItem('weg_' + k, v); } catch (e) { /* give up */ }
+    },
+  };
+
+  function request(opts) {
+    try { if (typeof GM_xmlhttpRequest === 'function') { GM_xmlhttpRequest(opts); return; } } catch (e) { /* next */ }
+    try { if (typeof GM !== 'undefined' && GM.xmlHttpRequest) { GM.xmlHttpRequest(opts); return; } } catch (e) { /* next */ }
+    fetch(opts.url, { method: opts.method, headers: opts.headers, body: opts.data })
+      .then(async (res) => opts.onload({ status: res.status, responseText: await res.text() }))
+      .catch(() => { if (opts.onerror) opts.onerror(); });
   }
 
   function toast(text, ok) {
@@ -56,17 +73,21 @@
   }
 
   async function send(action) {
-    const tok = await token();
-    if (!tok) { toast('нет токена', false); return; }
+    let tok = await store.get('token');
+    if (!tok) {
+      tok = (window.prompt('Wegweiser token (WEGWEISER_TOKEN):') || '').trim();
+      if (!tok) { toast('нет токена', false); return; }
+      await store.set('token', tok);
+    }
     const link = cleanURL(location.href);
-    GM_xmlhttpRequest({
+    request({
       method: 'POST',
       url: API,
       headers: { 'Content-Type': 'application/json', 'X-Wegweiser-Token': tok },
       data: JSON.stringify({ url: link, action: action }),
       onload: (r) => {
         if (r.status === 200) { toast('→ turnip: ' + action + ' ✓', true); return; }
-        if (r.status === 401) { GM_setValue('weg_token', ''); toast('токен не подошёл — спрошу заново', false); return; }
+        if (r.status === 401) { store.set('token', ''); toast('токен не подошёл — спрошу заново', false); return; }
         let msg = 'HTTP ' + r.status;
         try { msg = JSON.parse(r.responseText).error || msg; } catch (e) { /* keep */ }
         toast('✗ ' + msg, false);
@@ -88,7 +109,11 @@
       b.title = title + ' → turnip';
       b.style.cssText = 'border:1px solid #8a8069;background:#e6dfce;color:#1c1a17;' +
         'border-radius:3px;padding:3px 7px;cursor:pointer;font:inherit';
-      b.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); send(action); });
+      b.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        send(action).catch((e) => toast('✗ ' + (e && e.message ? e.message : 'сбой скрипта'), false));
+      });
       return b;
     };
     bar.appendChild(mk('🎵', 'audio', 'аудио в ленту'));
@@ -100,6 +125,5 @@
 
   buildBar();
   // YouTube is an SPA — keep the bar alive across its soft navigations
-  new MutationObserver(() => buildBar()).observe(document.documentElement, { childList: true, subtree: false });
   setInterval(buildBar, 3000);
 })();

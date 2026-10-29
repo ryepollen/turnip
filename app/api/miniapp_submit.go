@@ -89,6 +89,23 @@ func (s *Server) appSubmitCtrl(w http.ResponseWriter, r *http.Request) {
 	rest.RenderJSON(w, rest.JSON{"status": "ok", "action": body.Action, "url": link})
 }
 
+// corsMini answers browser preflights and marks the Mini App API callable
+// from foreign origins — the userscript lives on youtube.com and may have to
+// fall back to plain fetch (#78). '*' is safe here: auth is the explicit
+// token header, never cookies, so there is nothing ambient for CORS to guard.
+func corsMini(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Wegweiser-Token")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // trackingParams are query keys that identify the sharer, not the content —
 // they make every pasted link unique and poison dedup (#82's seed).
 var trackingParams = map[string]bool{

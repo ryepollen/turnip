@@ -65,3 +65,26 @@ func TestAppSubmit(t *testing.T) {
 		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	})
 }
+
+func TestCORSPreflightAndHeaders(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	h := corsMini(ok)
+
+	t.Run("preflight short-circuits without auth", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodOptions, "/wegweiser/api/submit", http.NoBody)
+		req.Header.Set("Origin", "https://www.youtube.com")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+		assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
+		assert.Contains(t, rec.Header().Get("Access-Control-Allow-Headers"), "X-Wegweiser-Token")
+	})
+
+	t.Run("real request passes through with the header set", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/wegweiser/api/submit", http.NoBody)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
+	})
+}
