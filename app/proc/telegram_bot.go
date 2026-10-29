@@ -770,9 +770,32 @@ func (t *TelegramBot) isAuthorized(user *tb.User) bool {
 // any chat flow — the web/userscript submit path (#78). The outcome lands in
 // the owner chat via NotifyOwner, so the browser button feels like the bot.
 func (t *TelegramBot) QueueAudio(rawURL string) error {
+	// Apple Podcasts episode → the same «🎧 В ленту» the bot menu does:
+	// resolve the enclosure and download it into the feed, detached
+	if IsApplePodcastURL(rawURL) && t.Apple != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+			defer cancel()
+			ep, err := t.Apple.Resolve(ctx, rawURL)
+			if err != nil {
+				t.NotifyOwner(fmt.Sprintf("❌ из браузера: %s — %v", rawURL, err))
+				return
+			}
+			dur, skipped, err := t.addPodcastEpisode(ctx, ep, rawURL)
+			switch {
+			case err != nil:
+				t.NotifyOwner(fmt.Sprintf("❌ из браузера: «%s» — %v", ep.Title, err))
+			case skipped:
+				t.NotifyOwner(fmt.Sprintf("⚠️ из браузера: «%s» уже в ленте", ep.Title))
+			default:
+				t.NotifyOwner(fmt.Sprintf("✅ из браузера: «%s» (%s)", ep.Title, t.formatDuration(time.Duration(dur)*time.Second)))
+			}
+		}()
+		return nil
+	}
 	id := t.extractYouTubeVideoID(rawURL)
 	if id == "" {
-		return fmt.Errorf("not a youtube link")
+		return fmt.Errorf("not a youtube or apple podcasts link")
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)

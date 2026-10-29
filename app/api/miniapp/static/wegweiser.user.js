@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wegweiser → turnip
 // @namespace    org.welcherweg
-// @version      1.1.0
+// @version      1.2.0
 // @description  One-click send of the current page to turnip: audio / notes / transcript / reader
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -76,7 +76,7 @@
     let tok = await store.get('token');
     if (!tok) {
       tok = (window.prompt('Wegweiser token (WEGWEISER_TOKEN):') || '').trim();
-      if (!tok) { toast('нет токена', false); return; }
+      if (!tok) { toast('no token', false); return; }
       await store.set('token', tok);
     }
     const link = cleanURL(location.href);
@@ -87,12 +87,12 @@
       data: JSON.stringify({ url: link, action: action }),
       onload: (r) => {
         if (r.status === 200) { toast('→ turnip: ' + action + ' ✓', true); return; }
-        if (r.status === 401) { store.set('token', ''); toast('токен не подошёл — спрошу заново', false); return; }
+        if (r.status === 401) { store.set('token', ''); toast('token rejected — will ask again', false); return; }
         let msg = 'HTTP ' + r.status;
         try { msg = JSON.parse(r.responseText).error || msg; } catch (e) { /* keep */ }
         toast('✗ ' + msg, false);
       },
-      onerror: () => toast('✗ сеть', false),
+      onerror: () => toast('✗ network', false),
     });
   }
 
@@ -112,14 +112,14 @@
       b.addEventListener('click', (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
-        send(action).catch((e) => toast('✗ ' + (e && e.message ? e.message : 'сбой скрипта'), false));
+        send(action).catch((e) => toast('✗ ' + (e && e.message ? e.message : 'script error'), false));
       });
       return b;
     };
-    bar.appendChild(mk('🎵', 'audio', 'аудио в ленту'));
-    bar.appendChild(mk('📓', 'notes', 'конспект в Notion'));
-    bar.appendChild(mk('📄', 'md', 'транскрипт'));
-    bar.appendChild(mk('📖', 'read', 'в читалку'));
+    bar.appendChild(mk('🎵', 'audio', 'audio → feed'));
+    bar.appendChild(mk('📓', 'notes', 'notes → Notion'));
+    bar.appendChild(mk('📄', 'md', 'transcript (.md)'));
+    bar.appendChild(mk('📖', 'read', 'reader'));
     document.body.appendChild(bar);
   }
 
