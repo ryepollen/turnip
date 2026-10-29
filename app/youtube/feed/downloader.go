@@ -174,7 +174,7 @@ func (d *Downloader) GetInfo(ctx context.Context, videoURL string) (*VideoInfo, 
 }
 
 func (d *Downloader) getInfo(ctx context.Context, videoURL string, useCookies bool) (*VideoInfo, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute) // YouTube drip-feeds DC IPs: a legit dump-json can take ~2m, 2m was a lottery
 	defer cancel()
 
 	args := d.ytdlpArgs("--dump-json", "--no-download", videoURL)
@@ -217,7 +217,7 @@ func (d *Downloader) ExpandPlaylist(ctx context.Context, playlistURL string) ([]
 }
 
 func (d *Downloader) expandPlaylist(ctx context.Context, playlistURL string, useCookies bool) ([]string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute) // YouTube drip-feeds DC IPs: a legit dump-json can take ~2m, 2m was a lottery
 	defer cancel()
 
 	// build args by hand: unlike ytdlpArgs we must NOT pass --no-playlist here,
@@ -268,7 +268,7 @@ func (d *Downloader) ExpandPlaylistItems(ctx context.Context, playlistURL string
 }
 
 func (d *Downloader) expandPlaylistItems(ctx context.Context, playlistURL string, useCookies bool) ([]PlaylistItem, string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute) // YouTube drip-feeds DC IPs: a legit dump-json can take ~2m, 2m was a lottery
 	defer cancel()
 
 	var args []string
