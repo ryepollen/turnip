@@ -103,7 +103,14 @@ func (s *Server) appSummaryCtrl(w http.ResponseWriter, _ *http.Request) {
 		Read       int  `json:"read"`
 		Refs       int  `json:"refs"`
 		Feeds      int  `json:"feeds"`
+		// storage meters (#83г): bytes, 0 = unknown/off
+		DiskUsed  int64 `json:"disk_used"`
+		DiskTotal int64 `json:"disk_total"`
+		R2Used    int64 `json:"r2_used"`
+		R2Cap     int64 `json:"r2_cap"`
 	}
+	out.DiskUsed, out.DiskTotal = diskUsage(s.Conf.YouTube.FilesLocation)
+	out.R2Used, out.R2Cap = s.r2Usage(), r2FreeTierBytes
 
 	if s.YoutubeStore != nil {
 		if entries, err := s.YoutubeStore.Load(s.feedName(), 0); err == nil {

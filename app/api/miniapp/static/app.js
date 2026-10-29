@@ -582,15 +582,21 @@ function renderTokenGate(note) {
   );
 }
 
+function fmtGB(bytes) {
+  return (bytes / (1 << 30)).toFixed(1).replace(/\.0$/, '');
+}
+
 async function loadPulse() {
   try {
     const s = await apiGet('/summary');
     const p = document.getElementById('pulse');
+    const disk = s.disk_total ? '<span class="sep">·</span><span class="chip">💾 ' + fmtGB(s.disk_used) + '/' + fmtGB(s.disk_total) + 'G</span>' : '';
+    const r2 = s.r2_cap ? '<span class="sep">·</span><span class="chip">☁️ R2 ' + fmtGB(s.r2_used) + '/' + fmtGB(s.r2_cap) + 'G</span>' : '';
     p.innerHTML =
       '<span class="chip">' + s.feed + ' in feed</span><span class="sep">·</span>' +
       '<span class="chip">' + s.queued + ' queued</span><span class="sep">·</span>' +
       '<span class="chip">' + s.notes + ' notes</span><span class="sep">·</span>' +
-      '<span class="chip">' + s.refs + ' refs</span>' +
+      '<span class="chip">' + s.refs + ' refs</span>' + disk + r2 +
       (s.paused ? '<span class="sep">·</span><span class="paused">paused</span>' : '');
   } catch (e) {
     document.getElementById('pulse').textContent = '';
