@@ -280,18 +280,18 @@ func TestMiniAppActions(t *testing.T) {
 	})
 
 	t.Run("notes enqueue ok", func(t *testing.T) {
-		rec := post("/wegweiser/api/notes/enqueue", map[string]string{"url": "https://youtu.be/aaa"})
+		rec := post("/wegweiser/api/notes/enqueue", map[string]string{"url": "https://youtu.be/aaaaaaaaaaa"})
 		require.Equal(t, http.StatusOK, rec.Code)
 		require.Len(t, js.saved, 1)
 		assert.Equal(t, "notes", js.saved[0].Level)
-		assert.Equal(t, "aaa", js.saved[0].SourceID)
+		assert.Equal(t, "aaaaaaaaaaa", js.saved[0].SourceID)
 		assert.Equal(t, 1, js.saved[0].Priority)
 	})
 
 	t.Run("notes enqueue duplicate -> 409", func(t *testing.T) {
 		js.active = true
 		defer func() { js.active = false }()
-		rec := post("/wegweiser/api/notes/enqueue", map[string]string{"url": "https://youtu.be/bbb"})
+		rec := post("/wegweiser/api/notes/enqueue", map[string]string{"url": "https://youtu.be/bbbbbbbbbbb"})
 		assert.Equal(t, http.StatusConflict, rec.Code)
 	})
 

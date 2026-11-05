@@ -188,36 +188,37 @@ func normalizeYouTubeURL(url string) string {
 	return url
 }
 
-// extractVideoID extracts YouTube video ID from URL
+// extractVideoID extracts a YouTube video ID from a URL.
+// Anything that is not an 11-character id is dropped: the downloader
+// interpolates this value into a shell command.
 func extractVideoID(url string) string {
-	// Handle various YouTube URL formats
-	// https://www.youtube.com/watch?v=VIDEO_ID
-	// https://youtu.be/VIDEO_ID
-	// https://youtube.com/watch?v=VIDEO_ID
-
-	if strings.Contains(url, "youtube.com/watch") {
+	var id string
+	switch {
+	case strings.Contains(url, "youtube.com/watch"):
 		parts := strings.Split(url, "v=")
 		if len(parts) > 1 {
-			id := parts[1]
-			if idx := strings.Index(id, "&"); idx != -1 {
-				id = id[:idx]
-			}
-			return id
+			id = cutVideoIDTail(parts[1])
 		}
-	}
-
-	if strings.Contains(url, "youtu.be/") {
+	case strings.Contains(url, "youtu.be/"):
 		parts := strings.Split(url, "youtu.be/")
 		if len(parts) > 1 {
-			id := parts[1]
-			if idx := strings.Index(id, "?"); idx != -1 {
-				id = id[:idx]
-			}
-			return id
+			id = cutVideoIDTail(parts[1])
 		}
 	}
+	if !ytfeed.ValidYouTubeID(id) {
+		return ""
+	}
+	return id
+}
 
-	return ""
+// cutVideoIDTail keeps the id and drops query, fragment and extra path.
+func cutVideoIDTail(id string) string {
+	for _, sep := range []string{"&", "?", "#", "/"} {
+		if i := strings.Index(id, sep); i != -1 {
+			id = id[:i]
+		}
+	}
+	return id
 }
 
 // extractTitleFromOutput tries to extract video title from vot-cli output

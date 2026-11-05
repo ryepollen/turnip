@@ -492,11 +492,24 @@ func (r *AppleResolver) FetchChapters(ctx context.Context, url string) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// appleEpisodeIDFromURL is a cheap id extraction for dedup keys (no network)
+// appleEpisodeIDFromURL is a cheap id extraction for dedup keys (no network).
+// The episode id becomes part of a filename, so only decimal track ids pass.
 func appleEpisodeIDFromURL(rawURL string) string {
 	_, episodeID, err := parseAppleURL(rawURL)
-	if err != nil || episodeID == "" {
+	if err != nil || !numericID(episodeID) {
 		return ""
 	}
 	return "ap_" + episodeID
+}
+
+func numericID(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }

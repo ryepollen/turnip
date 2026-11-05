@@ -162,6 +162,15 @@ func (s *Server) Run(ctx context.Context, port int) {
 	log.Printf("[WARN] http server terminated, %s", err)
 }
 
+// adminAuth is the basic-auth gate shared by /config and the YouTube admin routes.
+// Both comparisons always run; && would return early and leak a timing difference.
+func (s *Server) adminAuth() func(http.Handler) http.Handler {
+	return rest.BasicAuth(func(user, passwd string) bool {
+		return (subtle.ConstantTimeCompare([]byte(s.AdminPasswd), []byte(passwd)) +
+			subtle.ConstantTimeCompare([]byte("admin"), []byte(user))) == 2
+	})
+}
+
 // loadTemplates loads templates with custom functions
 func (s *Server) loadTemplates() {
 	funcMap := template.FuncMap{
@@ -201,6 +210,7 @@ func (s *Server) router() http.Handler {
 
 	router.Group().Route(func(rcfg *routegroup.Bundle) {
 		rcfg.Use(timeout(60 * time.Second))
+		rcfg.Use(s.adminAuth())
 		rcfg.HandleFunc("GET /config", func(w http.ResponseWriter, _ *http.Request) { rest.RenderJSON(w, s.Conf) })
 	})
 
@@ -221,10 +231,7 @@ func (s *Server) router() http.Handler {
 
 	router.Mount("/yt").Route(func(r *routegroup.Bundle) {
 		r.Use(timeout(60 * time.Second))
-		auth := rest.BasicAuth(func(user, passwd string) bool {
-			return (subtle.ConstantTimeCompare([]byte(s.AdminPasswd), []byte(passwd)) +
-				subtle.ConstantTimeCompare([]byte("admin"), []byte(user))) == 2
-		})
+		auth := s.adminAuth()
 
 		l := logger.New(logger.Log(log.Default()), logger.Prefix("[INFO]"), logger.IPfn(logger.AnonymizeIP))
 		r.Use(l.Handler)

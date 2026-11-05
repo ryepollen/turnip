@@ -76,7 +76,9 @@ func TestProcessDigestEndToEnd(t *testing.T) {
 	assert.NotEmpty(t, res.NotionPageURL)
 
 	// local canonical digest written
-	meta, body, err := readNoteFile(svc.digestMDPath("design"))
+	digestPath, err := svc.digestMDPath("design")
+	require.NoError(t, err)
+	meta, body, err := readNoteFile(digestPath)
 	require.NoError(t, err)
 	assert.Equal(t, "digest", meta.Source)
 	assert.Contains(t, body, "СВОДНЫЙ КОНСПЕКТ")
@@ -148,7 +150,9 @@ func TestProcessDigestSmartSelection(t *testing.T) {
 	assert.NotEmpty(t, res.NotionPageURL)
 
 	// local digest written under the slug
-	meta, body, err := readNoteFile(svc.digestMDPath("нефтедобыча-и-переработка"))
+	digestPath, err := svc.digestMDPath("нефтедобыча-и-переработка")
+	require.NoError(t, err)
+	meta, body, err := readNoteFile(digestPath)
 	require.NoError(t, err)
 	assert.Contains(t, body, "СВОДНЫЙ КОНСПЕКТ")
 	assert.Equal(t, []string{"нефтедобыча-и-переработка"}, meta.Tags)

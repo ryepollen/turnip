@@ -24,11 +24,11 @@ func TestDownloader_Get(t *testing.T) {
 	fname := filepath.Base(fh.Name())
 
 	d := NewDownloader("echo {{.ID}} blah {{.FileName}}.mp3 12345", lw, lw, loc, "")
-	res, err := d.Get(context.Background(), "id1", strings.TrimSuffix(fname, path.Ext(fname)))
+	res, err := d.Get(context.Background(), "dQw4w9WgXcQ", strings.TrimSuffix(fname, path.Ext(fname)))
 	require.NoError(t, err)
 	assert.Equal(t, fh.Name(), res)
 	l := lw.String()
-	assert.Equal(t, fmt.Sprintf("id1 blah %s 12345\n", fname), l)
+	assert.Equal(t, fmt.Sprintf("dQw4w9WgXcQ blah %s 12345\n", fname), l)
 	t.Log(l)
 }
 
@@ -71,7 +71,7 @@ func TestDownloader_GetSkip(t *testing.T) {
 
 	fname := filepath.Base(fh.Name())
 	d := NewDownloader("echo {{.ID}} blah {{.FileName}} 12345", lw, lw, loc, "")
-	res, err := d.Get(context.Background(), "id1", fname)
+	res, err := d.Get(context.Background(), "dQw4w9WgXcQ", fname)
 	require.EqualError(t, err, "skip")
 	assert.Equal(t, fh.Name()+".mp3", res)
 }
@@ -86,9 +86,25 @@ func TestDownloader_GetFailed(t *testing.T) {
 	fname := filepath.Base(fh.Name())
 
 	d := NewDownloader("echo {{.ID}} blah {{.FileName}}.mp3 12345", lw, lw, loc, "")
-	res, err := d.Get(context.Background(), "id1", strings.TrimSuffix(fname, path.Ext(fname)))
+	res, err := d.Get(context.Background(), "dQw4w9WgXcQ", strings.TrimSuffix(fname, path.Ext(fname)))
 	require.EqualError(t, err, "skip")
 	assert.Equal(t, fh.Name(), res)
+}
+
+func TestDownloader_GetRejectsInjection(t *testing.T) {
+	loc := t.TempDir()
+	d := NewDownloader("echo {{.ID}} {{.FileName}}", bytes.NewBuffer(nil), bytes.NewBuffer(nil), loc, "")
+
+	_, err := d.Get(context.Background(), "$(echo)", "stem")
+	require.ErrorContains(t, err, "invalid youtube id")
+
+	_, err = d.Get(context.Background(), "dQw4w9WgXcQ", "a;touch pwned")
+	require.ErrorIs(t, err, ErrSkip)
+	_, statErr := os.Stat(filepath.Join(loc, "pwned"))
+	assert.True(t, os.IsNotExist(statErr), "a semicolon in the filename must not start a new command")
+
+	_, err = d.Get(context.Background(), "dQw4w9WgXcQ", "../outside")
+	require.ErrorContains(t, err, "invalid download filename")
 }
 
 func TestIsCookieError(t *testing.T) {
@@ -125,6 +141,7 @@ func TestParseFlatPlaylistIDs(t *testing.T) {
 			[]string{"aaaaaaaaaaa", "bbbbbbbbbbb"}},
 		{"stray non-11-char lines skipped", "short\naaaaaaaaaaa\nway_too_long_id_here\n  bbbbbbbbbbb  \n",
 			[]string{"aaaaaaaaaaa", "bbbbbbbbbbb"}},
+		{"shell metacharacters skipped", "aaaaaaaaaa$\naaaaaaaaaaa\n", []string{"aaaaaaaaaaa"}},
 		{"surrounding blank lines", "\n\naaaaaaaaaaa\n\n", []string{"aaaaaaaaaaa"}},
 	}
 	for _, tt := range tests {
@@ -153,6 +170,8 @@ func TestParseFlatPlaylistItems(t *testing.T) {
 		{"dedup keeps first title", "aaaaaaaaaaa\tFirst\naaaaaaaaaaa\tSecond\n",
 			[]PlaylistItem{{ID: "aaaaaaaaaaa", Title: "First"}}, ""},
 		{"bad id lines skipped", "short\tx\naaaaaaaaaaa\tOK\n",
+			[]PlaylistItem{{ID: "aaaaaaaaaaa", Title: "OK"}}, ""},
+		{"shell metacharacters skipped", "aaaaaaaaaa$\tnope\naaaaaaaaaaa\tOK\n",
 			[]PlaylistItem{{ID: "aaaaaaaaaaa", Title: "OK"}}, ""},
 		{"CRLF trimmed", "aaaaaaaaaaa\tTitle\r\n",
 			[]PlaylistItem{{ID: "aaaaaaaaaaa", Title: "Title"}}, ""},

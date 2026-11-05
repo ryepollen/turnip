@@ -113,7 +113,7 @@ func main() {
 	telegramNotif, err := proc.NewTelegramClient(opts.TelegramToken, opts.TelegramServer, opts.TelegramTimeout,
 		&duration.Service{}, &proc.TelegramSenderImpl{})
 	if err != nil {
-		log.Fatalf("[ERROR] failed to initialize telegram client %s, %v", opts.TelegramToken, err)
+		log.Fatalf("[ERROR] failed to initialize telegram client: %v", err)
 	}
 
 	p := &proc.Processor{Conf: conf, Store: procStore, TelegramNotif: telegramNotif, TwitterNotif: makeTwitter(opts)}

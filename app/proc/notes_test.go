@@ -110,6 +110,8 @@ func TestNoteSourceID(t *testing.T) {
 		{"short link", "https://youtu.be/dQw4w9WgXcQ?t=10", "dQw4w9WgXcQ", "youtube"},
 		{"mobile", "https://m.youtube.com/watch?v=dQw4w9WgXcQ&list=x", "dQw4w9WgXcQ", "youtube"},
 		{"article", "https://example.com/some-post", "", "article"},
+		{"shell in short link", "https://youtu.be/x;id", "", "article"},
+		{"dotdot in short link", "https://youtu.be/../../tmp/x", "", "article"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -127,6 +129,15 @@ func TestNoteSourceID(t *testing.T) {
 	id1, _ := noteSourceID("https://example.com/some-post")
 	id2, _ := noteSourceID("https://example.com/some-post")
 	assert.Equal(t, id1, id2)
+}
+
+func TestProcessRejectsPathEscape(t *testing.T) {
+	dir := t.TempDir()
+	svc := &NotesService{MDLocation: dir}
+	_, err := svc.process(context.Background(), ytstore.NotesJobRecord{SourceID: "../../outside", Level: "md"})
+	require.ErrorContains(t, err, "bad source id")
+	_, statErr := os.Stat(filepath.Join(filepath.Dir(dir), "outside.md"))
+	assert.True(t, os.IsNotExist(statErr))
 }
 
 func TestNoteMetaProcessed(t *testing.T) {

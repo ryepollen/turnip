@@ -105,6 +105,36 @@ func (d *Downloader) ytdlpArgs(args ...string) []string {
 	return result
 }
 
+// ValidYouTubeID reports whether id is an 11-character YouTube video id.
+// The alphabet is the check: ids are interpolated into a shell command.
+func ValidYouTubeID(id string) bool {
+	if len(id) != 11 {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// safeFileStem reports whether name can be a single file under the download
+// directory. Slashes and ".." would escape that directory even after quoting.
+func safeFileStem(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	return !strings.ContainsAny(name, "/\\\x00") && !strings.Contains(name, "..")
+}
+
+// shellQuote wraps s in POSIX single quotes so it is one shell word.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // Get downloads a video from youtube and extracts audio.
 // yt-dlp --extract-audio --audio-format=mp3 --audio-quality=0 -f m4a/bestaudio "https://www.youtube.com/watch?v={{.ID}}" --no-progress -o {{.Filename}}
 // On cookie errors, retries without cookies as a fallback.
@@ -118,6 +148,12 @@ func (d *Downloader) Get(ctx context.Context, id, fname string) (file string, er
 }
 
 func (d *Downloader) get(ctx context.Context, id, fname string, useCookies bool) (file string, err error) {
+	if !ValidYouTubeID(id) {
+		return "", fmt.Errorf("invalid youtube id %q", id)
+	}
+	if !safeFileStem(fname) {
+		return "", fmt.Errorf("invalid download filename %q", fname)
+	}
 	if err := os.MkdirAll(d.destination, 0o750); err != nil {
 		return "", fmt.Errorf("failed to create directory %s: %w", d.destination, err)
 	}
@@ -127,7 +163,7 @@ func (d *Downloader) get(ctx context.Context, id, fname string, useCookies bool)
 		FileName string
 	}{
 		ID:       id,
-		FileName: fname,
+		FileName: shellQuote(fname),
 	}
 	b1 := bytes.Buffer{}
 	if err := template.Must(template.New("youtube-dl").Parse(d.ytTemplate)).Execute(&b1, tmplParams); err != nil { // nolint
@@ -314,7 +350,7 @@ func parseFlatPlaylistItems(raw string) (items []PlaylistItem, playlistTitle str
 		if plTitle = strings.TrimSpace(plTitle); playlistTitle == "" && plTitle != "" && plTitle != "NA" {
 			playlistTitle = plTitle
 		}
-		if len(id) != 11 || seen[id] {
+		if !ValidYouTubeID(id) || seen[id] {
 			continue
 		}
 		seen[id] = true
@@ -333,7 +369,7 @@ func parseFlatPlaylistIDs(raw string) []string {
 	var ids []string
 	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
 		id := strings.TrimSpace(line)
-		if len(id) == 11 && !seen[id] {
+		if ValidYouTubeID(id) && !seen[id] {
 			seen[id] = true
 			ids = append(ids, id)
 		}

@@ -95,9 +95,13 @@ func (n *NotesService) collectDigestSources(tag string) (newOnes, included []dig
 	return newOnes, included, nil
 }
 
-// digestMDPath is the local canonical copy of a tag's digest
-func (n *NotesService) digestMDPath(tag string) string {
-	return filepath.Join(n.MDLocation, digestsDirName, tag+".md")
+// digestMDPath is the local canonical copy of a tag's digest.
+// The tag is one path segment: a topic like "../x" must not leave MDLocation.
+func (n *NotesService) digestMDPath(tag string) (string, error) {
+	if !safeNoteID(tag) {
+		return "", fmt.Errorf("bad digest tag")
+	}
+	return filepath.Join(n.MDLocation, digestsDirName, tag+".md"), nil
 }
 
 // ExistingDigestURL returns the Notion page URL of the current digest for tag
@@ -121,6 +125,10 @@ func (n *NotesService) processDigest(ctx context.Context, job ytstore.NotesJobRe
 	}
 	topic := normalizeTag(job.URL)
 	tag := slugifyTopic(topic)
+	mdPath, err := n.digestMDPath(tag)
+	if err != nil {
+		return NotesResult{}, err
+	}
 	title := "Дайджест: " + topic
 
 	newOnes, included, err := n.collectDigestSources(tag)
@@ -139,7 +147,7 @@ func (n *NotesService) processDigest(ctx context.Context, job ytstore.NotesJobRe
 	}
 	if len(newOnes) == 0 {
 		return NotesResult{
-			MDPath:        n.digestMDPath(tag),
+			MDPath:        mdPath,
 			NotionPageURL: n.Notion.ExistingDigestURL(tag),
 			Title:         title,
 			Reused:        true,
@@ -148,7 +156,7 @@ func (n *NotesService) processDigest(ctx context.Context, job ytstore.NotesJobRe
 
 	// previous digest text rides along for the incremental rebuild
 	var parts []string
-	if _, prevBody, perr := readNoteFile(n.digestMDPath(tag)); perr == nil && prevBody != "" {
+	if _, prevBody, perr := readNoteFile(mdPath); perr == nil && prevBody != "" {
 		parts = append(parts, "### Предыдущая версия конспекта\n\n"+prevBody)
 	}
 
@@ -168,7 +176,6 @@ func (n *NotesService) processDigest(ctx context.Context, job ytstore.NotesJobRe
 	}
 
 	// local canonical copy first: if Notion fails, the work is not lost
-	mdPath := n.digestMDPath(tag)
 	meta := NoteMeta{
 		Title:  title,
 		Source: "digest",

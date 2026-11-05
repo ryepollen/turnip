@@ -223,4 +223,8 @@ func TestNoteSourceIDPodcast(t *testing.T) {
 	id, source := noteSourceID("https://podcasts.apple.com/us/podcast/x/id99?i=555")
 	assert.Equal(t, "ap_555", id)
 	assert.Equal(t, "podcast", source)
+
+	id, source = noteSourceID("https://podcasts.apple.com/us/podcast/x/id99?i=../../tmp/x")
+	assert.Equal(t, "article", source)
+	assert.Len(t, id, 16)
 }

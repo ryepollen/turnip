@@ -310,13 +310,21 @@ func (n *NotesService) EnqueueURL(rawURL, level string, priority int) error {
 	})
 }
 
+// safeNoteID reports whether id can be a single filename under MDLocation.
+func safeNoteID(id string) bool {
+	if id == "" || id == "." || id == ".." {
+		return false
+	}
+	return !strings.ContainsAny(id, "/\\\x00") && !strings.Contains(id, "..")
+}
+
 // Delete removes an L1 transcript file by source id. sourceID is validated to
 // stay inside MDLocation (no path traversal). Missing file is not an error.
 func (n *NotesService) Delete(sourceID string) error {
 	if n == nil {
 		return fmt.Errorf("конспекты не настроены")
 	}
-	if sourceID == "" || strings.ContainsAny(sourceID, `/\`) || strings.Contains(sourceID, "..") {
+	if !safeNoteID(sourceID) {
 		return fmt.Errorf("bad source id")
 	}
 	path := filepath.Join(n.MDLocation, sourceID+".md")
@@ -331,7 +339,7 @@ func (n *NotesService) Delete(sourceID string) error {
 // network: lets dedup markers show "конспект готов" so a re-sent playlist skips
 // notes work that a previous run already finished.
 func (n *NotesService) HasNotes(sourceID string) bool {
-	if n == nil || sourceID == "" || strings.ContainsAny(sourceID, `/\`) || strings.Contains(sourceID, "..") {
+	if n == nil || !safeNoteID(sourceID) {
 		return false
 	}
 	_, err := os.Stat(filepath.Join(n.MDLocation, sourceID+".md"))
@@ -590,6 +598,9 @@ func (n *NotesService) process(ctx context.Context, job ytstore.NotesJobRecord) 
 		return n.External(ctx, job)
 	}
 
+	if !safeNoteID(job.SourceID) {
+		return NotesResult{}, fmt.Errorf("bad source id")
+	}
 	mdPath := filepath.Join(n.MDLocation, job.SourceID+".md")
 
 	meta, body, reused, err := n.ensureL1(ctx, job, mdPath)
@@ -941,6 +952,9 @@ func (n *NotesService) podcastAudioFor(ctx context.Context, job ytstore.NotesJob
 		if fi, statErr := os.Stat(job.ReuseAudio); statErr == nil && fi.Size() > 0 {
 			return job.ReuseAudio, noop, nil
 		}
+	}
+	if !safeNoteID(job.SourceID) {
+		return "", noop, fmt.Errorf("bad source id")
 	}
 	n.progress(job, "⬇️ скачиваю аудио")
 	dest := filepath.Join(n.MDLocation, "tmp", job.SourceID+".mp3")

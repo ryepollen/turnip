@@ -372,6 +372,7 @@ func TestServer_configCtrl(t *testing.T) {
 	s := Server{
 		Version:       "1.0",
 		TemplLocation: "../webapp/templates/*",
+		AdminPasswd:   "123456",
 		Store:         store,
 		cache:         lcw.NewNopCache[[]byte](),
 		Conf: config.Conf{
@@ -393,7 +394,15 @@ func TestServer_configCtrl(t *testing.T) {
 	ts := httptest.NewServer(s.router())
 	defer ts.Close()
 
-	resp, err := ts.Client().Get(ts.URL + "/config")
+	open, err := ts.Client().Get(ts.URL + "/config")
+	require.NoError(t, err)
+	defer open.Body.Close() // nolint
+	assert.Equal(t, http.StatusUnauthorized, open.StatusCode)
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/config", nil)
+	require.NoError(t, err)
+	req.SetBasicAuth("admin", "123456")
+	resp, err := ts.Client().Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close() // nolint
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
