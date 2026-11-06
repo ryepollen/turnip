@@ -53,10 +53,15 @@ func (p *Service) refreshCatalog(known map[string]bool, notify func(string)) {
 		if notify == nil {
 			continue
 		}
-		parts := fmt.Sprintf("%d частей", w.Parts)
-		if w.Seasons > 0 {
-			parts = fmt.Sprintf("%d частей · %d сезон(ов)", w.Parts, w.Seasons)
+		parts := "1 part"
+		if w.Parts != 1 {
+			parts = fmt.Sprintf("%d parts", w.Parts)
 		}
-		notify(fmt.Sprintf("📚 новая работа в библиотеке: «%s» (%s, %s)\nАктивировать: /library", w.Title, w.Category, parts))
+		if w.Seasons == 1 {
+			parts += " · 1 season"
+		} else if w.Seasons > 1 {
+			parts += fmt.Sprintf(" · %d seasons", w.Seasons)
+		}
+		notify(fmt.Sprintf("📚 New work in the library: «%s» (%s, %s)\nOn air: /library", w.Title, w.Category, parts))
 	}
 }

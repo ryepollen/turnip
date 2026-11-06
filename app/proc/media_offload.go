@@ -98,7 +98,7 @@ func (t *TelegramBot) checkR2Usage(ctx context.Context) {
 	}
 
 	t.NotifyOwner(fmt.Sprintf(
-		"⚠️ R2 занято %.1f GB из 10 бесплатных.\nПрослушанное можно удалить: /list → 🗑 — файл в R2 удалится вместе с записью, ссылка останется в /history.",
+		"⚠️ R2 is %.1f GB of the free 10 GB.\nRemove a listened item with /list → 🗑 (the R2 file goes, the link stays in /history).\nStop removes the on-air library work from R2.",
 		float64(total)/(1<<30)))
 }
 

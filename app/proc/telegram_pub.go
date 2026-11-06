@@ -21,7 +21,7 @@ func (t *TelegramBot) handleFeeds(m *tb.Message) {
 		return
 	}
 	if t.Pub == nil {
-		_, _ = t.Bot.Send(m.Chat, "Издательская платформа не настроена (R2_* + FEED_SECRET)")
+		_, _ = t.Bot.Send(m.Chat, "Publishing is not configured (R2_* + FEED_SECRET)")
 		return
 	}
 	cats, err := t.Pub.Categories()
@@ -30,12 +30,12 @@ func (t *TelegramBot) handleFeeds(m *tb.Message) {
 		return
 	}
 	if len(cats) == 0 {
-		_, _ = t.Bot.Send(m.Chat, "Пока нет ни одной ленты. Выбери работу: /library")
+		_, _ = t.Bot.Send(m.Chat, "No feeds yet. Pick a work: /library")
 		return
 	}
 
 	var b strings.Builder
-	b.WriteString("📻 Ленты платформы:\n\n")
+	b.WriteString("📻 Feeds:\n\n")
 	for _, cat := range cats {
 		eps, lerr := t.Pub.EpisodeList(cat)
 		if lerr != nil {
@@ -47,24 +47,24 @@ func (t *TelegramBot) handleFeeds(m *tb.Message) {
 			totalSec += ep.DurationSec
 		}
 		if active == "" {
-			fmt.Fprintf(&b, "• %s — пусто\n%s\n\n", cat, t.Pub.FeedURL(cat))
+			fmt.Fprintf(&b, "• %s — empty\n%s\n\n", cat, t.Pub.FeedURL(cat))
 			continue
 		}
-		fmt.Fprintf(&b, "• %s — ▶ «%s» (%d эп., %s)\n%s\n\n", cat, active, len(eps),
+		fmt.Fprintf(&b, "• %s — ▶ «%s» (%d parts, %s)\n%s\n\n", cat, active, len(eps),
 			t.formatDuration(time.Duration(totalSec)*time.Second), t.Pub.FeedURL(cat))
 	}
-	b.WriteString("Выбрать/сменить работу: /library")
+	b.WriteString("Switch a work: /library")
 	_, _ = t.Bot.Send(m.Chat, b.String())
 }
 
 // handleLibrary shows the library catalog (all works, sleeping + active) with a
-// per-work ▶ Слушать / ⏹ Снять button and a category filter.
+// per-work ▶ On air / ⏹ Stop button and a category filter.
 func (t *TelegramBot) handleLibrary(m *tb.Message) {
 	if !t.isAuthorized(m.Sender) {
 		return
 	}
 	if t.Pub == nil {
-		_, _ = t.Bot.Send(m.Chat, "Издательская платформа не настроена (R2_* + FEED_SECRET)")
+		_, _ = t.Bot.Send(m.Chat, "Publishing is not configured (R2_* + FEED_SECRET)")
 		return
 	}
 	filter := "all"
@@ -115,11 +115,11 @@ func (t *TelegramBot) buildLibraryList(filter string, page int) (string, *tb.Rep
 		return "", nil, err
 	}
 	if len(all) == 0 {
-		return "Библиотека пуста. Положи работу в originals/{категория}/{работа}/", &tb.ReplyMarkup{}, nil
+		return "Library is empty. Put a work in originals/{category}/{work}/", &tb.ReplyMarkup{}, nil
 	}
 	works := filterCatalog(all, filter)
 	if len(works) == 0 {
-		return fmt.Sprintf("В «%s» нет работ", filter), &tb.ReplyMarkup{}, nil
+		return fmt.Sprintf("Nothing in %s", filter), &tb.ReplyMarkup{}, nil
 	}
 
 	total := len(works)
@@ -135,31 +135,23 @@ func (t *TelegramBot) buildLibraryList(filter string, page int) (string, *tb.Rep
 		end = total
 	}
 
+	miss := t.missingOnPage(works[start:end])
+
 	var b strings.Builder
-	fmt.Fprintf(&b, "🗂 Библиотека — %s (%d) стр %d/%d:\n\n", filter, total, page+1, pages)
+	fmt.Fprintf(&b, "Library — %s (%d) · %d/%d\n\n", filter, total, page+1, pages)
 	for i := start; i < end; i++ {
 		w := works[i]
-		mark := "· "
-		if w.Active {
-			mark = "▶ "
-		}
-		meta := fmt.Sprintf("%d частей", w.Parts)
-		if w.Seasons > 0 {
-			meta += fmt.Sprintf(" · %d сез.", w.Seasons)
-		}
-		if !w.Finite {
-			meta += " · ∞"
-		}
-		fmt.Fprintf(&b, "%s%d. %s [%s] — %s\n", mark, i+1, w.Title, w.Category, meta)
+		n, known := miss[w.Category+"\x00"+w.Slug]
+		fmt.Fprintf(&b, "%d. %s\n%s\n", i+1, w.Title, libraryWorkMeta(w, n, known))
 	}
-	b.WriteString("\n▶ активна в ленте · тап «Слушать» = залить в R2 и в ленту (вытолкнет прежнюю)")
+	b.WriteString("\n▶ on air · On air publishes this work into the category feed and replaces the one there now.")
 
 	markup := &tb.ReplyMarkup{}
 
 	// category filter tabs (only when more than one category exists)
 	cats := catalogCategories(all)
 	if len(cats) > 1 {
-		row := []tb.InlineButton{*markup.Data("Все", "lib_pg", "f=all|p=0").Inline()}
+		row := []tb.InlineButton{*markup.Data("All", "lib_pg", "f=all|p=0").Inline()}
 		for _, c := range cats {
 			row = append(row, *markup.Data(c, "lib_pg", fmt.Sprintf("f=%s|p=0", c)).Inline())
 		}
@@ -181,15 +173,79 @@ func (t *TelegramBot) buildLibraryList(filter string, page int) (string, *tb.Rep
 
 	for i := start; i < end; i++ {
 		w := works[i]
-		if w.Active {
-			btn := markup.Data(fmt.Sprintf("⏹ Снять %d", i+1), "lib_act", fmt.Sprintf("a=off|i=%d|f=%s|p=%d", i, filter, page))
-			markup.InlineKeyboard = append(markup.InlineKeyboard, []tb.InlineButton{*btn.Inline()})
+		n, known := miss[w.Category+"\x00"+w.Slug]
+		label, action, show := libraryActionLabel(w, i+1, n, known)
+		if !show {
 			continue
 		}
-		btn := markup.Data(fmt.Sprintf("▶ Слушать %d", i+1), "lib_act", fmt.Sprintf("a=on|i=%d|f=%s|p=%d", i, filter, page))
+		btn := markup.Data(label, "lib_act", fmt.Sprintf("a=%s|i=%d|f=%s|p=%d", action, i, filter, page))
 		markup.InlineKeyboard = append(markup.InlineKeyboard, []tb.InlineButton{*btn.Inline()})
 	}
 	return b.String(), markup, nil
+}
+
+// libraryWorkMeta matches the PWA row: category, parts, seasons, and
+// on air / on the shelf / N missing. missingKnown is false when the R2
+// check failed; the row then omits the shelf badge and still offers On air.
+func libraryWorkMeta(w publisher.CatWork, missing int, missingKnown bool) string {
+	parts := "1 part"
+	if w.Parts != 1 {
+		parts = fmt.Sprintf("%d parts", w.Parts)
+	}
+	meta := w.Category + " · " + parts
+	if w.Seasons == 1 {
+		meta += " · 1 season"
+	} else if w.Seasons > 1 {
+		meta += fmt.Sprintf(" · %d seasons", w.Seasons)
+	}
+	if !w.Finite {
+		meta += " · streaming"
+	}
+	switch {
+	case w.Active:
+		meta += " · ▶ on air"
+	case missingKnown && missing > 0:
+		meta += fmt.Sprintf(" · ⚠ %d missing", missing)
+	case missingKnown:
+		meta += " · on the shelf"
+	}
+	return meta
+}
+
+// libraryActionLabel is the inline button for one row. A work with missing
+// parts gets no On air button: Telegram cannot disable a button, and publishing
+// it would fail on the first absent object.
+func libraryActionLabel(w publisher.CatWork, index, missing int, missingKnown bool) (label, action string, show bool) {
+	if w.Active {
+		return fmt.Sprintf("⏹ Stop %d", index), "off", true
+	}
+	if missingKnown && missing > 0 {
+		return "", "", false
+	}
+	return fmt.Sprintf("▶ On air %d", index), "on", true
+}
+
+// missingOnPage counts parts not yet in R2 for the rows on this page.
+// A slow or failed check leaves that work out of the map: the row stays
+// actionable instead of pretending the parts are missing.
+func (t *TelegramBot) missingOnPage(works []publisher.CatWork) map[string]int {
+	out := map[string]int{}
+	if t == nil || t.Pub == nil || len(works) == 0 {
+		return out
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	for _, w := range works {
+		if ctx.Err() != nil {
+			break
+		}
+		n, err := t.Pub.MissingParts(ctx, w.Category, w.Slug)
+		if err != nil {
+			continue
+		}
+		out[w.Category+"\x00"+w.Slug] = n
+	}
+	return out
 }
 
 // handleLibPageCallback flips catalog pages / switches the category filter
@@ -201,7 +257,7 @@ func (t *TelegramBot) handleLibPageCallback(c *tb.Callback) {
 	kv := parseKVCallback(c.Data)
 	msg, markup, err := t.buildLibraryList(kv["f"], atoiOr(kv["p"], 0))
 	if err != nil {
-		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Ошибка"})
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Error"})
 		return
 	}
 	_, _ = t.Bot.Edit(c.Message, msg, markup)
@@ -222,12 +278,12 @@ func (t *TelegramBot) handleLibActionCallback(c *tb.Callback) {
 
 	all, err := t.Pub.Catalog()
 	if err != nil {
-		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Ошибка каталога"})
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Catalog error"})
 		return
 	}
 	works := filterCatalog(all, filter)
 	if idx < 0 || idx >= len(works) {
-		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Список устарел, открой /library заново"})
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "List is stale, open /library again"})
 		return
 	}
 	w := works[idx]
@@ -235,13 +291,19 @@ func (t *TelegramBot) handleLibActionCallback(c *tb.Callback) {
 	switch kv["a"] {
 	case "on":
 		if w.Active {
-			_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Уже в ленте"})
+			_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Already on air"})
 			return
 		}
-		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "⏳ Ставлю в ленту…"})
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Checking…"})
+		n, known := t.missingOnPage([]publisher.CatWork{w})[w.Category+"\x00"+w.Slug]
+		if known && n > 0 {
+			_, _ = t.Bot.Send(c.Message.Chat, fmt.Sprintf("⚠ «%s»: %d parts missing", w.Title, n))
+			t.refreshLibraryView(c, filter, page)
+			return
+		}
 		go t.runActivate(c, w, filter, page)
 	case "off":
-		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "⏹ Снимаю…"})
+		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Stopping…"})
 		go t.runDeactivate(c, w, filter, page)
 	default:
 		_ = t.Bot.Respond(c, &tb.CallbackResponse{Text: "Bad action"})
@@ -256,7 +318,7 @@ func (t *TelegramBot) runActivate(c *tb.Callback, w publisher.CatWork, filter st
 		t.enqueueActivation(c, publisher.OpActivate, w, filter, page)
 		return
 	}
-	status, _ := t.Bot.Send(c.Message.Chat, fmt.Sprintf("⏳ Активирую «%s» (0/%d)…", w.Title, w.Parts))
+	status, _ := t.Bot.Send(c.Message.Chat, fmt.Sprintf("Publishing «%s»… 0/%d", w.Title, w.Parts))
 	step := w.Parts / 10
 	if step < 1 {
 		step = 1
@@ -266,7 +328,7 @@ func (t *TelegramBot) runActivate(c *tb.Callback, w publisher.CatWork, filter st
 			return
 		}
 		if done == total || done%step == 0 {
-			_, _ = t.Bot.Edit(status, fmt.Sprintf("⏳ «%s»: залито %d/%d…", w.Title, done, total))
+			_, _ = t.Bot.Edit(status, fmt.Sprintf("Publishing «%s»… %d/%d", w.Title, done, total))
 		}
 	}
 
@@ -280,7 +342,7 @@ func (t *TelegramBot) runActivate(c *tb.Callback, w publisher.CatWork, filter st
 		return
 	}
 	if status != nil {
-		_, _ = t.Bot.Edit(status, fmt.Sprintf("▶ «%s» в ленте (%d частей)\nЛента: %s", w.Title, w.Parts, t.Pub.FeedURL(w.Category)))
+		_, _ = t.Bot.Edit(status, fmt.Sprintf("▶ «%s» is on air (%d parts)\nFeed: %s", w.Title, w.Parts, t.Pub.FeedURL(w.Category)))
 	}
 	t.refreshLibraryView(c, filter, page)
 }
@@ -293,7 +355,7 @@ func (t *TelegramBot) runDeactivate(c *tb.Callback, w publisher.CatWork, filter 
 		t.enqueueActivation(c, publisher.OpDeactivate, w, filter, page)
 		return
 	}
-	status, _ := t.Bot.Send(c.Message.Chat, fmt.Sprintf("⏹ Снимаю «%s»…", w.Title))
+	status, _ := t.Bot.Send(c.Message.Chat, fmt.Sprintf("⏹ Stopping «%s»…", w.Title))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 	if err := t.Pub.Deactivate(ctx, w.Category); err != nil {
@@ -303,7 +365,7 @@ func (t *TelegramBot) runDeactivate(c *tb.Callback, w publisher.CatWork, filter 
 		return
 	}
 	if status != nil {
-		_, _ = t.Bot.Edit(status, fmt.Sprintf("⏹ «%s» снята — лента «%s» пуста", w.Title, w.Category))
+		_, _ = t.Bot.Edit(status, fmt.Sprintf("⏹ «%s» is off the %s feed", w.Title, w.Category))
 	}
 	t.refreshLibraryView(c, filter, page)
 }
@@ -322,9 +384,9 @@ func (t *TelegramBot) refreshLibraryView(c *tb.Callback, filter string, page int
 // finalize watcher edits (via ActivationDone/Failed) once the work is uploaded
 // and the feed regenerated. No upload happens in-process here.
 func (t *TelegramBot) enqueueActivation(c *tb.Callback, op publisher.ActivationOp, w publisher.CatWork, filter string, page int) {
-	wait := fmt.Sprintf("⏳ «%s» → в очередь на заливку (жду мак)…", w.Title)
+	wait := fmt.Sprintf("Queued «%s» for upload…", w.Title)
 	if op == publisher.OpDeactivate {
-		wait = fmt.Sprintf("⏹ Снимаю «%s»… (жду мак)", w.Title)
+		wait = fmt.Sprintf("Stopping «%s»… (waiting for the Mac)", w.Title)
 	}
 	status, _ := t.Bot.Send(c.Message.Chat, wait)
 	req := publisher.ActivationRequest{Op: op, Category: w.Category, Work: w.Slug}
@@ -334,7 +396,7 @@ func (t *TelegramBot) enqueueActivation(c *tb.Callback, op publisher.ActivationO
 	}
 	if _, err := t.ActQueue.Enqueue(req); err != nil {
 		if status != nil {
-			_, _ = t.Bot.Edit(status, fmt.Sprintf("⚠️ не поставил «%s» в очередь: %v", w.Title, err))
+			_, _ = t.Bot.Edit(status, fmt.Sprintf("Could not queue «%s»: %v", w.Title, err))
 		}
 		return
 	}
@@ -359,10 +421,10 @@ func (t *TelegramBot) ActivationDone(req publisher.ActivationRequest, feedURL st
 		return
 	}
 	if req.Op == publisher.OpDeactivate {
-		_, _ = t.Bot.Edit(msg, fmt.Sprintf("⏹ «%s» снята — лента «%s» пуста", req.Work, req.Category))
+		_, _ = t.Bot.Edit(msg, fmt.Sprintf("⏹ «%s» is off the %s feed", req.Work, req.Category))
 		return
 	}
-	_, _ = t.Bot.Edit(msg, fmt.Sprintf("▶ «%s» в ленте (%d частей)\nЛента: %s", req.Work, episodes, feedURL))
+	_, _ = t.Bot.Edit(msg, fmt.Sprintf("▶ «%s» is on air (%d parts)\nFeed: %s", req.Work, episodes, feedURL))
 }
 
 // ActivationFailed implements publisher.FinalizeNotifier for the error path.

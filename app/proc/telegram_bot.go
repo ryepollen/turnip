@@ -649,9 +649,9 @@ Podcasts, статья) — появится меню: слушать, пере�
 /read <url> — статья в структурный MD (читалка)
 /read — список статей (скачать / открыть / удалить)
 
-Платформа (Hörbuch / Seminar):
-/feeds — ленты с URL подписки
-/library [тип] — библиотека работ: ▶ Слушать / ⏹ Снять
+Platform (Hörbuch / Seminar):
+/feeds — category feeds and subscribe URLs
+/library [category] — works: ▶ On air / ⏹ Stop
 
 Прочее:
 /history — вечный лог всех отправлений

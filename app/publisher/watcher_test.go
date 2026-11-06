@@ -50,7 +50,8 @@ func TestRefreshCatalogSeasonsInNotice(t *testing.T) {
 	var notices []string
 	svc.refreshCatalog(known, func(s string) { notices = append(notices, s) })
 	require.Len(t, notices, 1)
-	assert.Contains(t, notices[0], "сезон")
+	assert.Contains(t, notices[0], "season")
+	assert.Contains(t, notices[0], "New work in the library")
 }
 
 func TestRefreshCatalogNoOriginalsDir(t *testing.T) {

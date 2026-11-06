@@ -33,7 +33,7 @@ const (
 
 // ActivationRequest is the trigger handed VM→Mac. In variant A the audio archive
 // lives in iCloud (reachable only from the Mac), while the bot runs on the VM; so
-// when the owner taps ▶ Слушать / ⏹ Снять the bot drops a request here and the
+// when the owner taps ▶ On air / ⏹ Stop the bot drops a request here and the
 // Mac agent, which can read iCloud and write R2, fulfils it. The payload stays
 // deliberately minimal: the VM re-derives the episode list from local part names
 // + deterministic R2 keys, so the channel never carries audio metadata — only
