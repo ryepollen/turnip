@@ -52,6 +52,9 @@ type TelegramBot struct {
 	// Mac agent to upload to R2, and the VM finalize watcher edits the status back.
 	// nil = the bot activates in-process (uploads from the VM itself).
 	ActQueue *publisher.ActivationQueue
+	// Sponsors writes «реклама» chapter lines into a YouTube episode description.
+	// Nil uses the public SponsorBlock API. The mp3 download is unchanged.
+	Sponsors *SponsorClient
 
 	r2WarnMu   sync.Mutex
 	lastR2Warn time.Time
@@ -972,10 +975,23 @@ func (t *TelegramBot) processVideoItem(ctx context.Context, videoID string) (*vi
 		}
 	}
 
-	// 5. Create Entry
+	// 5. Sponsor spans become description chapters. A miss or a network
+	// error leaves the description as YouTube sent it; the file is not cut
+	// here (that stays on the yt-dlp downloader).
+	sctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	lines, serr := t.sponsorChapters(sctx, videoID)
+	cancel()
+	if serr != nil {
+		log.Printf("[WARN] sponsor chapters for %s: %v", videoID, serr)
+	} else if lines != "" {
+		log.Printf("[INFO] sponsor chapters for %s", videoID)
+	}
+	info.Description = applySponsorChapters(info.Description, lines, serr)
+
+	// 6. Create Entry
 	entry := t.createEntry(info, file, duration)
 
-	// 6. Store in BoltDB
+	// 7. Store in BoltDB
 	created, err := t.Store.Save(entry)
 	if err != nil {
 		return nil, fmt.Errorf("failed to save: %w", err)
@@ -984,13 +1000,13 @@ func (t *TelegramBot) processVideoItem(ctx context.Context, videoID string) (*vi
 		return &videoResult{VideoID: videoID, Title: info.Title, Skipped: true}, nil
 	}
 
-	// 7. Mark as processed
+	// 8. Mark as processed
 	if err := t.Store.SetProcessed(entry); err != nil {
 		log.Printf("[WARN] failed to mark as processed: %v", err)
 	}
 	t.offloadMedia(entry)
 
-	// 8. Append to permanent history log (survives /del and auto-cleanup)
+	// 9. Append to permanent history log (survives /del and auto-cleanup)
 	dur := time.Duration(duration) * time.Second
 	t.logHistory(ytstore.HistoryEntry{
 		URL:      videoURL,
