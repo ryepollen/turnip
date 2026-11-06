@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	log "github.com/go-pkgz/lgr"
 	"github.com/go-pkgz/rest"
+	"github.com/umputun/feed-master/app/proc"
 )
 
 // POST /wegweiser/api/submit — the link drop for everything outside Telegram
@@ -32,7 +32,7 @@ func (s *Server) appSubmitCtrl(w http.ResponseWriter, r *http.Request) {
 		rest.SendErrorJSON(w, r, log.Default(), http.StatusBadRequest, err, "bad request")
 		return
 	}
-	link := cleanTrackingParams(strings.TrimSpace(body.URL))
+	link := proc.CleanTrackingParams(strings.TrimSpace(body.URL))
 	if link == "" {
 		rest.SendErrorJSON(w, r, log.Default(), http.StatusBadRequest, fmt.Errorf("url required"), "bad request")
 		return
@@ -105,37 +105,4 @@ func corsMini(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-// trackingParams are query keys that identify the sharer, not the content —
-// they make every pasted link unique and poison dedup (#82's seed).
-var trackingParams = map[string]bool{
-	"si": true, "feature": true, "pp": true,
-	"utm_source": true, "utm_medium": true, "utm_campaign": true,
-	"utm_term": true, "utm_content": true, "utm_id": true,
-	"fbclid": true, "gclid": true, "igshid": true, "mc_cid": true, "mc_eid": true,
-	"ref": true, "ref_src": true, "cmpid": true,
-}
-
-// cleanTrackingParams strips sharer-tracking query keys, keeping everything
-// that addresses content (v, t, list, i, …). Unparseable input is returned
-// as-is — the pipelines will complain about it in their own words.
-func cleanTrackingParams(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil || u.Scheme == "" {
-		return rawURL
-	}
-	q := u.Query()
-	changed := false
-	for k := range q {
-		if trackingParams[strings.ToLower(k)] {
-			q.Del(k)
-			changed = true
-		}
-	}
-	if !changed {
-		return rawURL
-	}
-	u.RawQuery = q.Encode()
-	return u.String()
 }

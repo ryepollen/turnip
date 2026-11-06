@@ -1204,8 +1204,7 @@ func (t *TelegramBot) makeFileName(videoID string) string {
 // extractURL extracts any URL from text
 func (t *TelegramBot) extractURL(text string) string {
 	re := regexp.MustCompile(`https?://[^\s<>"{}|\\^` + "`" + `\[\]]+`)
-	matches := re.FindString(text)
-	return matches
+	return CleanTrackingParams(re.FindString(text))
 }
 
 // parsePageSize extracts optional page size from command text

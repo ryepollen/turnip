@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/umputun/feed-master/app/proc"
 )
 
 func TestCleanTrackingParams(t *testing.T) {
@@ -24,7 +25,7 @@ func TestCleanTrackingParams(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, cleanTrackingParams(tt.in))
+			assert.Equal(t, tt.want, proc.CleanTrackingParams(tt.in))
 		})
 	}
 }
