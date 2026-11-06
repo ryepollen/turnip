@@ -11,8 +11,8 @@ services:
         hostname: bgutil-provider
         restart: always
         init: true
-        ports:
-            - "4416:4416"
+        # Reachable only on the compose network, as bgutil-provider:4416.
+        # A published host port would expose the PO-token helper.
         logging:
             driver: json-file
             options:
