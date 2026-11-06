@@ -7,9 +7,12 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"text/template"
 	"time"
 
@@ -71,6 +74,9 @@ func main() {
 	}
 	setupLog(opts.Dbg)
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	var conf = &config.Conf{}
 	if opts.Feed != "" { // single feed (no config) mode
 		conf = config.SingleFeed(opts.Feed, opts.TelegramChannel, opts.UpdateInterval)
@@ -97,7 +103,7 @@ func main() {
 			log.Fatalf("[ERROR] --activate requires --activate-category")
 		}
 		progress := func(done, total int) { fmt.Printf("\ruploading %d/%d…", done, total) }
-		if actErr := pubSvc.Activate(context.Background(), opts.ActivateCategory, opts.Activate, progress); actErr != nil {
+		if actErr := pubSvc.Activate(ctx, opts.ActivateCategory, opts.Activate, progress); actErr != nil {
 			log.Fatalf("[ERROR] activate failed: %v", actErr)
 		}
 		fmt.Printf("\nactivated: %s\nfeed:      %s\n", opts.Activate, pubSvc.FeedURL(opts.ActivateCategory))
@@ -108,6 +114,19 @@ func main() {
 	if err != nil {
 		log.Fatalf("[ERROR] can't open db %s, %v", opts.DB, err)
 	}
+	defer func() {
+		if cerr := db.Close(); cerr != nil {
+			log.Printf("[WARN] failed to close bolt db: %v", cerr)
+		}
+	}()
+	var wg sync.WaitGroup
+	track := func(fn func()) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fn()
+		}()
+	}
 	procStore := &proc.BoltDB{DB: db}
 
 	telegramNotif, err := proc.NewTelegramClient(opts.TelegramToken, opts.TelegramServer, opts.TelegramTimeout,
@@ -117,11 +136,11 @@ func main() {
 	}
 
 	p := &proc.Processor{Conf: conf, Store: procStore, TelegramNotif: telegramNotif, TwitterNotif: makeTwitter(opts)}
-	go func() {
-		if err := p.Do(context.Background()); err != nil {
+	track(func() {
+		if err := p.Do(ctx); err != nil && ctx.Err() == nil {
 			log.Printf("[ERROR] processor failed: %v", err)
 		}
-	}()
+	})
 
 	var ytSvc youtube.Service
 	var ytStore *store.BoltDB
@@ -173,15 +192,15 @@ func main() {
 
 		// Only run youtube processor if we have channels configured
 		if len(conf.YouTube.Channels) > 0 {
-			go func() {
+			track(func() {
 				if conf.YouTube.DisableUpdates {
 					log.Printf("[INFO] youtube updates are disabled")
 					return
 				}
-				if err := ytSvc.Do(context.TODO()); err != nil {
+				if err := ytSvc.Do(ctx); err != nil && ctx.Err() == nil {
 					log.Printf("[ERROR] youtube processor failed: %v", err)
 				}
-			}()
+			})
 		}
 	}
 
@@ -266,27 +285,27 @@ func main() {
 			deleteFeedEntry = tgBot.DeleteEntry // Mini App reuses the /del path
 			submitAudio = tgBot.QueueAudio      // web/userscript 🎵 (#78)
 			finalizeNotifier = tgBot            // variant A: watcher edits the bot's status message
-			go func() {
-				if err := tgBot.Run(context.Background()); err != nil {
+			track(func() {
+				if err := tgBot.Run(ctx); err != nil && ctx.Err() == nil {
 					log.Printf("[ERROR] telegram bot failed: %v", err)
 				}
-			}()
+			})
 		}
 		if notesSvc != nil {
-			go notesSvc.Run(context.Background())
+			track(func() { notesSvc.Run(ctx) })
 		}
 	}
 
 	// audio watcher: new files in originals/{category}/ get normalized,
 	// uploaded to R2 and added to the category feed automatically
 	if pubSvc != nil {
-		go pubSvc.Watch(context.Background(), time.Minute, ownerNotify)
+		track(func() { pubSvc.Watch(ctx, time.Minute, ownerNotify) })
 		// variant A finalize watcher: the Mac agent uploads a work's parts to R2
 		// and marks the request done; the VM applies state+feed locally. Only wired
 		// when remote_activation is on (actQueue non-nil) — the same flag flips the
 		// bot from in-process upload to enqueue, so the two halves turn on together.
 		if actQueue != nil {
-			go pubSvc.WatchDone(context.Background(), actQueue, 5*time.Second, finalizeNotifier)
+			track(func() { pubSvc.WatchDone(ctx, actQueue, 5*time.Second, finalizeNotifier) })
 		}
 	}
 
@@ -321,7 +340,25 @@ func main() {
 		fm := publisher.FeedMedia{Store: pubSvc.R2, Secret: pubSvc.Secret}
 		server.MediaRedirectBase = fm.PublicBase()
 	}
-	server.Run(context.Background(), opts.Port)
+	server.Run(ctx, opts.Port)
+	stop()
+	waitWorkers(&wg, 8*time.Second)
+}
+
+// waitWorkers gives loops a chance to notice the cancelled context before the
+// database closes. Docker's stop grace is 10s; this stays inside it.
+func waitWorkers(wg *sync.WaitGroup, timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		log.Printf("[INFO] workers stopped")
+	case <-time.After(timeout):
+		log.Printf("[WARN] workers still running after %s, closing the database", timeout)
+	}
 }
 
 // makePublisher builds the R2-backed publishing service when R2_* env and

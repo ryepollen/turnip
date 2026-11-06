@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -144,25 +145,12 @@ func (s *Server) Run(ctx context.Context, port int) {
 		return
 	}
 
-	serverLock := sync.Mutex{}
-	go func() {
-		<-ctx.Done()
-		serverLock.Lock()
-		defer serverLock.Unlock()
-		if s.httpServer != nil {
-			if clsErr := s.httpServer.Close(); clsErr != nil {
-				log.Printf("[ERROR] failed to close proxy http server, %v", clsErr)
-			}
-		}
-	}()
-
 	if s.TemplLocation == "" {
 		s.TemplLocation = "webapp/templates/*"
 	}
 	log.Printf("[DEBUG] loading templates from %s", s.TemplLocation)
 	s.loadTemplates()
 
-	serverLock.Lock()
 	s.httpServer = &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
 		Handler:           s.router(),
@@ -170,9 +158,33 @@ func (s *Server) Run(ctx context.Context, port int) {
 		WriteTimeout:      s.Conf.System.HTTPResponseTimeout,
 		IdleTimeout:       30 * time.Second,
 	}
-	serverLock.Unlock()
+	go func() {
+		<-ctx.Done()
+		s.stopHTTP()
+	}()
+
 	err = s.httpServer.ListenAndServe()
-	log.Printf("[WARN] http server terminated, %s", err)
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Printf("[WARN] http server terminated, %s", err)
+		return
+	}
+	log.Printf("[INFO] http server stopped")
+}
+
+// stopHTTP finishes in-flight requests, then drops the listener. Shutdown uses
+// its own timeout: the parent context is already cancelled when this runs.
+func (s *Server) stopHTTP() {
+	if s.httpServer == nil {
+		return
+	}
+	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.httpServer.Shutdown(shutCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Printf("[WARN] http shutdown: %v", err)
+		if clsErr := s.httpServer.Close(); clsErr != nil {
+			log.Printf("[ERROR] failed to close http server, %v", clsErr)
+		}
+	}
 }
 
 // adminAuth is the basic-auth gate shared by /config and the YouTube admin routes.

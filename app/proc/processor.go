@@ -62,7 +62,12 @@ func (p *Processor) processFeeds(ctx context.Context) {
 	}
 	swg.Wait()
 	log.Printf("[DEBUG] refresh completed")
-	time.Sleep(p.Conf.System.UpdateInterval)
+	timer := time.NewTimer(p.Conf.System.UpdateInterval)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+	case <-timer.C:
+	}
 }
 
 func (p *Processor) processFeed(name, url, telegramChannel string, maximum int, filter config.Filter) {
