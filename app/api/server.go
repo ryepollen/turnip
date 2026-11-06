@@ -85,6 +85,19 @@ type Server struct {
 	libOpsMu sync.Mutex
 	libOps   map[string]libOpStatus
 
+	// r2Usage is the bucket total for the pulse. Listing every object on each
+	// poll made /summary take seconds, so the number is reused for a few minutes.
+	r2UsageMu sync.Mutex
+	r2UsageAt time.Time
+	r2UsageN  int64
+	r2UsageOK bool
+
+	// libMiss caches how many parts of each work are absent from R2.
+	libMissMu sync.Mutex
+	libMissAt time.Time
+	libMiss   map[string]int
+	libMissOK bool
+
 	httpServer *http.Server
 	cache      lcw.LoadingCache[[]byte]
 	templates  *template.Template
@@ -303,6 +316,9 @@ func (s *Server) getPodFeedCtrl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data, err := os.ReadFile(filepath.Join(s.PodFeedsDir, category+".xml")) //nolint:gosec // category sanitized above
+	if os.IsNotExist(err) && s.Pub != nil {
+		data, err = s.Pub.EmptyFeedXML(category)
+	}
 	if err != nil {
 		http.NotFound(w, r)
 		return

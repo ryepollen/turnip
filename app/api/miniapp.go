@@ -532,6 +532,7 @@ type appLibWork struct {
 	Finite   bool   `json:"finite"`
 	Active   bool   `json:"active"`
 	FeedURL  string `json:"feed_url"`
+	Missing  int    `json:"missing"` // parts not yet in R2; 0 = ready for On air
 }
 
 // GET /wegweiser/api/library — the whole library catalog: every work, dormant and
@@ -554,6 +555,7 @@ func (s *Server) appLibraryCtrl(w http.ResponseWriter, r *http.Request) {
 		if cats, cerr := s.Pub.CategoryDirs(); cerr == nil && cats != nil {
 			out.Categories = cats
 		}
+		missing := s.libraryMissing(r.Context(), works)
 		for _, cw := range works {
 			out.Works = append(out.Works, appLibWork{
 				Category: cw.Category,
@@ -564,6 +566,7 @@ func (s *Server) appLibraryCtrl(w http.ResponseWriter, r *http.Request) {
 				Finite:   cw.Finite,
 				Active:   cw.Active,
 				FeedURL:  s.Pub.FeedURL(cw.Category),
+				Missing:  missing[cw.Category+"\x00"+cw.Slug],
 			})
 		}
 	}

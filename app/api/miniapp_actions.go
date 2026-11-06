@@ -207,6 +207,51 @@ func (s *Server) libOpFinish(category string, err error) {
 		st.Error = err.Error()
 	}
 	s.libOps[category] = st
+	s.forgetLibraryMissing()
+}
+
+// libraryMissing reports parts not yet in R2, keyed by category+"\x00"+slug.
+// The scan is cached: the Library tab reloads while an operation is in flight.
+func (s *Server) libraryMissing(ctx context.Context, works []publisher.CatWork) map[string]int {
+	out := map[string]int{}
+	if s.Pub == nil || s.Pub.R2 == nil || len(works) == 0 {
+		return out
+	}
+	s.libMissMu.Lock()
+	if s.libMissOK && time.Since(s.libMissAt) < r2UsageCacheTTL && s.libMiss != nil {
+		cached := s.libMiss
+		s.libMissMu.Unlock()
+		return cached
+	}
+	s.libMissMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	for _, w := range works {
+		if ctx.Err() != nil {
+			return out
+		}
+		n, err := s.Pub.MissingParts(ctx, w.Category, w.Slug)
+		if err != nil {
+			continue
+		}
+		out[w.Category+"\x00"+w.Slug] = n
+	}
+	if ctx.Err() != nil {
+		return out
+	}
+	s.libMissMu.Lock()
+	s.libMiss = out
+	s.libMissAt = time.Now()
+	s.libMissOK = true
+	s.libMissMu.Unlock()
+	return out
+}
+
+func (s *Server) forgetLibraryMissing() {
+	s.libMissMu.Lock()
+	s.libMissOK = false
+	s.libMissMu.Unlock()
 }
 
 // libOpsSnapshot copies the registry for the catalog response.

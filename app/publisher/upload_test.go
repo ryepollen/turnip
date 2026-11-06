@@ -131,6 +131,42 @@ func TestResidentActivateIncompleteUpload(t *testing.T) {
 	assert.Contains(t, err.Error(), "upload incomplete")
 }
 
+func TestRegisterWorkRejectsCrossCategory(t *testing.T) {
+	svc, _ := newFakeR2Service(t)
+	require.NoError(t, os.MkdirAll(svc.categoryDir("books"), 0o750))
+	require.NoError(t, os.MkdirAll(svc.categoryDir("podcasts"), 0o750))
+	require.NoError(t, svc.RegisterWork("books", "Витю видел", []string{"01 - One.mp3"}))
+
+	err := svc.RegisterWork("podcasts", "Витю видел", []string{"01 - One.mp3"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already in books")
+}
+
+func TestMissingPartsCountsAbsentObjects(t *testing.T) {
+	svc, _ := newFakeR2Service(t)
+	svc.Resident = true
+	require.NoError(t, os.MkdirAll(svc.categoryDir("books"), 0o750))
+	require.NoError(t, svc.RegisterWork("books", "Пустышка", []string{"01 - One.mp3", "02 - Two.mp3"}))
+
+	n, err := svc.MissingParts(t.Context(), "books", "Пустышка")
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+}
+
+func TestEmptyFeedXMLForKnownCategory(t *testing.T) {
+	svc, _ := newFakeR2Service(t)
+	require.NoError(t, os.MkdirAll(svc.categoryDir("courses"), 0o750))
+
+	data, err := svc.EmptyFeedXML("courses")
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "<rss")
+	assert.Contains(t, string(data), "<title>courses</title>")
+	assert.NotContains(t, string(data), "<item>")
+
+	_, err = svc.EmptyFeedXML("nope")
+	require.Error(t, err)
+}
+
 func TestRegisterWorkNeverTruncates(t *testing.T) {
 	svc, _ := newFakeR2Service(t)
 	writeWork(t, svc, "books", "Настоящая", "01 - One.mp3") // a real file with bytes

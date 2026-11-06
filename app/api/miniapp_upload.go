@@ -100,5 +100,6 @@ func (s *Server) appLibraryUploadCommitCtrl(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	log.Printf("[INFO] mini app ingested «%s» (%s): %d parts now in library", body.Work, body.Category, len(body.Files))
+	s.forgetLibraryMissing()
 	rest.RenderJSON(w, rest.JSON{"status": "ok", "work": body.Work, "category": body.Category, "parts": len(body.Files)})
 }

@@ -82,6 +82,26 @@ func (p *Service) CategoryDirs() ([]string, error) {
 	return cats, nil
 }
 
+// otherCategory reports another category that already has this work folder.
+// The folder name is the identity: the same slug in books and podcasts would
+// publish one file into two feeds.
+func (p *Service) otherCategory(category, work string) (string, error) {
+	cats, err := p.CategoryDirs()
+	if err != nil {
+		return "", err
+	}
+	for _, c := range cats {
+		if c == category {
+			continue
+		}
+		fi, statErr := os.Stat(filepath.Join(p.categoryDir(c), work))
+		if statErr == nil && fi.IsDir() {
+			return c, nil
+		}
+	}
+	return "", nil
+}
+
 // PresignUploadPart signs a direct browser→R2 PUT for one part of a work.
 func (p *Service) PresignUploadPart(ctx context.Context, category, work, name string) (string, error) {
 	if err := p.checkUploadTarget(category, work); err != nil {
@@ -130,6 +150,11 @@ func (p *Service) RegisterWork(category, work string, names []string) error {
 		if err := checkUploadName(n); err != nil {
 			return err
 		}
+	}
+	if other, err := p.otherCategory(category, work); err != nil {
+		return err
+	} else if other != "" {
+		return fmt.Errorf("work %q is already in %s", work, other)
 	}
 	dir := filepath.Join(p.categoryDir(category), work)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

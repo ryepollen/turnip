@@ -28,17 +28,33 @@ func diskUsage(path string) (used, total int64) {
 	return total - free, total
 }
 
-// r2Usage sums the bucket's object sizes (one LIST per call; the pulse loads
-// once per app open, and ops are far inside the free tier).
+// r2UsageCacheTTL is how long the pulse may show a stale bucket total.
+const r2UsageCacheTTL = 5 * time.Minute
+
+// r2Usage sums the bucket's object sizes. The full list is cached: the pulse
+// polls often, and a recursive listing is what made /summary take seconds.
 func (s *Server) r2Usage() int64 {
 	if s.Pub == nil || s.Pub.R2 == nil {
 		return 0
 	}
+	s.r2UsageMu.Lock()
+	if s.r2UsageOK && time.Since(s.r2UsageAt) < r2UsageCacheTTL {
+		n := s.r2UsageN
+		s.r2UsageMu.Unlock()
+		return n
+	}
+	s.r2UsageMu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	size, err := s.Pub.R2.TotalSize(ctx)
 	if err != nil {
 		return 0
 	}
+	s.r2UsageMu.Lock()
+	s.r2UsageN = size
+	s.r2UsageAt = time.Now()
+	s.r2UsageOK = true
+	s.r2UsageMu.Unlock()
 	return size
 }

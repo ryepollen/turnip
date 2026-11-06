@@ -364,7 +364,47 @@ func (p *Service) gatherForActivate(category, work string) ([]partRef, error) {
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("work %q has no audio parts", work)
 	}
+	if other, err := p.otherCategory(category, work); err != nil {
+		return nil, err
+	} else if other != "" {
+		return nil, fmt.Errorf("work %q is already in %s", work, other)
+	}
 	return parts, nil
+}
+
+// MissingParts counts audio parts that are not yet in R2 (size 0). Resident
+// works keep 0-byte stubs on disk, so the local file size is not the check.
+// A nil R2 store means the bytes are local and nothing is "missing".
+func (p *Service) MissingParts(ctx context.Context, category, work string) (int, error) {
+	parts, err := p.gatherParts(category, work)
+	if err != nil || len(parts) == 0 || p.R2 == nil {
+		return 0, err
+	}
+	missing := 0
+	for _, pt := range parts {
+		size, serr := p.R2.Size(ctx, p.partKey(category, work, pt))
+		if serr != nil {
+			return 0, serr
+		}
+		if size == 0 {
+			missing++
+		}
+	}
+	return missing, nil
+}
+
+// EmptyFeedXML is a valid RSS document for a category that has never been
+// activated. Players get an empty channel instead of 404.
+func (p *Service) EmptyFeedXML(category string) ([]byte, error) {
+	if err := validCategory(category); err != nil {
+		return nil, err
+	}
+	dir := p.categoryDir(category)
+	fi, err := os.Stat(dir)
+	if err != nil || !fi.IsDir() {
+		return nil, fmt.Errorf("unknown category %q", category)
+	}
+	return BuildFeedXML(LoadFeedConfig(dir, category), nil)
 }
 
 // partKey is the deterministic R2 key for a part: a/{secret}/{category}/{work}/{rel}.

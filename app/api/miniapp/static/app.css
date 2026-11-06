@@ -204,3 +204,21 @@ select.btn { appearance: auto; }
 .err { color: var(--stamp); }
 .loading { padding: 24px 14px; text-align: center; color: var(--ink-soft); }
 a.link { color: var(--accent); text-decoration: underline; }
+
+.confirm {
+  position: fixed;
+  inset: 0;
+  background: rgba(28, 26, 23, .35);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 16px;
+  z-index: 20;
+}
+.confirm-card {
+  width: min(420px, 100%);
+  background: var(--paper);
+  border: 1px solid var(--line-strong);
+  padding: 14px;
+  margin-bottom: env(safe-area-inset-bottom);
+}
