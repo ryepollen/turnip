@@ -30,6 +30,7 @@ func (s *Server) miniappWebRoutes(router *routegroup.Bundle) {
 		r.Use(timeout(60 * time.Second))
 		r.HandleFunc("GET /wegweiser", s.miniappShellCtrl)
 		r.HandleFunc("GET /wegweiser/", s.miniappShellCtrl)
+		r.HandleFunc("GET /wegweiser/sw.js", s.miniappSWCtrl)
 		fileServer := http.StripPrefix("/wegweiser/static/", http.FileServer(http.FS(static)))
 		r.Handle("GET /wegweiser/static/{file...}", cacheControl(fileServer, "public, max-age=3600"))
 	})
@@ -43,5 +44,18 @@ func (s *Server) miniappShellCtrl(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(b)
+}
+
+// GET /wegweiser/sw.js — the worker has to live here, not under /static/,
+// because its default scope is the directory of the script.
+func (s *Server) miniappSWCtrl(w http.ResponseWriter, r *http.Request) {
+	b, err := miniappFS.ReadFile("miniapp/static/sw.js")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write(b)
 }

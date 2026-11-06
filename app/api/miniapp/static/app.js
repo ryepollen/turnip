@@ -320,7 +320,7 @@ function renderRefsGroups(data) {
         ? '<span data-act="open" data-url="' + esc(m.notion_url) + '" class="link">' + label + '</span>'
         : label;
       const quote = m.quote ? '<div class="meta">«' + esc(m.quote) + '»</div>' : '';
-      return '<div class="meta">' + inner + '</div>' + quote;
+      return '<div class="meta ref-ep">' + inner + '</div>' + quote;
     }).join('');
     return row('<div class="head"><div class="title">' + esc(g.name) + '</div></div>' + mentions);
   }).join('');
@@ -796,6 +796,9 @@ function init() {
   buildTabs();
   loadPulse();
   loadTab();
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/wegweiser/sw.js').catch(function () {});
+  }
 }
 
 init();

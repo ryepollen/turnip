@@ -375,7 +375,7 @@ type appRefGroup struct {
 }
 
 // GET /wegweiser/api/refs — without ?type= the type summary with counts; with
-// ?type=книга the references of that type grouped by name (one book, N episodes).
+// ?type=книга the references of that type, one row per folded name.
 func (s *Server) appRefsCtrl(w http.ResponseWriter, r *http.Request) {
 	typeFilter := r.URL.Query().Get("type")
 	if s.AppStore == nil {
@@ -420,17 +420,27 @@ func (s *Server) appRefsCtrl(w http.ResponseWriter, r *http.Request) {
 		rest.SendErrorJSON(w, r, log.Default(), http.StatusInternalServerError, err, "failed to list references")
 		return
 	}
-	// group by name, preserving first-seen order
+	// Group by a folded name so "Экономист" and "экономист", or a dash and a
+	// space, are one row. The label is the spelling that occurs most often.
+	type refBucket struct {
+		labels   map[string]int
+		mentions []appRefMention
+	}
 	order := []string{}
-	byName := map[string]*appRefGroup{}
+	byKey := map[string]*refBucket{}
 	for _, ref := range refs {
-		g, ok := byName[ref.Name]
-		if !ok {
-			g = &appRefGroup{Name: ref.Name, Type: ref.Type}
-			byName[ref.Name] = g
-			order = append(order, ref.Name)
+		key := canonRefName(ref.Name)
+		if key == "" {
+			continue
 		}
-		g.Mentions = append(g.Mentions, appRefMention{
+		b, ok := byKey[key]
+		if !ok {
+			b = &refBucket{labels: map[string]int{}}
+			byKey[key] = b
+			order = append(order, key)
+		}
+		b.labels[strings.TrimSpace(ref.Name)]++
+		b.mentions = append(b.mentions, appRefMention{
 			EpisodeTitle: ref.EpisodeTitle,
 			EpisodeURL:   ref.EpisodeURL,
 			NotionURL:    ref.NotionURL,
@@ -438,13 +448,92 @@ func (s *Server) appRefsCtrl(w http.ResponseWriter, r *http.Request) {
 			Quote:        ref.Quote,
 		})
 	}
+	sort.Strings(order)
 	groups := make([]appRefGroup, 0, len(order))
-	for _, name := range order {
-		groups = append(groups, *byName[name])
+	for _, key := range order {
+		b := byKey[key]
+		groups = append(groups, appRefGroup{
+			Name:     preferRefLabel(b.labels),
+			Type:     typeFilter,
+			Mentions: b.mentions,
+		})
 	}
 	rest.RenderJSON(w, struct {
 		Groups []appRefGroup `json:"groups"`
 	}{Groups: groups})
+}
+
+// canonRefName folds a reference title so spelling variants share one row.
+func canonRefName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	name = strings.ReplaceAll(name, "ё", "е")
+	var b strings.Builder
+	space := true
+	for _, r := range name {
+		switch r {
+		case '«', '»', '"', '\'', '“', '”', '„', '`', '.', ',', ':', ';', '!', '?', '(', ')', '[', ']':
+			continue
+		case '–', '—', '-', '‐':
+			r = ' '
+		}
+		if r == ' ' || r == '\t' || r == '\n' {
+			if space {
+				continue
+			}
+			b.WriteByte(' ')
+			space = true
+			continue
+		}
+		b.WriteRune(r)
+		space = false
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// preferRefLabel picks the spelling to show. More mentions win; a tie goes to
+// the form with less punctuation, then the one that uses capitals.
+func preferRefLabel(counts map[string]int) string {
+	best := ""
+	bestN := -1
+	for name, n := range counts {
+		if n > bestN || (n == bestN && refLabelLess(name, best)) {
+			best = name
+			bestN = n
+		}
+	}
+	return strings.TrimSpace(best)
+}
+
+func refLabelLess(a, b string) bool {
+	pa, pb := refPunct(a), refPunct(b)
+	if pa != pb {
+		return pa < pb
+	}
+	au, bu := hasUpper(a), hasUpper(b)
+	if au != bu {
+		return au
+	}
+	return a < b
+}
+
+func refPunct(name string) int {
+	n := 0
+	for _, r := range name {
+		switch r {
+		case '«', '»', '"', '\'', '“', '”', '„', '`', '–', '—', '-', '‐', '.', ',', ':', ';', '!', '?', '(', ')', '[', ']':
+			n++
+		}
+	}
+	return n
+}
+
+func hasUpper(name string) bool {
+	for _, r := range name {
+		if r >= 'A' && r <= 'Z' || r >= 'А' && r <= 'Я' || r == 'Ё' {
+			return true
+		}
+	}
+	return false
 }
 
 // appJob is one recent notes-queue job for the status tab

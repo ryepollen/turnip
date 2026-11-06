@@ -205,6 +205,24 @@ func TestMiniAppRefs(t *testing.T) {
 	assert.Len(t, byType.Groups[0].Mentions, 2)
 }
 
+func TestCanonRefName(t *testing.T) {
+	assert.Equal(t, "экономист", canonRefName("Экономист"))
+	assert.Equal(t, "экономист", canonRefName("  экономист "))
+	assert.Equal(t, "our dollar your problem", canonRefName("Our dollar – your problem"))
+	assert.Equal(t, "our dollar your problem", canonRefName("Our Dollar Your Problem"))
+	assert.Equal(t, "чат gpt", canonRefName("чат-GPT"))
+	assert.Equal(t, "", canonRefName("  «» "))
+}
+
+func TestPreferRefLabel(t *testing.T) {
+	assert.Equal(t, "Экономист", preferRefLabel(map[string]int{"экономист": 1, "Экономист": 1}))
+	assert.Equal(t, "экономист", preferRefLabel(map[string]int{"экономист": 3, "Экономист": 1}))
+	assert.Equal(t, "Our Dollar Your Problem", preferRefLabel(map[string]int{
+		"Our dollar – your problem": 1,
+		"Our Dollar Your Problem":   1,
+	}))
+}
+
 // fakeJobStore is an in-memory NotesJobStore so the API layer can exercise
 // EnqueueURL / SetPaused without bolt
 type fakeJobStore struct {

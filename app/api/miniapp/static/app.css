@@ -119,6 +119,12 @@ body {
   align-items: center;
 }
 .row .meta .sep { color: var(--line-strong); }
+.row .meta.ref-ep {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .badge {
   display: inline-block;
   padding: 0 5px;
