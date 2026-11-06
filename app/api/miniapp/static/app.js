@@ -106,7 +106,7 @@ function toast(text) {
     el = document.createElement('div');
     el.id = 'toast';
     el.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);' +
-      'background:#1c1a17;color:#efe9dd;padding:8px 14px;border-radius:3px;font-size:12px;' +
+      'background:#e8e4dc;color:#1e2226;padding:8px 14px;border-radius:0;font:500 12.5px Inter,sans-serif;' +
       'z-index:99;max-width:90%;text-align:center';
     document.body.appendChild(el);
   }
