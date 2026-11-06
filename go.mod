@@ -1,6 +1,6 @@
 module github.com/umputun/feed-master
 
-go 1.25.0
+go 1.26.10
 
 require (
 	github.com/ChimeraCoder/anaconda v2.0.0+incompatible
@@ -24,7 +24,8 @@ require (
 	github.com/tcolgate/mp3 v0.0.0-20170426193717-e79c5a46d300
 	github.com/wujunwei928/edge-tts-go v0.0.0-20250315123430-d4675babeb96
 	go.etcd.io/bbolt v1.4.3
-	golang.org/x/net v0.53.0
+	golang.org/x/net v0.62.0
+	golang.org/x/sys v0.49.0
 	gopkg.in/tucnak/telebot.v2 v2.5.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -63,9 +64,8 @@ require (
 	github.com/tinylib/msgp v1.6.1 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/crypto v0.51.0 // indirect
-	golang.org/x/sys v0.44.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/ini.v1 v1.67.2 // indirect
 )
